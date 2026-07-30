@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "example-project",
+  "name": "Example Project",
+  "workspaceRoot": "/absolute/path/to/example-workspace",
+  "repoRoot": "/absolute/path/to/example-workspace/repository",
+  "docsRoot": "/absolute/path/to/example-workspace/project-docs",
+  "worktreesRoot": "/absolute/path/to/example-workspace/worktrees",
+  "htmlTaskRoot": "/absolute/path/to/example-workspace/project-docs/tasks/active",
+  "defaultBaseBranch": "main",
+  "worktreeNamePrefix": "ExampleProject",
+  "planRelativeDir": "Docs/plans/active",
+  "projectFacts": [
+    "AGENTS.md",
+    "README.md"
+  ],
+  "planTemplate": "",
+  "skills": {
+    "discussion": [
+      "discussion-only",
+      "ask-first"
+    ],
+    "plan": [
+      "clear-html"
+    ],
+    "execution": [
+      "workmission",
+      "change-guard"
+    ],
+    "acceptanceFix": [
+      "change-guard"
+    ],
+    "review": [
+      "code-review"
+    ]
+  },
+  "verification": {
+    "sources": [
+      "Application Log",
+      "Test Report"
+    ],
+    "policy": "Run available automated checks and clearly separate them from manual verification."
+  },
+  "capabilities": {
+    "initializeSubmodules": false
+  },
+  "port": 4318
+}

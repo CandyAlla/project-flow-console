@@ -1,0 +1,1729 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Project Flow · 需求工作流控制台</title>
+  <style>
+    :root {
+      --ink: #17202a;
+      --muted: #627080;
+      --line: #d8dee6;
+      --line-strong: #bdc7d4;
+      --surface: #ffffff;
+      --soft: #f5f7fa;
+      --accent: #275dad;
+      --accent-strong: #194887;
+      --accent-soft: #eaf1fb;
+      --ok: #216e4e;
+      --ok-soft: #eaf7f1;
+      --warning: #8a4b08;
+      --warning-soft: #fff5df;
+      --danger: #a2333e;
+      --danger-soft: #fff0f1;
+      --code: #f1f4f8;
+      --max: 1480px;
+      --reading: 76ch;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { background: var(--soft); color: var(--ink); }
+
+    body {
+      min-width: 320px;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    button, input, textarea { font: inherit; }
+
+    button {
+      min-height: 42px;
+      padding: 0 17px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--ink);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    button:hover:not(:disabled) { border-color: #8f9baa; background: #f8fafc; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+
+    button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+    }
+
+    button.primary:hover:not(:disabled) { border-color: var(--accent-strong); background: var(--accent-strong); }
+    button.ghost { border-color: transparent; background: transparent; color: var(--accent); }
+    button.danger { color: var(--danger); }
+    button.small { min-height: 34px; padding-inline: 11px; font-size: .9rem; }
+
+    button:focus-visible,
+    input:focus-visible,
+    textarea:focus-visible,
+    .image-drop-zone:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid #f3b33d;
+      outline-offset: 3px;
+    }
+
+    input[type="text"],
+    input[type="url"],
+    textarea {
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--ink);
+    }
+
+    input[type="text"], input[type="url"] { min-height: 44px; padding: 9px 12px; }
+    textarea { min-height: 116px; padding: 11px 12px; resize: vertical; }
+    input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+
+    code, .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .9em;
+    }
+
+    code { padding: .12em .35em; border-radius: 4px; background: var(--code); }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .topbar, .app-shell, footer {
+      width: min(calc(100% - 32px), var(--max));
+      margin-inline: auto;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 34px 0 26px;
+    }
+
+    .eyebrow {
+      margin: 0 0 6px;
+      color: var(--accent);
+      font-size: .78rem;
+      font-weight: 800;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { line-height: 1.28; }
+    h1 { margin: 0; font-size: clamp(1.8rem, 5vw, 2.75rem); letter-spacing: -.03em; }
+    h2 { margin: 0; font-size: clamp(1.35rem, 3.5vw, 1.9rem); }
+    h3 { margin: 0; font-size: 1rem; }
+
+    .lede { max-width: 72ch; margin: 10px 0 0; color: #3f4b59; }
+
+    .prototype-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      flex: 0 0 auto;
+      padding: 7px 10px;
+      border: 1px solid #e4c184;
+      border-radius: 999px;
+      background: var(--warning-soft);
+      color: var(--warning);
+      font-size: .82rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .prototype-badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #c27818; }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: 270px 226px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+      padding: 32px 0 64px;
+    }
+
+    .task-sidebar,
+    .workflow-sidebar {
+      position: sticky;
+      top: 18px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .task-sidebar { display: grid; grid-template-rows: auto auto minmax(120px, 1fr) auto; max-height: calc(100vh - 36px); }
+
+    .task-sidebar-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 14px 14px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .task-sidebar-head strong { display: block; }
+    .task-sidebar-head span { display: block; margin-top: 2px; color: var(--muted); font-size: .76rem; }
+    .task-sidebar-head button { flex: 0 0 auto; }
+    .task-sidebar-actions { display: flex; align-items: center; gap: 4px; }
+
+    .task-filters {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 3px;
+      padding: 8px;
+      border-bottom: 1px solid var(--line);
+      background: var(--soft);
+    }
+
+    .task-filter {
+      min-width: 0;
+      min-height: 34px;
+      padding: 5px 3px;
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+      font-size: .76rem;
+    }
+
+    .task-filter.active { border-color: var(--line-strong); background: var(--surface); color: var(--ink); font-weight: 750; }
+
+    .task-list { min-height: 120px; overflow-y: auto; padding: 7px; scrollbar-width: thin; }
+    .task-empty { margin: 0; padding: 22px 12px; color: var(--muted); font-size: .84rem; text-align: center; }
+
+    .task-card {
+      display: grid;
+      width: 100%;
+      min-height: 0;
+      overflow: hidden;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+    }
+
+    .task-card + .task-card { margin-top: 3px; }
+    .task-card:hover { background: #f4f7fb; }
+    .task-card.active { border-color: #b9cceb; background: var(--accent-soft); }
+    .task-card-main {
+      display: grid;
+      gap: 6px;
+      width: 100%;
+      min-height: 0;
+      padding: 11px 12px 8px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      text-align: left;
+      white-space: normal;
+    }
+    .task-card-main:hover:not(:disabled) { border-color: transparent; background: transparent; }
+    .task-card-title { overflow: hidden; color: var(--ink); font-size: .88rem; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+    .task-card-meta, .task-card-state { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: .74rem; }
+    .task-card-state strong { color: #465568; font-size: .75rem; }
+    .task-card[data-state="running"] .task-card-state strong { color: var(--accent); }
+    .task-card[data-state="queued"] .task-card-state strong { color: var(--warning); }
+    .task-card[data-state="error"] .task-card-state strong { color: var(--danger); }
+    .task-card[data-state="done"] .task-card-state strong { color: var(--ok); }
+    .task-card[data-state="archived"] .task-card-state strong { color: #6c5c87; }
+    .task-card-actions { display: flex; justify-content: flex-end; gap: 4px; padding: 0 8px 8px; }
+    .task-card-action { min-height: 28px; padding-inline: 8px; border-color: transparent; background: transparent; color: var(--muted); font-size: .73rem; }
+    .task-card-action:hover:not(:disabled) { background: var(--surface); color: var(--ink); }
+    .task-card-action.danger { color: var(--danger); }
+    .task-sidebar-note { margin: 0; padding: 10px 14px 13px; border-top: 1px solid var(--line); color: var(--muted); font-size: .75rem; }
+
+    .sidebar-head { padding: 17px 17px 13px; border-bottom: 1px solid var(--line); }
+    .sidebar-head strong { display: block; }
+    .sidebar-head span { display: block; margin-top: 3px; color: var(--muted); font-size: .8rem; }
+    .sidebar-note { margin: 0; padding: 12px 17px 15px; border-top: 1px solid var(--line); color: var(--muted); font-size: .78rem; }
+
+    .steps {
+      display: grid;
+      min-width: 0;
+      padding: 8px;
+      scrollbar-width: thin;
+    }
+
+    .step {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      width: 100%;
+      min-height: 52px;
+      min-width: 0;
+      padding: 8px 10px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: #7b8794;
+      font-size: .88rem;
+      font-weight: 650;
+      text-align: left;
+    }
+
+    button.step:hover:not(:disabled) { border-color: transparent; background: #f4f7fb; }
+    button.step:disabled { background: transparent; opacity: .62; }
+
+    .step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      top: 38px;
+      left: 23px;
+      width: 1px;
+      height: 28px;
+      background: var(--line);
+    }
+
+    .step-number {
+      position: relative;
+      z-index: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      flex: 0 0 28px;
+      border: 1px solid var(--line-strong);
+      border-radius: 50%;
+      background: var(--surface);
+      font-size: .78rem;
+    }
+
+    .step-label { position: relative; z-index: 1; min-width: 0; }
+    .step.completed { color: var(--ok); }
+    .step.completed .step-number { border-color: var(--ok); background: var(--ok-soft); }
+    .step.completed:not(:last-child)::after { background: #8fc8ae; }
+    .step.current { background: var(--accent-soft); color: var(--accent); }
+    button.step.current:hover:not(:disabled) { background: var(--accent-soft); }
+    .step.current .step-number { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+    main { min-width: 0; }
+
+    .status-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+      color: var(--muted);
+      font-size: .9rem;
+    }
+
+    .status-text { display: flex; align-items: center; gap: 9px; }
+    .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+
+    .workspace {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .workspace-header {
+      padding: 26px clamp(20px, 4vw, 38px) 22px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .workspace-header p { max-width: var(--reading); margin: 8px 0 0; color: var(--muted); }
+
+    .workspace-body {
+      max-width: 900px;
+      padding: 28px clamp(20px, 4vw, 38px) 34px;
+    }
+
+    .section + .section { margin-top: 32px; }
+    .section > h3 { margin-bottom: 12px; }
+    .section-copy { max-width: var(--reading); margin: 7px 0 0; color: var(--muted); }
+
+    .field { display: grid; gap: 7px; }
+    .field + .field { margin-top: 18px; }
+    .field label, .field > span { font-weight: 700; }
+    .hint { color: var(--muted); font-size: .86rem; }
+
+    .feedback-images { display: grid; gap: 10px; margin-top: 4px; }
+    .feedback-file-input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+
+    .image-drop-zone {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      min-height: 78px;
+      padding: 14px 15px;
+      border: 1px dashed #9aa8b8;
+      border-radius: 7px;
+      background: #fbfcfe;
+      cursor: pointer;
+    }
+
+    .image-drop-zone:hover, .image-drop-zone.is-dragging { border-color: var(--accent); background: var(--accent-soft); }
+    .image-drop-zone > div { min-width: 0; }
+    .image-drop-zone strong, .image-drop-zone span { display: block; }
+    .image-drop-zone span { margin-top: 2px; color: var(--muted); font-size: .84rem; font-weight: 400; }
+
+    .feedback-image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
+
+    .feedback-image-card {
+      position: relative;
+      min-width: 0;
+      margin: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface);
+    }
+
+    .feedback-image-card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: var(--soft); }
+    .feedback-image-card figcaption { min-width: 0; padding: 8px 9px; }
+    .feedback-image-card figcaption span, .feedback-image-card figcaption small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .feedback-image-card figcaption span { font-size: .8rem; font-weight: 700; }
+    .feedback-image-card figcaption small { color: var(--muted); font-size: .74rem; }
+    .feedback-image-card > button { position: absolute; top: 6px; right: 6px; min-width: 30px; min-height: 30px; padding: 0; border-color: #d4a6ab; background: rgb(255 255 255 / 94%); color: var(--danger); font-size: 1.15rem; line-height: 1; }
+
+    .source-tabs, .view-tabs {
+      display: inline-flex;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+    }
+
+    .source-tabs button, .view-tabs button {
+      min-height: 36px;
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .source-tabs button.active, .view-tabs button.active {
+      border-color: var(--line-strong);
+      background: var(--surface);
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .source-panel { margin-top: 17px; }
+
+    .callout {
+      max-width: var(--reading);
+      padding: 16px 18px;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      color: #274565;
+    }
+
+    .callout.warning { border-color: #c27818; background: var(--warning-soft); color: #6c430d; }
+    .callout.ok { border-color: var(--ok); background: var(--ok-soft); color: #174d38; }
+    .callout.danger { border-color: var(--danger); background: var(--danger-soft); color: #7a2730; }
+    .callout p { margin: 0; }
+    .callout p + p { margin-top: 6px; }
+
+    .question-list { display: grid; gap: 14px; }
+
+    fieldset.question {
+      min-width: 0;
+      margin: 0;
+      padding: 17px 18px 16px;
+      border: 1px solid var(--line);
+    }
+
+    fieldset.question legend { padding: 0 7px; font-weight: 750; }
+    .question-help { margin: 0 0 10px; color: var(--muted); font-size: .88rem; }
+    .choice { display: flex; align-items: flex-start; gap: 9px; padding: 5px 0; cursor: pointer; }
+    .choice input { margin-top: 5px; }
+    .recommended { color: var(--accent); font-size: .8rem; font-weight: 750; }
+
+    .custom-answer { margin: 7px 0 3px 28px; }
+    .custom-answer label { display: block; margin-bottom: 6px; color: var(--muted); font-size: .84rem; font-weight: 700; }
+    .custom-answer textarea { min-height: 82px; }
+
+    .conversation {
+      display: grid;
+      gap: 10px;
+      max-height: 250px;
+      overflow-y: auto;
+      padding: 14px;
+      border: 1px solid var(--line);
+      background: var(--soft);
+    }
+
+    .message { max-width: 88%; padding: 10px 12px; border: 1px solid var(--line); background: var(--surface); }
+    .message.user { justify-self: end; border-color: #b9cceb; background: var(--accent-soft); }
+    .message-role { display: block; margin-bottom: 3px; color: var(--muted); font-size: .76rem; font-weight: 750; }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background: var(--line);
+    }
+
+    .summary-item { min-width: 0; padding: 16px; background: var(--surface); }
+    .summary-item span { display: block; color: var(--muted); font-size: .82rem; }
+    .summary-item strong { display: block; overflow-wrap: anywhere; margin-top: 3px; }
+
+    .logic-flow {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      gap: 10px;
+      align-items: stretch;
+      margin-top: 16px;
+    }
+
+    .logic-node { padding: 16px; border: 1px solid var(--line); background: var(--surface); }
+    .logic-node strong { display: block; }
+    .logic-node span { display: block; margin-top: 5px; color: var(--muted); font-size: .88rem; }
+    .logic-node.current { border-top: 4px solid var(--accent); }
+    .logic-arrow { align-self: center; color: var(--muted); font-weight: 800; }
+
+    .preview {
+      min-height: 240px;
+      margin-top: 16px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      background: #fbfcfe;
+    }
+
+    .preview h3 { margin-top: 20px; }
+    .preview h3:first-child { margin-top: 0; }
+    .preview ul, .preview ol { margin: 8px 0 0; padding-left: 1.25rem; }
+    .preview pre { overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+
+    .path-list { display: grid; gap: 10px; }
+    .path-row { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .path-row:last-child { border-bottom: 0; }
+    .path-row span { color: var(--muted); }
+    .path-row strong { min-width: 0; overflow-wrap: anywhere; }
+
+    .checklist { display: grid; gap: 10px; }
+    .check-row { display: flex; align-items: flex-start; gap: 11px; padding: 13px 14px; border: 1px solid var(--line); background: var(--surface); }
+    .check-row input { margin-top: 5px; }
+    .check-row strong { display: block; }
+    .check-row span { display: block; margin-top: 2px; color: var(--muted); font-size: .86rem; }
+
+    .section-heading {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    .section-heading h3 { font-size: 1.08rem; }
+    .section-kicker { margin: 0 0 2px; color: var(--accent); font-size: .74rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .time-estimate, .gate-progress { flex: 0 0 auto; color: var(--accent-strong); font-size: .88rem; }
+
+    .verification-minimum {
+      max-width: var(--reading);
+      padding: 20px;
+      border: 2px solid #9ab5dc;
+      background: #f7faff;
+    }
+
+    .minimum-steps { margin: 18px 0 0; padding-left: 1.55rem; }
+    .minimum-steps > li { padding: 0 0 18px 8px; }
+    .minimum-steps > li:last-child { padding-bottom: 0; }
+    .minimum-steps > li::marker { color: var(--accent); font-weight: 800; }
+    .minimum-step-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .minimum-steps p { margin: 6px 0 0; color: #44505e; }
+    .minimum-steps p b, .precondition b { display: inline-block; min-width: 112px; margin-right: 8px; color: var(--ink); font-size: .78rem; }
+    .evidence-ok { color: var(--ok) !important; }
+    .evidence-fail { color: var(--danger) !important; }
+
+    .log-filter-list { display: flex; flex-wrap: wrap; gap: 8px; }
+    .log-filter { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+    .log-filter code { overflow-wrap: anywhere; color: #243d60; }
+    .log-filter button { min-height: 29px; padding-inline: 8px; background: var(--surface); font-size: .76rem; }
+
+    .test-case-list { display: grid; gap: 16px; margin-top: 16px; }
+    .test-case { overflow: hidden; border: 1px solid var(--line); background: var(--surface); }
+    .test-case.required { border-left: 4px solid var(--accent); }
+    .test-case.optional { border-left: 4px solid var(--line-strong); }
+    .test-case-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 15px 16px; border-bottom: 1px solid var(--line); background: #fbfcfe; }
+    .test-case-check { display: flex; align-items: flex-start; gap: 10px; min-width: 0; cursor: pointer; }
+    .test-case-check input { flex: 0 0 auto; margin-top: 5px; }
+    .test-case-check span { min-width: 0; }
+    .test-case-check strong, .test-case-check small { display: block; }
+    .test-case-check small { margin-top: 2px; color: var(--muted); }
+    .priority { flex: 0 0 auto; padding: 3px 8px; border: 1px solid var(--line-strong); color: var(--muted); font-size: .74rem; font-weight: 800; }
+    .priority-p0 { border-color: #9ab5dc; background: var(--accent-soft); color: var(--accent-strong); }
+    .test-case-body { padding: 16px; }
+    .precondition { margin: 0 0 15px; color: #44505e; }
+    .test-case-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 22px; }
+    .test-case h4 { margin: 0 0 7px; font-size: .83rem; }
+    .test-case ol, .test-case ul { margin: 0; padding-left: 1.25rem; color: #44505e; }
+    .test-case li + li { margin-top: 5px; }
+    .test-case-grid p { margin: 0; color: #44505e; }
+    .case-evidence { display: grid; gap: 14px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .case-evidence .evidence-ok, .case-evidence .evidence-fail { padding-left: 12px; border-left: 3px solid currentColor; }
+    .case-evidence .evidence-ok li, .case-evidence .evidence-fail li { color: inherit; }
+
+    .acceptance-log-list { display: grid; gap: 12px; }
+    .acceptance-log { border: 1px solid var(--line); background: var(--surface); }
+    .acceptance-log-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: #fbfcfe; }
+    .acceptance-log-head strong, .acceptance-log-head span { display: block; }
+    .acceptance-log-head > div > span { margin-top: 2px; color: var(--muted); font-size: .8rem; }
+    .acceptance-log dl { margin: 0; }
+    .acceptance-log dl > div { display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 12px; padding: 10px 16px; }
+    .acceptance-log dl > div + div { border-top: 1px solid #edf0f4; }
+    .acceptance-log dt { color: var(--muted); font-size: .82rem; font-weight: 750; }
+    .acceptance-log dd { margin: 0; color: #44505e; }
+    .acceptance-log .log-failure dd { color: var(--danger); }
+
+    .run-list { display: grid; gap: 1px; overflow: hidden; border: 1px solid var(--line); background: var(--line); }
+    .run-step { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 11px; align-items: center; padding: 14px; background: var(--surface); }
+    .run-mark { display: inline-flex; align-items: center; justify-content: center; width: 25px; height: 25px; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font-size: .75rem; font-weight: 750; }
+    .run-step.running .run-mark { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+    .run-step.done .run-mark { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
+    .run-step small { color: var(--muted); }
+
+    .diff-table { width: 100%; border-collapse: collapse; border: 1px solid var(--line); }
+    .diff-table th, .diff-table td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .diff-table th { background: var(--soft); color: #3e4a58; font-size: .86rem; }
+    .diff-table tr:last-child td { border-bottom: 0; }
+    .diff-status { width: 58px; color: var(--accent); font-weight: 800; }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 32px;
+      padding-top: 22px;
+      border-top: 1px solid var(--line);
+    }
+
+    .actions-primary, .actions-secondary { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+    .actions-primary { margin-left: auto; }
+
+    details {
+      max-width: var(--reading);
+      margin-top: 22px;
+      padding: 13px 15px;
+      border: 1px solid var(--line);
+      background: #fbfcfe;
+    }
+
+    summary { cursor: pointer; font-weight: 700; }
+    details p, details ul { margin-bottom: 0; }
+
+    .event-log { display: grid; gap: 7px; margin-top: 12px; color: var(--muted); font-size: .84rem; }
+    .event-row { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 9px; }
+
+    details.agent-memory {
+      max-width: none;
+      margin: 0 0 28px;
+      padding: 0;
+      border-left: 4px solid var(--accent);
+      background: #fbfcfe;
+    }
+
+    .agent-memory > summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 16px;
+      list-style-position: inside;
+    }
+
+    .agent-memory > summary small { color: var(--muted); font-weight: 500; }
+    .agent-memory[open] > summary { border-bottom: 1px solid var(--line); }
+    .agent-memory-body { padding: 16px; }
+    .agent-memory-body > p { max-width: var(--reading); margin: 0; }
+    .agent-next { margin-top: 8px !important; color: var(--accent-strong); font-weight: 700; }
+
+    .agent-memory-meta {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1px;
+      margin-top: 15px;
+      border: 1px solid var(--line);
+      background: var(--line);
+    }
+
+    .agent-memory-meta div { min-width: 0; padding: 11px 12px; background: var(--surface); }
+    .agent-memory-meta span { display: block; color: var(--muted); font-size: .76rem; }
+    .agent-memory-meta strong { display: block; overflow-wrap: anywhere; margin-top: 2px; font-size: .84rem; }
+
+    .agent-memory-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 18px; }
+    .agent-memory-block { min-width: 0; }
+    .agent-memory-block h3 { margin-bottom: 6px; font-size: .9rem; }
+    .agent-memory-block ul { margin: 0; padding-left: 1.15rem; color: #44505e; font-size: .84rem; }
+    .agent-memory-block li { overflow-wrap: anywhere; }
+    .agent-memory-block li + li { margin-top: 4px; }
+
+    .toast {
+      position: fixed;
+      right: 22px;
+      bottom: 22px;
+      z-index: 10;
+      max-width: min(360px, calc(100% - 44px));
+      padding: 12px 15px;
+      border: 1px solid #92bea9;
+      background: #f1fbf6;
+      color: #174d38;
+      box-shadow: 0 10px 30px rgb(23 32 42 / 14%);
+    }
+
+    footer { padding: 22px 0 44px; color: var(--muted); font-size: .86rem; }
+
+    @media (max-width: 1080px) {
+      .app-shell { grid-template-columns: 226px minmax(0, 1fr); }
+      .task-sidebar { position: static; grid-column: 1 / -1; grid-template-rows: auto auto auto auto; max-height: none; }
+      .task-list { display: flex; gap: 4px; overflow-x: auto; padding: 8px; }
+      .task-card { flex: 0 0 248px; }
+      .task-card + .task-card { margin-top: 0; }
+    }
+
+    @media (max-width: 760px) {
+      .topbar { flex-direction: column; padding-top: 26px; }
+      .app-shell { grid-template-columns: 1fr; gap: 18px; padding-top: 20px; }
+      .task-sidebar, .workflow-sidebar { position: static; }
+      .sidebar-head { padding-block: 12px 10px; }
+      .sidebar-head span, .sidebar-note { display: none; }
+      .steps { display: flex; overflow-x: auto; padding: 7px; }
+      .step { flex: 0 0 136px; width: auto; min-height: 46px; }
+      .step:not(:last-child)::after { top: 26px; left: 38px; width: 106px; height: 1px; }
+      .step-label { padding-right: 5px; background: inherit; white-space: nowrap; }
+      .summary-grid { grid-template-columns: 1fr; }
+      .agent-memory-meta, .agent-memory-grid { grid-template-columns: 1fr; }
+      .agent-memory > summary { align-items: flex-start; flex-direction: column; gap: 3px; }
+      .logic-flow { grid-template-columns: 1fr; }
+      .logic-arrow { justify-self: center; transform: rotate(90deg); }
+      .path-row { grid-template-columns: 1fr; gap: 3px; }
+      .test-case-grid { grid-template-columns: 1fr; }
+      .acceptance-log dl > div { grid-template-columns: 1fr; gap: 2px; }
+      .run-step { grid-template-columns: 28px minmax(0, 1fr); }
+      .run-step small { grid-column: 2; }
+      .actions-primary { width: 100%; margin-left: 0; }
+      .actions-primary button { flex: 1 1 210px; }
+      .image-drop-zone { align-items: flex-start; flex-direction: column; }
+      .image-drop-zone button { width: 100%; }
+      .diff-wrap { overflow-x: auto; }
+      .diff-table { min-width: 620px; }
+    }
+
+    @media (max-width: 480px) {
+      .topbar, .app-shell, footer { width: min(calc(100% - 22px), var(--max)); }
+      .workspace-header, .workspace-body { padding-inline: 17px; }
+      .status-line { align-items: flex-start; }
+      .status-text { min-width: 0; }
+      .status-line button { flex: 0 0 auto; }
+      .prototype-badge { max-width: 100%; white-space: normal; }
+      .source-tabs, .view-tabs { display: grid; grid-template-columns: 1fr; width: 100%; }
+      .source-tabs button, .view-tabs button { width: 100%; }
+      .section-heading, .minimum-step-head, .test-case-head, .acceptance-log-head { align-items: flex-start; flex-direction: column; }
+      .verification-minimum { padding: 17px; }
+      .minimum-steps p b, .precondition b { display: block; min-width: 0; margin: 0 0 2px; }
+      .actions-secondary { width: 100%; }
+      .actions-secondary button { flex: 1 1 auto; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+    }
+
+    @media print {
+      html, body { background: #fff; }
+      .topbar, .app-shell, footer { width: 100%; }
+      .app-shell { display: block; padding-top: 24px; }
+      .task-sidebar, .workflow-sidebar, .prototype-badge, .actions, .toast, #resetButton { display: none !important; }
+      .workspace { border: 0; }
+      .workspace-header, .workspace-body { padding-inline: 0; }
+      details { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="topbar">
+      <div>
+        <p class="eyebrow" id="projectEyebrow">Project · Project Flow</p>
+        <h1>需求工作流控制台</h1>
+        <p class="lede">从策划文档、讨论澄清、Plan 验收到 Worktree 执行、Commit 和提交后的 Bug 修复，用一条可恢复的状态流推进。</p>
+      </div>
+      <span class="prototype-badge" id="serviceBadge">正在连接本地服务</span>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="task-sidebar" aria-label="需求任务控制台">
+      <div class="task-sidebar-head">
+        <div>
+          <strong id="taskQueueTitle">需求队列</strong>
+          <span id="taskCount">正在读取任务</span>
+        </div>
+        <div class="task-sidebar-actions">
+          <button class="small ghost" id="archiveViewButton" type="button">查看归档</button>
+          <button class="small primary" id="createTaskButton" type="button">＋ 新建</button>
+        </div>
+      </div>
+      <div class="task-filters" role="group" aria-label="筛选需求任务">
+        <button class="task-filter active" type="button" data-task-filter="all">全部</button>
+        <button class="task-filter" type="button" data-task-filter="running">运行</button>
+        <button class="task-filter" type="button" data-task-filter="attention">待处理</button>
+        <button class="task-filter" type="button" data-task-filter="done">完成</button>
+      </div>
+      <div class="task-list" id="taskList" aria-label="需求任务列表"></div>
+      <p class="task-sidebar-note" id="schedulerNote">不同需求可并行；切换页面不会停止后台任务。</p>
+    </aside>
+
+    <aside class="workflow-sidebar" aria-label="需求流程导航">
+      <div class="sidebar-head">
+        <strong>需求流程</strong>
+        <span>点击已到达阶段回看</span>
+      </div>
+      <nav aria-label="需求流程进度">
+        <div class="steps" id="steps"></div>
+      </nav>
+      <p class="sidebar-note">未来阶段需要先通过当前门禁，不能直接跳过。</p>
+    </aside>
+
+    <main>
+      <div class="status-line">
+        <div class="status-text"><span class="status-dot"></span><span id="globalStatus">等待输入需求</span></div>
+        <button class="ghost small" id="resetButton" type="button">新建需求</button>
+      </div>
+
+      <article class="workspace" aria-live="polite">
+        <div class="workspace-header">
+          <h2 id="stageTitle">选择需求接入方式</h2>
+          <p id="stageDescription">可创建新需求，或填写已有需求文档、执行 Plan 与 Worktree；接入前先做只读校验。</p>
+        </div>
+        <div class="workspace-body" id="stageContent"></div>
+      </article>
+    </main>
+  </div>
+
+  <footer>
+    本页只连接 127.0.0.1 本地服务。生成文档、创建 Worktree、执行 Plan、Commit 与 Bug 修复均需单独点击授权；不会自动 Push 或 Merge。
+  </footer>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script src="app.js"></script>
+  <script>
+    (() => {
+      "use strict";
+
+      if (window.REQUIREMENT_FLOW_REAL_APP) return;
+
+      const STORAGE_KEY = "project-flow-console-prototype-v2";
+      const stages = [
+        { id: "input", label: "需求输入", title: "选择需求接入方式", description: "可创建新需求，或填写已有需求文档、执行 Plan 与 Worktree；接入前先做只读校验。" },
+        { id: "discuss", label: "讨论澄清", title: "先讨论，只问会导致返工的问题", description: "discussion-only 保持只读；ask-first 将问题压缩为 1–3 个关键决策。" },
+        { id: "plan", label: "Plan 验收", title: "验收范围、流程和完成标准", description: "MD 是正式任务记录，HTML 是同一内容的逻辑验收视图。" },
+        { id: "worktree", label: "Worktree", title: "准备隔离执行环境", description: "先展示分支、基准和路径；只有点击确认后才创建并绑定 Worktree。" },
+        { id: "execute", label: "执行", title: "按 Plan 执行并完成 Review", description: "真实版本会在绑定的 Worktree 中实施、验证，并循环处理 Code Review 发现。" },
+        { id: "verify", label: "人工验收", title: "按测试案例完成最终验收", description: "自动证据和人工结果分开记录；全部必测项通过后才能准备 Commit。" },
+        { id: "commit", label: "Commit", title: "确认 Diff 后提交", description: "提交前再次检查真实 Git 状态、文件列表、验证结果和 Commit Message。" }
+      ];
+
+      const defaults = {
+        stage: "input",
+        maxStageIndex: 0,
+        sourceType: "link",
+        title: "",
+        sourceUrl: "",
+        sourceText: "",
+        sourceFileName: "",
+        baseBranch: "main",
+        decisions: {
+          scope: "main-boundary",
+          compatibility: "preserve",
+          verification: "editor-device"
+        },
+        customDecisions: {
+          scope: "",
+          compatibility: "",
+          verification: ""
+        },
+        discussionNote: "",
+        discussionMessages: [],
+        planView: "logic",
+        worktreeCreated: false,
+        executionState: "idle",
+        executionSteps: ["pending", "pending", "pending", "pending"],
+        checks: [false, false, false, false],
+        verificationNote: "",
+        commitMessage: "",
+        commitConfirmed: false,
+        committed: false,
+        demoCommitId: "",
+        events: []
+      };
+
+      let state = loadState();
+      let executionTimerIds = [];
+      let lastRenderedStage = `${state.stage}:${state.committed}`;
+
+      const stepsEl = document.querySelector("#steps");
+      const globalStatusEl = document.querySelector("#globalStatus");
+      const stageTitleEl = document.querySelector("#stageTitle");
+      const stageDescriptionEl = document.querySelector("#stageDescription");
+      const stageContentEl = document.querySelector("#stageContent");
+      const toastEl = document.querySelector("#toast");
+
+      document.querySelector("#resetButton").addEventListener("click", resetPrototype);
+
+      function loadState() {
+        try {
+          const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+          if (!saved || typeof saved !== "object") return structuredClone(defaults);
+          const merged = {
+            ...structuredClone(defaults),
+            ...saved,
+            decisions: { ...defaults.decisions, ...(saved.decisions || {}) },
+            customDecisions: { ...defaults.customDecisions, ...(saved.customDecisions || {}) }
+          };
+          if (merged.stage === "done") {
+            merged.stage = "commit";
+            merged.committed = true;
+          }
+          const inferredIndex = Math.max(0, stages.findIndex((item) => item.id === merged.stage));
+          merged.maxStageIndex = Math.max(Number(merged.maxStageIndex) || 0, inferredIndex);
+          if (merged.executionState === "running") {
+            merged.executionState = "idle";
+            merged.executionSteps = ["pending", "pending", "pending", "pending"];
+          }
+          return merged;
+        } catch (_) {
+          return structuredClone(defaults);
+        }
+      }
+
+      function saveState() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      }
+
+      function escapeHTML(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function titleText() {
+        return state.title.trim() || "未命名需求";
+      }
+
+      function makeSlug() {
+        const ascii = titleText().toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 38);
+        return ascii || "task-20260727";
+      }
+
+      function taskPaths() {
+        const slug = makeSlug();
+        const displayTitle = titleText().replace(/[\\/:*?"<>|]/g, "-").slice(0, 36);
+        return {
+          slug,
+          doc: `ProjectDocs/Tasks/active/2026-07-27-${displayTitle}.md`,
+          html: `ProjectDocs/Tasks/active/2026-07-27-${displayTitle}-logic.html`,
+          worktree: `/absolute/path/to/worktrees/${slug}`,
+          branch: `worktree/${slug}`
+        };
+      }
+
+      function stageIndex() {
+        return Math.max(0, stages.findIndex((item) => item.id === state.stage));
+      }
+
+      function furthestStageIndex() {
+        return Math.min(stages.length - 1, Math.max(0, Number(state.maxStageIndex) || 0));
+      }
+
+      function statusText() {
+        if (state.stage === "commit" && state.committed) return `模拟提交完成 · ${state.demoCommitId}`;
+        const map = {
+          input: "等待输入需求",
+          discuss: "只读讨论中",
+          plan: "等待逻辑验收",
+          worktree: state.worktreeCreated ? "Worktree 已准备，等待执行" : "等待创建 Worktree",
+          execute: state.executionState === "running" ? "正在模拟执行 Plan" : "等待执行 Plan",
+          verify: "等待人工验收",
+          commit: "等待 Commit 确认"
+        };
+        return map[state.stage] || "等待操作";
+      }
+
+      function logEvent(message) {
+        state.events.push({ time: new Date().toLocaleTimeString("zh-CN", { hour12: false }), message });
+        state.events = state.events.slice(-18);
+      }
+
+      function showToast(message) {
+        toastEl.textContent = message;
+        toastEl.hidden = false;
+        window.setTimeout(() => { toastEl.hidden = true; }, 2200);
+      }
+
+      function renderSteps() {
+        const current = stageIndex();
+        const furthest = furthestStageIndex();
+        stepsEl.innerHTML = stages.map((item, index) => {
+          const completed = index < furthest || (index === stages.length - 1 && state.committed);
+          const reachable = index <= furthest;
+          const cls = `${completed ? "completed" : ""} ${index === current ? "current" : ""}`.trim();
+          const mark = completed ? "✓" : String(index + 1);
+          const currentAttr = index === current ? ' aria-current="step"' : "";
+          const statusLabel = completed ? "已完成" : index === current ? "当前阶段" : reachable ? "已到达" : "未到达";
+          return `<button type="button" class="step ${cls}" data-stage-jump="${item.id}" aria-label="${item.label}，${statusLabel}" ${reachable ? "" : "disabled"}${currentAttr}><span class="step-number">${mark}</span><span class="step-label">${item.label}</span></button>`;
+        }).join("");
+
+        window.requestAnimationFrame(() => {
+          const nav = stepsEl;
+          const target = stepsEl.querySelector(".current") || stepsEl.lastElementChild;
+          if (!nav || !target) return;
+          nav.scrollLeft = Math.max(0, target.offsetLeft - (nav.clientWidth - target.clientWidth) / 2);
+        });
+      }
+
+      function render() {
+        state.maxStageIndex = Math.max(furthestStageIndex(), stageIndex());
+        const renderKey = `${state.stage}:${state.committed}`;
+        const stageChanged = lastRenderedStage !== renderKey;
+        const currentStage = stages.find((item) => item.id === state.stage) || stages[0];
+        renderSteps();
+        globalStatusEl.textContent = statusText();
+        stageTitleEl.textContent = state.stage === "commit" && state.committed ? "模拟 Commit 已完成" : currentStage.title;
+        stageDescriptionEl.textContent = state.stage === "commit" && state.committed
+          ? "这次原型体验已经走完；真实版本还可以继续扩展合并、develop 验证、归档和清理。"
+          : currentStage.description;
+
+        const renderers = {
+          input: renderInput,
+          discuss: renderDiscuss,
+          plan: renderPlan,
+          worktree: renderWorktree,
+          execute: renderExecute,
+          verify: renderVerify,
+          commit: renderCommit
+        };
+
+        const renderer = state.stage === "commit" && state.committed ? renderDone : renderers[state.stage];
+        stageContentEl.innerHTML = renderer();
+        attachHandlers();
+        saveState();
+        lastRenderedStage = renderKey;
+
+        if (stageChanged) {
+          window.requestAnimationFrame(() => document.querySelector("main")?.scrollIntoView({ block: "start" }));
+        }
+      }
+
+      function eventLogDetails() {
+        const rows = state.events.length
+          ? state.events.slice().reverse().map((event) => `<div class="event-row"><span class="mono">${escapeHTML(event.time)}</span><span>${escapeHTML(event.message)}</span></div>`).join("")
+          : '<span class="hint">还没有状态事件。</span>';
+        return `<details><summary>查看原型状态记录</summary><div class="event-log">${rows}</div></details>`;
+      }
+
+      function renderInput() {
+        const panels = {
+          link: `<div class="field"><label for="sourceUrl">策划文档链接</label><input id="sourceUrl" type="url" placeholder="https://docs.example.com/..." value="${escapeHTML(state.sourceUrl)}"><span class="hint">真实版本：公开链接直接读取；私有链接需要已授权连接器或上传导出文件。</span></div>`,
+          file: `<div class="field"><label for="sourceFile">选择策划文档</label><input id="sourceFile" type="file" accept=".md,.txt,.pdf,.doc,.docx"><span class="hint">${state.sourceFileName ? `已选择：${escapeHTML(state.sourceFileName)}` : "原型只记录文件名，不上传、不解析文件。"}</span></div>`,
+          paste: `<div class="field"><label for="sourceText">粘贴策划内容</label><textarea id="sourceText" placeholder="粘贴需求目标、规则、流程或已有草稿……">${escapeHTML(state.sourceText)}</textarea><span class="hint">可以先不整理格式，后续由 discussion-only 和 ask-first 帮你收敛。</span></div>`
+        };
+
+        return `
+          <section class="section">
+            <div class="callout warning">
+              <p><strong>当前是安全原型。</strong>输入仅保存在浏览器本地，不会发送给 Codex，也不会创建任务文件。</p>
+            </div>
+          </section>
+          <section class="section">
+            <div class="field">
+              <label for="taskTitle">需求名称</label>
+              <input id="taskTitle" type="text" placeholder="例如：新手免费提示引导" value="${escapeHTML(state.title)}">
+            </div>
+            <div class="field">
+              <span>需求来源</span>
+              <div class="source-tabs" role="group" aria-label="选择需求来源">
+                ${sourceTab("link", "粘贴链接")}
+                ${sourceTab("file", "上传文档")}
+                ${sourceTab("paste", "粘贴内容")}
+              </div>
+              <div class="source-panel">${panels[state.sourceType]}</div>
+            </div>
+          </section>
+          <div class="actions">
+            <div class="actions-secondary"><span class="hint">下一步保持只读，不会修改代码或文档。</span></div>
+            <div class="actions-primary"><button class="primary" id="startDiscussion" type="button">开始梳理需求</button></div>
+          </div>
+          ${eventLogDetails()}
+        `;
+      }
+
+      function sourceTab(id, label) {
+        const active = state.sourceType === id;
+        return `<button type="button" class="${active ? "active" : ""}" data-source-type="${id}" aria-pressed="${active}">${label}</button>`;
+      }
+
+      function renderDiscuss() {
+        const sourceSummary = state.sourceType === "link"
+          ? state.sourceUrl
+          : state.sourceType === "file"
+            ? state.sourceFileName
+            : state.sourceText.slice(0, 180);
+        const messages = [
+          `<div class="message"><span class="message-role">Codex · discussion-only</span>已读取需求入口。本阶段只澄清口径，不写文档、不改代码。</div>`,
+          ...state.discussionMessages.map((message) => `<div class="message ${message.role === "user" ? "user" : ""}"><span class="message-role">${message.role === "user" ? "你" : "Codex"}</span>${escapeHTML(message.text)}</div>`)
+        ].join("");
+
+        return `
+          <section class="section">
+            <div class="summary-grid">
+              <div class="summary-item"><span>需求</span><strong>${escapeHTML(titleText())}</strong></div>
+              <div class="summary-item"><span>来源摘要</span><strong>${escapeHTML(sourceSummary || "已提供文档")}</strong></div>
+            </div>
+          </section>
+          <section class="section">
+            <h3>Ask-first：先确认三个高返工问题</h3>
+            <p class="section-copy">这是通用问题结构示例；真实版本会先读取项目事实，再针对当前需求生成问题。</p>
+            <div class="question-list">
+              ${questionFieldset("scope", "1. 本轮验收覆盖到哪里？", "决定 Plan 是否必须包含边界与异常路径。", [
+                ["main-boundary", "主流程 + 关键边界", "推荐"],
+                ["main-only", "只验收主流程", ""]
+              ])}
+              ${questionFieldset("compatibility", "2. 如何处理已有数据和旧行为？", "决定是否允许迁移、重置或改变老用户口径。", [
+                ["preserve", "默认保持兼容", "推荐"],
+                ["migration", "允许明确的数据迁移", ""]
+              ])}
+              ${questionFieldset("verification", "3. 交付前需要哪一级验证？", "决定自动检查与人工测试案例的范围。", [
+                ["editor-device", "Editor + 真机关键路径", "推荐"],
+                ["editor", "Editor / 定向测试", ""]
+              ])}
+            </div>
+          </section>
+          <section class="section">
+            <h3>继续补充和讨论</h3>
+            <div class="conversation" id="conversation">${messages}</div>
+            <div class="field">
+              <label for="discussionNote">补充说明</label>
+              <textarea id="discussionNote" placeholder="例如：这次先不改旧用户；验收只看首次进入流程……">${escapeHTML(state.discussionNote)}</textarea>
+            </div>
+            <button class="small" id="sendDiscussionNote" type="button">发送补充</button>
+          </section>
+          <div class="actions">
+            <div class="actions-secondary"><button id="backToInput" type="button">返回修改需求</button></div>
+            <div class="actions-primary"><button class="primary" id="generatePlan" type="button">确认口径并生成 Plan</button></div>
+          </div>
+          ${eventLogDetails()}
+        `;
+      }
+
+      function questionFieldset(key, legend, help, choices) {
+        const customSelected = state.decisions[key] === "custom";
+        return `<fieldset class="question"><legend>${legend}</legend><p class="question-help">${help}</p>${choices.map(([value, label, badge]) => {
+          const checked = state.decisions[key] === value;
+          return `<label class="choice"><input type="radio" name="${key}" value="${value}" ${checked ? "checked" : ""}><span>${label}${badge ? ` <span class="recommended">${badge}</span>` : ""}</span></label>`;
+        }).join("")}
+          <label class="choice"><input type="radio" name="${key}" value="custom" ${customSelected ? "checked" : ""}><span>自定义回复</span></label>
+          <div class="custom-answer" data-custom-wrap="${key}" ${customSelected ? "" : "hidden"}>
+            <label for="custom-${key}">填写你的口径</label>
+            <textarea id="custom-${key}" data-custom-key="${key}" placeholder="输入这道问题的自定义答案……">${escapeHTML(state.customDecisions[key])}</textarea>
+          </div>
+        </fieldset>`;
+      }
+
+      function decisionText(key) {
+        if (state.decisions[key] === "custom") return state.customDecisions[key].trim();
+        const labels = {
+          scope: {
+            "main-boundary": "主流程与关键边界",
+            "main-only": "只验收主流程"
+          },
+          compatibility: {
+            preserve: "默认保持旧数据和旧行为兼容",
+            migration: "允许在文档中明确迁移方案"
+          },
+          verification: {
+            "editor-device": "Editor 与真机关键路径",
+            editor: "Editor 或定向测试"
+          }
+        };
+        return labels[key]?.[state.decisions[key]] || "待确认";
+      }
+
+      function renderPlan() {
+        const paths = taskPaths();
+        const planContent = {
+          logic: `
+            <h3>逻辑主线</h3>
+            <div class="logic-flow" role="img" aria-label="需求从事实扫描、范围冻结到实现验证">
+              <div class="logic-node"><strong>事实扫描</strong><span>读取文档、项目手册与现有接口</span></div>
+              <div class="logic-arrow">→</div>
+              <div class="logic-node current"><strong>口径冻结</strong><span>范围、非范围、兼容与验收标准</span></div>
+              <div class="logic-arrow">→</div>
+              <div class="logic-node"><strong>实施验收</strong><span>Worktree 执行、Review 与人工验证</span></div>
+            </div>
+            <h3>本轮边界</h3>
+            <ul>
+              <li>目标：完成“${escapeHTML(titleText())}”的可执行方案。</li>
+              <li>范围：${escapeHTML(decisionText("scope"))}。</li>
+              <li>兼容：${escapeHTML(decisionText("compatibility"))}。</li>
+              <li>非范围：未经确认的共享框架、全局状态和额外产品行为。</li>
+            </ul>
+            <h3>完成条件</h3>
+            <ol>
+              <li>计划步骤均有对应实现或明确阻塞说明。</li>
+              <li>自动验证和 Code Review 已记录真实证据。</li>
+              <li>验证：${escapeHTML(decisionText("verification"))}，完成后由你人工确认。</li>
+            </ol>`,
+          md: `<pre># ${escapeHTML(titleText())}
+
+状态：方案待验收
+执行目录：待创建 Worktree
+
+## 目标
+完成“${escapeHTML(titleText())}”的需求实现与验证。
+
+## 范围
+- ${escapeHTML(decisionText("scope"))}
+- ${escapeHTML(decisionText("compatibility"))}
+
+## 非范围
+- 未经确认的共享或全局改动
+- 当前策划文档之外的扩展需求
+
+## 执行计划
+1. 核对项目事实与已有接口
+2. 冻结实现边界和验收口径
+3. 在独立 Worktree 中实施
+4. 运行自动验证并执行 Code Review
+5. 输出人工测试案例，确认后 Commit
+
+## 验收
+- 主流程通过
+- 关键边界通过
+- 验证方式：${escapeHTML(decisionText("verification"))}
+- 兼容与回归结果已记录</pre>`,
+          artifacts: `
+            <h3>将生成的正式产物</h3>
+            <div class="path-list">
+              <div class="path-row"><span>任务 MD</span><strong class="mono">${escapeHTML(paths.doc)}</strong></div>
+              <div class="path-row"><span>验收 HTML</span><strong class="mono">${escapeHTML(paths.html)}</strong></div>
+              <div class="path-row"><span>事实源</span><strong>MD 保持唯一事实源，HTML 从同一任务状态渲染</strong></div>
+            </div>
+            <div class="callout warning"><p>原型不会真的生成这两个文件。正式接入后，“确认逻辑”按钮才会落地文档。</p></div>`
+        };
+
+        return `
+          <section class="section">
+            <div class="callout">
+              <p><strong>请先看逻辑，而不是措辞。</strong>重点确认范围、分支路径、兼容策略和完成条件；不对就退回继续讨论。</p>
+            </div>
+          </section>
+          <section class="section">
+            <div class="view-tabs" role="group" aria-label="切换 Plan 视图">
+              ${planTab("logic", "逻辑验收")}
+              ${planTab("md", "MD 预览")}
+              ${planTab("artifacts", "产物路径")}
+            </div>
+            <div class="preview">${planContent[state.planView]}</div>
+          </section>
+          <section class="section">
+            <button class="small" id="copyReviewLink" type="button">复制当前验收链接</button>
+            <span class="hint"> 当前原型使用同一个本地 HTML 页面承载验收。</span>
+          </section>
+          <div class="actions">
+            <div class="actions-secondary"><button id="returnToDiscuss" type="button">退回继续讨论</button></div>
+            <div class="actions-primary"><button class="primary" id="approvePlan" type="button">逻辑通过，生成文档</button></div>
+          </div>
+          ${eventLogDetails()}
+        `;
+      }
+
+      function planTab(id, label) {
+        const active = state.planView === id;
+        return `<button type="button" class="${active ? "active" : ""}" data-plan-view="${id}" aria-pressed="${active}">${label}</button>`;
+      }
+
+      function renderWorktree() {
+        const paths = taskPaths();
+        const created = state.worktreeCreated;
+        return `
+          <section class="section">
+            <div class="callout ${created ? "ok" : "warning"}">
+              <p><strong>${created ? "Worktree 已创建并绑定（模拟）" : "创建前预检"}</strong></p>
+              <p>${created ? "当前任务已经拥有独立执行目录；代码尚未开始修改。" : "真实版本会重新读取 Git 状态，发现未提交改动、重名目录或错误基准时停止。"}</p>
+            </div>
+          </section>
+          <section class="section">
+            <h3>本次隔离环境</h3>
+            <div class="path-list">
+              <div class="path-row"><span>项目仓库</span><strong class="mono">/absolute/path/to/repository</strong></div>
+              <div class="path-row"><span>基准分支</span><strong class="mono">${escapeHTML(state.baseBranch)}</strong></div>
+              <div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(paths.worktree)}</strong></div>
+              <div class="path-row"><span>工作分支</span><strong class="mono">${escapeHTML(paths.branch)}</strong></div>
+              <div class="path-row"><span>任务文档</span><strong class="mono">${escapeHTML(paths.doc)}</strong></div>
+            </div>
+          </section>
+          <section class="section">
+            <h3>文档绑定规则</h3>
+            <div class="callout"><p>正式 MD 保留在配置的 <code>docsRoot</code>，不会移动进 Worktree。执行会话读取这份正式文档，避免归档丢失和双份漂移。</p></div>
+          </section>
+          <section class="section">
+            <h3>预检结果（模拟）</h3>
+            <div class="checklist">
+              ${staticCheck("客户端仓库可用", "将验证 Git 根目录、当前分支和 worktree 列表。")}
+              ${staticCheck("目标路径未占用", "相同名称存在时停止，不覆盖已有目录。")}
+              ${staticCheck("任务文档已生成", "执行入口只绑定正式 MD，不复制第二份事实源。")}
+            </div>
+          </section>
+          <div class="actions">
+            <div class="actions-secondary"><button id="backToPlan" type="button" ${created ? "disabled" : ""}>返回 Plan</button></div>
+            <div class="actions-primary">
+              ${created
+                ? '<button class="primary" id="executePlan" type="button">执行 Plan（模拟）</button>'
+                : '<button class="primary" id="createWorktree" type="button">创建 Worktree（模拟）</button>'}
+            </div>
+          </div>
+          ${eventLogDetails()}
+        `;
+      }
+
+      function staticCheck(title, detail) {
+        return `<div class="check-row"><span aria-hidden="true">✓</span><div><strong>${title}</strong><span>${detail}</span></div></div>`;
+      }
+
+      function renderExecute() {
+        const labels = [
+          ["读取任务文档与工程事实", "discussion-only 已结束，开始受控写入"],
+          ["按 Plan 实施", "仅修改冻结范围内的文件"],
+          ["运行定向验证", "记录命令、结果和未验证项"],
+          ["执行 Code Review", "发现问题则回到实施阶段"]
+        ];
+        const steps = labels.map(([label, detail], index) => {
+          const status = state.executionSteps[index];
+          const mark = status === "done" ? "✓" : status === "running" ? "…" : String(index + 1);
+          const stateText = status === "done" ? "已完成（模拟）" : status === "running" ? "正在执行（模拟）" : "等待";
+          return `<div class="run-step ${status}"><span class="run-mark">${mark}</span><div><strong>${label}</strong><div class="hint">${detail}</div></div><small>${stateText}</small></div>`;
+        }).join("");
+
+        return `
+          <section class="section">
+            <div class="callout warning"><p><strong>这是进度演示。</strong>页面不会启动 Codex、写代码、运行 Unity 或执行 Review。</p></div>
+          </section>
+          <section class="section">
+            <h3>执行进度</h3>
+            <div class="run-list">${steps}</div>
+          </section>
+          <section class="section">
+            <h3>本阶段输出</h3>
+            <div class="summary-grid">
+              <div class="summary-item"><span>执行目录</span><strong class="mono">${escapeHTML(taskPaths().worktree)}</strong></div>
+              <div class="summary-item"><span>Review 策略</span><strong>未提交 Diff + 需求验收标准</strong></div>
+            </div>
+          </section>
+          <div class="actions">
+            <div class="actions-secondary"><span class="hint">执行中不接受重复点击。</span></div>
+            <div class="actions-primary"><button class="primary" type="button" disabled>${state.executionState === "running" ? "正在执行…" : "等待启动"}</button></div>
+          </div>
+          ${eventLogDetails()}
+        `;
+      }
+
+      function renderVerify() {
+        const cases = [
+          ["主流程", "按策划入口完成一次完整流程，结果与 Plan 一致。"],
+          ["关键边界", "覆盖重复进入、中断、返回或最重要的异常输入。"],
+          ["兼容与生命周期", "旧数据、重进、重试或会话切换后状态符合确认口径。"],
+          ["回归检查", "相邻功能和既有主路径没有出现可见退化。"]
+        ];
+        return `
+          <section class="section">
+            <div class="summary-grid">
+              <div class="summary-item"><span>自动验证</span><strong>通过（模拟）</strong></div>
+              <div class="summary-item"><span>Code Review</span><strong>无阻塞发现（模拟）</strong></div>
+            </div>
+          </section>
+          <section class="section">
+            <h3>人工测试案例</h3>
+            <p class="section-copy">真实版本将根据需求、代码路径和自动验证结果生成具体步骤；这里展示交互结构。</p>
+            <div class="checklist" id="manualChecks">
+              ${cases.map(([title, detail], index) => `<label class="check-row"><input type="checkbox" data-check-index="${index}" ${state.checks[index] ? "checked" : ""}><span><strong>${title}</strong><span>${detail}</span></span></label>`).join("")}
+            </div>
+          </section>
+          <section class="section">
+            <div class="field">
+              <label for="verificationNote">验收备注或问题</label>
+              <textarea id="verificationNote" placeholder="记录真机版本、操作步骤、异常表现或通过证据……">${escapeHTML(state.verificationNote)}</textarea>
+            </div>
+          </section>
+          <div class="actions">
+            <div class="actions-secondary"><button class="danger" id="returnToExecution" type="button">发现问题，退回执行</button></div>
+            <div class="actions-primary"><button class="primary" id="approveVerification" type="button" ${state.checks.every(Boolean) ? "" : "disabled"}>全部验证通过</button></div>
+          </div>
+          ${eventLogDetails()}
+        `;
+      }
+
+      function renderCommit() {
+        const paths = taskPaths();
+        const message = state.commitMessage || `feat: complete ${paths.slug}`;
+        return `
+          <section class="section">
+            <div class="callout warning"><p><strong>最后一道写入门。</strong>真实版本会在点击瞬间重新读取 Git 状态；页面展示结果过期或出现额外文件时，Commit 会停止。</p></div>
+          </section>
+          <section class="section">
+            <h3>待提交文件（模拟）</h3>
+            <div class="diff-wrap">
+              <table class="diff-table">
+                <thead><tr><th>状态</th><th>文件</th><th>说明</th></tr></thead>
+                <tbody>
+                  <tr><td class="diff-status">M</td><td class="mono">&lt;worktree&gt;/Assets/…</td><td>Plan 对应的实现文件</td></tr>
+                  <tr><td class="diff-status">M</td><td class="mono">${escapeHTML(paths.doc)}</td><td>执行结果、验证证据与剩余风险</td></tr>
+                  <tr><td class="diff-status">A</td><td class="mono">${escapeHTML(paths.html)}</td><td>逻辑验收页面</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section class="section">
+            <div class="field">
+              <label for="commitMessage">Commit Message</label>
+              <input id="commitMessage" class="mono" type="text" value="${escapeHTML(message)}">
+            </div>
+            <label class="choice"><input id="commitConfirmed" type="checkbox" ${state.commitConfirmed ? "checked" : ""}><span>我已确认文件列表、自动验证和人工验收结果。</span></label>
+          </section>
+          <div class="actions">
+            <div class="actions-secondary"><button id="backToVerify" type="button">返回人工验收</button></div>
+            <div class="actions-primary"><button class="primary" id="commitChanges" type="button" ${state.commitConfirmed ? "" : "disabled"}>Commit（模拟）</button></div>
+          </div>
+          ${eventLogDetails()}
+        `;
+      }
+
+      function renderDone() {
+        return `
+          <section class="section">
+            <div class="callout ok">
+              <p><strong>完整交互已走通。</strong></p>
+              <p>模拟提交 ID：<code>${escapeHTML(state.demoCommitId)}</code>。没有执行任何真实 Git、Codex、Unity 或文件写入操作。</p>
+            </div>
+          </section>
+          <section class="section">
+            <h3>这版已经验证的体验</h3>
+            <div class="checklist">
+              ${staticCheck("输入更轻", "只提供链接、文档或原始文字，不需要记 Skill 名和命令。")}
+              ${staticCheck("每一步只有一个主动作", "讨论、Plan、环境、执行、验收和提交不会混在同一屏。")}
+              ${staticCheck("危险操作分段授权", "生成文档、创建 Worktree、执行和 Commit 各自等待确认。")}
+              ${staticCheck("任务可以恢复", "状态保存在浏览器本地，刷新后继续当前阶段。")}
+            </div>
+          </section>
+          <section class="section">
+            <h3>真实接入后的后续阶段</h3>
+            <div class="logic-flow" role="img" aria-label="提交后继续合并、验证、归档和清理">
+              <div class="logic-node"><strong>Commit</strong><span>当前原型终点</span></div>
+              <div class="logic-arrow">→</div>
+              <div class="logic-node current"><strong>合并与 develop 验证</strong><span>第二阶段接入</span></div>
+              <div class="logic-arrow">→</div>
+              <div class="logic-node"><strong>归档与清理</strong><span>完成任务闭环</span></div>
+            </div>
+          </section>
+          <div class="actions">
+            <div class="actions-secondary"><span class="hint">可以重置后重新体验不同路径。</span></div>
+            <div class="actions-primary"><button class="primary" id="restartPrototype" type="button">重新体验</button></div>
+          </div>
+          ${eventLogDetails()}
+        `;
+      }
+
+      function attachHandlers() {
+        document.querySelectorAll("[data-stage-jump]").forEach((button) => {
+          button.addEventListener("click", () => navigateToStage(button.dataset.stageJump));
+        });
+
+        document.querySelectorAll("[data-source-type]").forEach((button) => {
+          button.addEventListener("click", () => {
+            persistInputFields();
+            state.sourceType = button.dataset.sourceType;
+            render();
+          });
+        });
+
+        document.querySelectorAll("[data-plan-view]").forEach((button) => {
+          button.addEventListener("click", () => {
+            state.planView = button.dataset.planView;
+            render();
+          });
+        });
+
+        document.querySelectorAll('input[type="radio"]').forEach((input) => {
+          input.addEventListener("change", () => {
+            state.decisions[input.name] = input.value;
+            saveState();
+            const customWrap = document.querySelector(`[data-custom-wrap="${input.name}"]`);
+            if (customWrap) customWrap.hidden = input.value !== "custom";
+            if (input.value === "custom") {
+              window.requestAnimationFrame(() => document.querySelector(`[data-custom-key="${input.name}"]`)?.focus());
+            }
+          });
+        });
+
+        document.querySelectorAll("[data-custom-key]").forEach((input) => {
+          input.addEventListener("input", () => {
+            state.customDecisions[input.dataset.customKey] = input.value;
+            saveState();
+          });
+        });
+
+        document.querySelectorAll("[data-check-index]").forEach((input) => {
+          input.addEventListener("change", () => {
+            state.checks[Number(input.dataset.checkIndex)] = input.checked;
+            saveState();
+            const approve = document.querySelector("#approveVerification");
+            if (approve) approve.disabled = !state.checks.every(Boolean);
+          });
+        });
+
+        on("sourceFile", "change", (event) => {
+          state.sourceFileName = event.target.files?.[0]?.name || "";
+          saveState();
+          render();
+        });
+
+        on("startDiscussion", "click", startDiscussion);
+        on("backToInput", "click", () => changeStage("input", "返回需求输入"));
+        on("sendDiscussionNote", "click", sendDiscussionNote);
+        on("generatePlan", "click", generatePlan);
+        on("returnToDiscuss", "click", () => changeStage("discuss", "Plan 退回讨论"));
+        on("copyReviewLink", "click", copyReviewLink);
+        on("approvePlan", "click", approvePlan);
+        on("backToPlan", "click", () => changeStage("plan", "返回 Plan 验收"));
+        on("createWorktree", "click", createWorktree);
+        on("executePlan", "click", startExecution);
+        on("returnToExecution", "click", returnToExecution);
+        on("approveVerification", "click", approveVerification);
+        on("backToVerify", "click", () => changeStage("verify", "返回人工验收"));
+        on("commitChanges", "click", commitChanges);
+        on("restartPrototype", "click", resetPrototype);
+
+        on("discussionNote", "input", (event) => { state.discussionNote = event.target.value; saveState(); });
+        on("verificationNote", "input", (event) => { state.verificationNote = event.target.value; saveState(); });
+        on("commitMessage", "input", (event) => { state.commitMessage = event.target.value; saveState(); });
+        on("commitConfirmed", "change", (event) => {
+          state.commitConfirmed = event.target.checked;
+          saveState();
+          const button = document.querySelector("#commitChanges");
+          if (button) button.disabled = !state.commitConfirmed;
+        });
+
+        const conversation = document.querySelector("#conversation");
+        if (conversation) conversation.scrollTop = conversation.scrollHeight;
+      }
+
+      function on(id, eventName, handler) {
+        const element = document.getElementById(id);
+        if (element) element.addEventListener(eventName, handler);
+      }
+
+      function persistInputFields() {
+        const title = document.querySelector("#taskTitle");
+        const url = document.querySelector("#sourceUrl");
+        const text = document.querySelector("#sourceText");
+        if (title) state.title = title.value;
+        if (url) state.sourceUrl = url.value;
+        if (text) state.sourceText = text.value;
+        saveState();
+      }
+
+      function sourceIsReady() {
+        if (state.sourceType === "link") return Boolean(state.sourceUrl.trim());
+        if (state.sourceType === "file") return Boolean(state.sourceFileName);
+        return Boolean(state.sourceText.trim());
+      }
+
+      function startDiscussion() {
+        persistInputFields();
+        if (!state.title.trim()) {
+          showToast("请先填写需求名称。");
+          document.querySelector("#taskTitle")?.focus();
+          return;
+        }
+        if (!sourceIsReady()) {
+          showToast("请提供策划链接、文档或需求内容。");
+          return;
+        }
+        state.stage = "discuss";
+        logEvent("开始 discussion-only 与 ask-first（模拟）");
+        render();
+      }
+
+      function sendDiscussionNote() {
+        const input = document.querySelector("#discussionNote");
+        const value = input?.value.trim();
+        if (!value) {
+          showToast("请先填写补充说明。");
+          input?.focus();
+          return;
+        }
+        state.discussionMessages.push({ role: "user", text: value });
+        state.discussionMessages.push({ role: "assistant", text: "已记录。真实版本会结合项目事实判断是否继续追问，或更新当前口径。" });
+        state.discussionNote = "";
+        logEvent("补充了一轮讨论信息（模拟）");
+        render();
+      }
+
+      function generatePlan() {
+        const customKeys = ["scope", "compatibility", "verification"];
+        const incompleteKey = customKeys.find((key) => state.decisions[key] === "custom" && !state.customDecisions[key].trim());
+        if (incompleteKey) {
+          showToast("请先填写已选择的自定义回复。");
+          document.querySelector(`[data-custom-key="${incompleteKey}"]`)?.focus();
+          return;
+        }
+        const note = document.querySelector("#discussionNote")?.value.trim();
+        if (note) {
+          state.discussionMessages.push({ role: "user", text: note });
+          state.discussionNote = "";
+        }
+        state.stage = "plan";
+        state.planView = "logic";
+        logEvent("口径冻结并生成 Plan 草案（模拟）");
+        render();
+      }
+
+      async function copyReviewLink() {
+        try {
+          await navigator.clipboard.writeText(location.href);
+          showToast("验收链接已复制。");
+        } catch (_) {
+          showToast("浏览器未允许复制，请从地址栏复制当前链接。");
+        }
+      }
+
+      function approvePlan() {
+        state.stage = "worktree";
+        logEvent("逻辑验收通过，生成 MD 与 HTML（模拟）");
+        render();
+      }
+
+      function createWorktree() {
+        state.worktreeCreated = true;
+        logEvent(`创建并绑定 ${taskPaths().branch}（模拟）`);
+        render();
+        showToast("Worktree 已创建（模拟），尚未执行 Plan。");
+      }
+
+      function startExecution() {
+        state.stage = "execute";
+        state.executionState = "running";
+        state.executionSteps = ["running", "pending", "pending", "pending"];
+        logEvent("开始在 Worktree 执行 Plan（模拟）");
+        render();
+
+        executionTimerIds.forEach(window.clearTimeout);
+        executionTimerIds = [];
+        const delays = [700, 1400, 2100, 2800];
+        delays.forEach((delay, index) => {
+          const timer = window.setTimeout(() => {
+            state.executionSteps[index] = "done";
+            if (index + 1 < state.executionSteps.length) state.executionSteps[index + 1] = "running";
+            logEvent(["事实扫描完成", "实施完成", "自动验证完成", "Code Review 通过"][index] + "（模拟）");
+            if (index === state.executionSteps.length - 1) {
+              state.executionState = "complete";
+              state.stage = "verify";
+            }
+            render();
+          }, delay);
+          executionTimerIds.push(timer);
+        });
+      }
+
+      function returnToExecution() {
+        state.stage = "execute";
+        state.executionState = "idle";
+        state.executionSteps = ["pending", "pending", "pending", "pending"];
+        state.checks = [false, false, false, false];
+        logEvent("人工验收发现问题，退回执行（模拟）");
+        render();
+        window.setTimeout(startExecution, 350);
+      }
+
+      function approveVerification() {
+        if (!state.checks.every(Boolean)) {
+          showToast("请先完成全部必测项。");
+          return;
+        }
+        state.verificationNote = document.querySelector("#verificationNote")?.value || state.verificationNote;
+        state.stage = "commit";
+        state.commitMessage = state.commitMessage || `feat: complete ${taskPaths().slug}`;
+        logEvent("人工验收全部通过（模拟）");
+        render();
+      }
+
+      function commitChanges() {
+        if (!state.commitConfirmed) {
+          showToast("请先确认文件和验证结果。");
+          return;
+        }
+        const message = document.querySelector("#commitMessage")?.value.trim();
+        if (!message) {
+          showToast("Commit Message 不能为空。");
+          return;
+        }
+        state.commitMessage = message;
+        state.committed = true;
+        state.demoCommitId = "demo-a1b2c3d";
+        state.stage = "commit";
+        logEvent(`Commit 完成：${state.demoCommitId}（模拟）`);
+        render();
+      }
+
+      function navigateToStage(stage) {
+        const targetIndex = stages.findIndex((item) => item.id === stage);
+        if (targetIndex < 0 || targetIndex > furthestStageIndex() || stage === state.stage) return;
+        if (state.executionState === "running") {
+          showToast("执行模拟进行中，完成后才能切换阶段。");
+          return;
+        }
+        state.stage = stage;
+        logEvent(`从侧边栏跳转到“${stages[targetIndex].label}”`);
+        render();
+      }
+
+      function changeStage(stage, event) {
+        state.stage = stage;
+        logEvent(event);
+        render();
+      }
+
+      function resetPrototype() {
+        executionTimerIds.forEach(window.clearTimeout);
+        executionTimerIds = [];
+        localStorage.removeItem(STORAGE_KEY);
+        state = structuredClone(defaults);
+        render();
+        showToast("原型已重置。");
+      }
+
+      render();
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string" },
+    "scope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "non_scope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "acceptance": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "markdown": { "type": "string" },
+    "html": { "type": "string" }
+  },
+  "required": ["summary", "scope", "non_scope", "acceptance", "risks", "markdown", "html"],
+  "additionalProperties": false
+}

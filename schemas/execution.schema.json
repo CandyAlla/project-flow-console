@@ -1,0 +1,115 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string" },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "check": { "type": "string" },
+          "result": { "type": "string" },
+          "status": { "type": "string", "enum": ["passed", "failed", "skipped"] }
+        },
+        "required": ["check", "result", "status"],
+        "additionalProperties": false
+      }
+    },
+    "minimum_manual_verification": {
+      "type": "object",
+      "properties": {
+        "estimated_minutes": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "action": { "type": "string" },
+              "expected": { "type": "string" },
+              "log_filter": { "type": "string" },
+              "expected_log": { "type": "string" },
+              "failure_signal": { "type": "string" }
+            },
+            "required": ["title", "action", "expected", "log_filter", "expected_log", "failure_signal"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["estimated_minutes", "steps"],
+      "additionalProperties": false
+    },
+    "manual_cases": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "priority": { "type": "string", "enum": ["P0", "P1", "P2"] },
+          "required": { "type": "boolean" },
+          "precondition": { "type": "string" },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": { "type": "string" }
+          },
+          "expected": { "type": "string" },
+          "log_filters": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "expected_logs": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "failure_signals": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["title", "priority", "required", "precondition", "steps", "expected", "log_filters", "expected_logs", "failure_signals"],
+        "additionalProperties": false
+      }
+    },
+    "acceptance_logs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "source": { "type": "string" },
+          "filter": { "type": "string" },
+          "trigger": { "type": "string" },
+          "expected": { "type": "string" },
+          "failure_signals": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["name", "source", "filter", "trigger", "expected", "failure_signals"],
+        "additionalProperties": false
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "docs_backfill": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["summary", "changed_files", "verification", "minimum_manual_verification", "manual_cases", "acceptance_logs", "risks", "docs_backfill"],
+  "additionalProperties": false
+}

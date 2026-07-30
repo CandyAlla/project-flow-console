@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["pass", "needs_fix"] },
+    "summary": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "title": { "type": "string" },
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "detail": { "type": "string" }
+        },
+        "required": ["severity", "title", "file", "line", "detail"],
+        "additionalProperties": false
+      }
+    },
+    "verification_gaps": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["verdict", "summary", "findings", "verification_gaps"],
+  "additionalProperties": false
+}

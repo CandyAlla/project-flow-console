@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string" },
+    "worktree_slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+){2,5}$",
+      "minLength": 5,
+      "maxLength": 42
+    },
+    "confirmed_facts": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "questions": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "question": { "type": "string" },
+          "reason": { "type": "string" },
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": { "type": "string" },
+                "label": { "type": "string" },
+                "recommended": { "type": "boolean" }
+              },
+              "required": ["value", "label", "recommended"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["id", "question", "reason", "options"],
+        "additionalProperties": false
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "ready_for_plan": { "type": "boolean" }
+  },
+  "required": ["summary", "worktree_slug", "confirmed_facts", "questions", "assumptions", "ready_for_plan"],
+  "additionalProperties": false
+}

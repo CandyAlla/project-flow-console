@@ -1,0 +1,1324 @@
+(() => {
+  "use strict";
+
+  window.REQUIREMENT_FLOW_REAL_APP = true;
+
+  const UI_KEY = "project-flow-controller-v2";
+  const stages = [
+    { id: "input", label: "需求输入", title: "选择需求接入方式", description: "可创建新需求，或填写已有需求文档、执行 Plan 与 Worktree；接入前先做只读校验。" },
+    { id: "discuss", label: "讨论澄清", title: "先讨论，只问会导致返工的问题", description: "Codex 先读取当前 Project Profile 的项目事实，再把高返工决策压缩为 1–3 个问题。" },
+    { id: "plan", label: "Plan 验收", title: "验收范围、流程和完成标准", description: "Solution Plan Markdown 是执行契约草案，HTML 是同口径的逻辑验收视图。" },
+    { id: "worktree", label: "Worktree", title: "准备隔离执行环境", description: "展示真实 dry-run、分支、基准和路径；只有点击后才创建 Worktree。" },
+    { id: "execute", label: "执行", title: "按 Plan 执行并完成 Review", description: "Codex 在绑定 Worktree 内运行 workmission、change-guard 与 code-review。" },
+    { id: "verify", label: "人工验收", title: "按测试案例完成最终验收", description: "自动验证和人工结果分开记录；全部必测项通过后才进入 Commit。" },
+    { id: "commit", label: "Commit", title: "确认真实 Diff 后提交", description: "提交前重新读取 Git 状态；状态摘要变化时会拒绝 Commit。" },
+    { id: "bugfix", label: "Bug 修复", title: "提交后发现问题，进入修复循环", description: "填写复现信息后复用当前 Worktree 和任务记忆；修复仍需经过 Review、人工验收和新 Commit。" }
+  ];
+
+  const defaultUi = {
+    taskId: "",
+    taskFilter: "all",
+    showArchived: false,
+    taskViews: {},
+    viewStage: "input",
+    intakeMode: "new",
+    sourceType: "link",
+    title: "",
+    sourceUrl: "",
+    sourceText: "",
+    sourceFileName: "",
+    baseBranch: "main",
+    existingDocumentPath: "",
+    existingWorktreePath: "",
+    answers: {},
+    customAnswers: {},
+    discussionNote: "",
+    planView: "logic",
+    agentMemoryOpen: false,
+    checks: [],
+    verificationNote: "",
+    commitMessage: "",
+    commitConfirmed: false,
+    bugfixDescription: ""
+  };
+
+  let ui = loadUi();
+  let task = null;
+  let taskSummaries = [];
+  let scheduler = { maxConcurrentJobs: 2, runningJobs: 0, queuedJobs: 0 };
+  let health = null;
+  let token = "";
+  let selectedFile = null;
+  const feedbackImages = new Map();
+  let feedbackImageSequence = 0;
+  let busy = false;
+  let pollTimer = null;
+  let toastTimer = null;
+  let workspaceRefreshPending = false;
+
+  const stepsEl = document.querySelector("#steps");
+  const globalStatusEl = document.querySelector("#globalStatus");
+  const stageTitleEl = document.querySelector("#stageTitle");
+  const stageDescriptionEl = document.querySelector("#stageDescription");
+  const stageContentEl = document.querySelector("#stageContent");
+  const serviceBadgeEl = document.querySelector("#serviceBadge");
+  const toastEl = document.querySelector("#toast");
+  const taskListEl = document.querySelector("#taskList");
+  const taskCountEl = document.querySelector("#taskCount");
+  const taskQueueTitleEl = document.querySelector("#taskQueueTitle");
+  const taskFiltersEl = document.querySelector(".task-filters");
+  const archiveViewButtonEl = document.querySelector("#archiveViewButton");
+  const createTaskButtonEl = document.querySelector("#createTaskButton");
+  const schedulerNoteEl = document.querySelector("#schedulerNote");
+  document.querySelector("#resetButton").addEventListener("click", newTask);
+  createTaskButtonEl.addEventListener("click", newTask);
+  archiveViewButtonEl.addEventListener("click", () => {
+    ui.showArchived = !ui.showArchived;
+    saveUi();
+    renderTaskConsole();
+  });
+  stepsEl.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-stage-jump]");
+    if (!button || button.disabled) return;
+    captureVisibleFields();
+    ui.viewStage = button.dataset.stageJump;
+    render();
+  });
+  document.querySelector(".task-filters").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-task-filter]");
+    if (!button) return;
+    ui.taskFilter = button.dataset.taskFilter;
+    saveUi();
+    renderTaskConsole();
+  });
+  taskListEl.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-task-action]");
+    if (action) {
+      manageTask(action.dataset.taskId, action.dataset.taskAction);
+      return;
+    }
+    const button = event.target.closest("[data-task-open]");
+    if (button) switchTask(button.dataset.taskOpen);
+  });
+
+  const taskViewKeys = [
+    "viewStage", "intakeMode", "sourceType", "title", "sourceUrl", "sourceText", "sourceFileName", "baseBranch",
+    "existingDocumentPath", "existingWorktreePath",
+    "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "checks", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription"
+  ];
+
+  function taskViewSnapshot(source) {
+    const result = {};
+    taskViewKeys.forEach((key) => { result[key] = structuredClone(source[key]); });
+    return result;
+  }
+
+  function loadUi() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(UI_KEY));
+      const merged = {
+        ...structuredClone(defaultUi),
+        ...(saved || {}),
+        taskViews: { ...(saved?.taskViews || {}) },
+        answers: { ...(saved?.answers || {}) },
+        customAnswers: { ...(saved?.customAnswers || {}) }
+      };
+      if (saved?.taskId && !merged.taskViews[saved.taskId]) merged.taskViews[saved.taskId] = taskViewSnapshot(merged);
+      return merged;
+    } catch (_) {
+      return structuredClone(defaultUi);
+    }
+  }
+
+  function saveUi() {
+    const viewKey = task?.id || "__new__";
+    ui.taskViews ||= {};
+    ui.taskViews[viewKey] = taskViewSnapshot(ui);
+    localStorage.setItem(UI_KEY, JSON.stringify(ui));
+  }
+
+  function activateTaskView(taskId, fallback = {}) {
+    const taskViews = ui.taskViews || {};
+    const taskFilter = ui.taskFilter || "all";
+    const showArchived = Boolean(ui.showArchived);
+    const stored = taskViews[taskId] || fallback;
+    ui = {
+      ...structuredClone(defaultUi),
+      ...stored,
+      taskId: taskId === "__new__" ? "" : taskId,
+      taskFilter,
+      showArchived,
+      taskViews,
+      answers: { ...(stored.answers || {}) },
+      customAnswers: { ...(stored.customAnswers || {}) },
+      checks: [...(stored.checks || [])]
+    };
+  }
+
+  function escapeHTML(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function formatTime(value) {
+    if (!value) return "";
+    try { return new Date(value).toLocaleTimeString("zh-CN", { hour12: false }); }
+    catch (_) { return value; }
+  }
+
+  function formatDateTime(value) {
+    if (!value) return "";
+    try { return new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }); }
+    catch (_) { return value; }
+  }
+
+  function feedbackImageKey(kind) {
+    return `${task?.id || "__new__"}:${kind}`;
+  }
+
+  function feedbackImageItems(kind) {
+    const key = feedbackImageKey(kind);
+    if (!feedbackImages.has(key)) feedbackImages.set(key, []);
+    return feedbackImages.get(key);
+  }
+
+  function feedbackImageLimits() {
+    return {
+      maxCount: Number(health?.limits?.feedbackImages?.maxCount) || 6,
+      maxFileBytes: Number(health?.limits?.feedbackImages?.maxFileBytes) || 4 * 1024 * 1024,
+      maxTotalBytes: Number(health?.limits?.feedbackImages?.maxTotalBytes) || 8 * 1024 * 1024,
+      mimeTypes: health?.limits?.feedbackImages?.mimeTypes || ["image/png", "image/jpeg", "image/webp"]
+    };
+  }
+
+  function formatBytes(value) {
+    if (!value) return "0 KB";
+    if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`;
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function feedbackImagesPayload(kind) {
+    return feedbackImageItems(kind).map(({ name, mimeType, base64 }) => ({ name, mimeType, base64 }));
+  }
+
+  function clearFeedbackImages(kind) {
+    const key = feedbackImageKey(kind);
+    (feedbackImages.get(key) || []).forEach((item) => URL.revokeObjectURL(item.previewUrl));
+    feedbackImages.delete(key);
+  }
+
+  function removeFeedbackImage(kind, imageId) {
+    const items = feedbackImageItems(kind);
+    const index = items.findIndex((item) => item.id === imageId);
+    if (index < 0) return;
+    URL.revokeObjectURL(items[index].previewUrl);
+    items.splice(index, 1);
+    captureVisibleFields();
+    render();
+  }
+
+  function fileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || "").split(",", 2)[1] || "");
+      reader.onerror = () => reject(new Error(`无法读取图片：${file.name}`));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addFeedbackImages(kind, fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const items = feedbackImageItems(kind);
+    const limits = feedbackImageLimits();
+    if (items.length + files.length > limits.maxCount) {
+      showToast(`一次最多添加 ${limits.maxCount} 张图片。`, true);
+      return;
+    }
+    const unsupported = files.find((file) => !limits.mimeTypes.includes(file.type));
+    if (unsupported) {
+      showToast(`“${unsupported.name}”不是支持的图片，仅可使用 PNG、JPEG、WebP。`, true);
+      return;
+    }
+    const oversized = files.find((file) => file.size > limits.maxFileBytes);
+    if (oversized) {
+      showToast(`“${oversized.name}”超过单张 ${formatBytes(limits.maxFileBytes)} 限制。`, true);
+      return;
+    }
+    const totalBytes = [...items, ...files].reduce((sum, item) => sum + item.size, 0);
+    if (totalBytes > limits.maxTotalBytes) {
+      showToast(`图片总大小不能超过 ${formatBytes(limits.maxTotalBytes)}。`, true);
+      return;
+    }
+    try {
+      const encoded = await Promise.all(files.map(fileAsBase64));
+      const additions = files.map((file, index) => {
+        const sequence = ++feedbackImageSequence;
+        return {
+          id: `feedback-image-${sequence}`,
+          name: file.name || `screenshot-${sequence}.png`,
+          mimeType: file.type,
+          size: file.size,
+          base64: encoded[index],
+          previewUrl: URL.createObjectURL(file)
+        };
+      });
+      items.push(...additions);
+      captureVisibleFields();
+      render();
+    } catch (error) {
+      showToast(error.message || "图片读取失败。", true);
+    }
+  }
+
+  function renderFeedbackImageInput(kind) {
+    const items = feedbackImageItems(kind);
+    const limits = feedbackImageLimits();
+    const totalBytes = items.reduce((sum, item) => sum + item.size, 0);
+    const inputId = `${kind}ImageInput`;
+    return `<div class="feedback-images" data-feedback-kind="${escapeHTML(kind)}">
+      <div class="image-drop-zone" data-image-drop-zone="${escapeHTML(kind)}" role="button" tabindex="0" aria-label="选择、粘贴或拖入问题截图">
+        <input class="feedback-file-input" id="${escapeHTML(inputId)}" data-image-input="${escapeHTML(kind)}" type="file" accept="image/png,image/jpeg,image/webp" multiple>
+        <div><strong>添加截图</strong><span>可选择、直接粘贴，或拖入 PNG / JPEG / WebP</span></div>
+        <button class="small" type="button" data-image-pick="${escapeHTML(kind)}">选择图片</button>
+      </div>
+      ${items.length ? `<div class="feedback-image-grid" aria-label="已添加的图片">${items.map((item) => `<figure class="feedback-image-card"><img src="${escapeHTML(item.previewUrl)}" alt="${escapeHTML(item.name)} 的预览"><figcaption><span title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span><small>${formatBytes(item.size)}</small></figcaption><button type="button" data-image-remove="${escapeHTML(kind)}" data-image-id="${escapeHTML(item.id)}" aria-label="删除 ${escapeHTML(item.name)}">×</button></figure>`).join("")}</div>` : ""}
+      <span class="hint">已添加 ${items.length} / ${limits.maxCount} 张，${formatBytes(totalBytes)} / ${formatBytes(limits.maxTotalBytes)}。图片只保存在任务运行目录，不进入 Worktree 或 Commit。</span>
+    </div>`;
+  }
+
+  function updateFeedbackActionState(kind) {
+    const config = kind === "verification"
+      ? { textId: "verificationNote", buttonId: "returnToExecution" }
+      : { textId: "bugfixDescription", buttonId: "startBugfix" };
+    const button = document.getElementById(config.buttonId);
+    const text = document.getElementById(config.textId)?.value.trim() || "";
+    if (button) button.disabled = !text && !feedbackImageItems(kind).length;
+  }
+
+  function attachFeedbackImageHandlers(kind, textId) {
+    const input = document.querySelector(`[data-image-input="${kind}"]`);
+    const picker = document.querySelector(`[data-image-pick="${kind}"]`);
+    const dropZone = document.querySelector(`[data-image-drop-zone="${kind}"]`);
+    if (!input || !dropZone) return;
+
+    picker?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      input.click();
+    });
+    input.addEventListener("change", () => addFeedbackImages(kind, input.files));
+    dropZone.addEventListener("click", (event) => {
+      if (!event.target.closest("button")) input.click();
+    });
+    dropZone.addEventListener("keydown", (event) => {
+      if (["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        input.click();
+      }
+    });
+    ["dragenter", "dragover"].forEach((eventName) => dropZone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      dropZone.classList.add("is-dragging");
+    }));
+    dropZone.addEventListener("dragleave", (event) => {
+      if (!dropZone.contains(event.relatedTarget)) dropZone.classList.remove("is-dragging");
+    });
+    dropZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dropZone.classList.remove("is-dragging");
+      addFeedbackImages(kind, event.dataTransfer?.files);
+    });
+
+    const pasteImages = (event) => {
+      const files = Array.from(event.clipboardData?.items || [])
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter(Boolean);
+      if (!files.length) return;
+      event.preventDefault();
+      addFeedbackImages(kind, files);
+    };
+    dropZone.addEventListener("paste", pasteImages);
+    document.getElementById(textId)?.addEventListener("paste", pasteImages);
+    document.querySelectorAll(`[data-image-remove="${kind}"]`).forEach((button) => button.addEventListener("click", () => {
+      removeFeedbackImage(kind, button.dataset.imageId);
+    }));
+    updateFeedbackActionState(kind);
+  }
+
+  function showToast(message, error = false) {
+    window.clearTimeout(toastTimer);
+    toastEl.textContent = message;
+    toastEl.hidden = false;
+    toastEl.style.borderColor = error ? "#d8a0a6" : "#92bea9";
+    toastEl.style.background = error ? "#fff0f1" : "#f1fbf6";
+    toastEl.style.color = error ? "#7a2730" : "#174d38";
+    toastTimer = window.setTimeout(() => { toastEl.hidden = true; }, error ? 5200 : 2600);
+  }
+
+  function applyHealth(nextHealth) {
+    const previousDefaultBranch = defaultUi.baseBranch;
+    health = nextHealth;
+    token = health.token || "";
+    scheduler = health.scheduler || scheduler;
+    defaultUi.baseBranch = health.project?.defaultBaseBranch || "main";
+    if (!ui.taskId && (!ui.baseBranch || ui.baseBranch === previousDefaultBranch)) ui.baseBranch = defaultUi.baseBranch;
+    const projectName = health.project?.name || "Project";
+    document.title = `${projectName} · 需求工作流控制台`;
+    const projectEyebrow = document.querySelector("#projectEyebrow");
+    if (projectEyebrow) projectEyebrow.textContent = `${projectName} · Project Flow`;
+    serviceBadgeEl.textContent = health.ok ? `本地服务已连接 · ${health.codex.version}` : "本地服务预检失败";
+    serviceBadgeEl.style.borderColor = health.ok ? "#92bea9" : "#d8a0a6";
+    serviceBadgeEl.style.background = health.ok ? "#eaf7f1" : "#fff0f1";
+    serviceBadgeEl.style.color = health.ok ? "#216e4e" : "#a2333e";
+  }
+
+  async function refreshSessionToken() {
+    try {
+      const response = await fetch("/api/health", { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || !payload.token) return false;
+      applyHealth(payload);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function api(path, options = {}, retryToken = true) {
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Requirement-Flow-Token": token,
+        ...(options.headers || {})
+      }
+    });
+    if (response.status === 403 && retryToken && await refreshSessionToken()) return api(path, options, false);
+    let payload;
+    try { payload = await response.json(); }
+    catch (_) { payload = { error: `本地服务返回了无法解析的响应（HTTP ${response.status}）。` }; }
+    if (!response.ok || payload.ok === false) throw new Error(payload.error || `HTTP ${response.status}`);
+    return payload;
+  }
+
+  async function post(path, body = {}) {
+    return api(path, { method: "POST", body: JSON.stringify(body) });
+  }
+
+  function setTask(next, followStage = true) {
+    const changingTask = next?.id !== task?.id;
+    const hasStoredView = Boolean(next?.id && ui.taskViews?.[next.id]);
+    const draftFallback = !task && next ? taskViewSnapshot(ui) : { viewStage: next?.stage || "input" };
+    if (changingTask) saveUi();
+    task = next;
+    if (changingTask) activateTaskView(next?.id || "__new__", draftFallback);
+    ui.taskId = next?.id || "";
+    if (next && (followStage || !hasStoredView)) ui.viewStage = next.stage;
+    if (next) upsertTaskSummary(next);
+    saveUi();
+    render();
+    schedulePoll();
+  }
+
+  function summaryFromTask(value) {
+    let state = "attention";
+    if (value.archivedAt) state = "archived";
+    else if (value.git?.committed) state = "done";
+    else if (value.activeJob) state = value.jobState === "queued" ? "queued" : "running";
+    else if ([value.discussion, value.plan, value.worktree, value.execution].some((section) => ["error", "interrupted"].includes(section?.status))) state = "error";
+    return {
+      id: value.id,
+      title: value.title,
+      createdAt: value.createdAt,
+      updatedAt: value.updatedAt,
+      stage: value.stage,
+      maxStageIndex: value.maxStageIndex,
+      activeJob: value.activeJob,
+      jobState: value.jobState || "idle",
+      state,
+      archivedAt: value.archivedAt || "",
+      worktree: value.worktree,
+      intakeMode: value.intake?.mode || "new",
+      committed: Boolean(value.git?.committed),
+      agent: {
+        id: String(value.agentMemory?.logicalAgentId || value.id).slice(0, 8),
+        memoryVersion: value.agentMemory?.version || 1,
+        memoryUpdatedAt: value.agentMemory?.updatedAt || value.updatedAt,
+        sessionCount: Object.values(value.agentMemory?.sessions || {}).filter(Boolean).length
+      }
+    };
+  }
+
+  function upsertTaskSummary(value) {
+    const summary = summaryFromTask(value);
+    taskSummaries = [summary, ...taskSummaries.filter((item) => item.id !== summary.id)]
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
+
+  async function refreshTaskSummaries() {
+    const result = await api("/api/tasks");
+    taskSummaries = result.tasks || [];
+    scheduler = result.scheduler || scheduler;
+    return result;
+  }
+
+  async function boot() {
+    try {
+      const response = await fetch("/api/health", { cache: "no-store" });
+      applyHealth(await response.json());
+      await refreshTaskSummaries();
+      if (ui.taskId) {
+        try {
+          const result = await api(`/api/tasks/${ui.taskId}`);
+          task = result.task;
+        } catch (error) {
+          activateTaskView("__new__");
+          task = null;
+          saveUi();
+          showToast(error.message, true);
+        }
+      }
+    } catch (error) {
+      health = { ok: false, warnings: ["无法连接本地服务。请使用 start.command 启动，不要直接双击 index.html。"] };
+      serviceBadgeEl.textContent = "本地服务未连接";
+      serviceBadgeEl.style.borderColor = "#d8a0a6";
+      serviceBadgeEl.style.background = "#fff0f1";
+      serviceBadgeEl.style.color = "#a2333e";
+    }
+    render();
+    schedulePoll();
+  }
+
+  function schedulePoll() {
+    window.clearTimeout(pollTimer);
+    if (!token) return;
+    pollTimer = window.setTimeout(async () => {
+      try {
+        const wasActive = task?.activeJob;
+        const selectedId = task?.id;
+        await refreshTaskSummaries();
+        const selectedSummary = taskSummaries.find((item) => item.id === selectedId);
+        if (selectedId && selectedSummary && selectedSummary.updatedAt !== task.updatedAt) {
+          const result = await api(`/api/tasks/${selectedId}`);
+          task = result.task;
+          workspaceRefreshPending = true;
+          if (wasActive && !task.activeJob) {
+            const section = task[wasActive];
+            showToast(section?.status === "error" ? `${jobLabel(wasActive)}失败：${section.error}` : `${jobLabel(wasActive)}已完成。`, section?.status === "error");
+          }
+        }
+        if (workspaceRefreshPending && !stageEditorFocused()) render();
+        else renderShell();
+      } catch (error) {
+        showToast(error.message, true);
+      }
+      schedulePoll();
+    }, taskSummaries.some((item) => ["running", "queued"].includes(item.state)) ? 1200 : 3200);
+  }
+
+  function currentStageId() {
+    if (!task) return "input";
+    const max = Math.max(0, Number(task.maxStageIndex) || 0);
+    const requested = Math.max(0, stages.findIndex((item) => item.id === ui.viewStage));
+    return stages[Math.min(requested, max)]?.id || task.stage;
+  }
+
+  function statusText() {
+    if (!health?.ok) return "等待启动本地服务";
+    if (!task) return "等待输入需求";
+    if (task.archivedAt) return "任务已归档 · 恢复后可继续";
+    if (task.git?.committed) return `Commit 完成 · ${task.git.commitId.slice(0, 12)}${task.stage === "bugfix" ? " · 可继续修 Bug" : ""}`;
+    if (task.activeJob) {
+      const label = task.activeJob === "execution" && task.execution?.mode === "acceptance_fix" ? "人工验收定向返修" : jobLabel(task.activeJob);
+      return `${label}${task.jobState === "queued" ? "排队中" : "正在运行"}`;
+    }
+    const map = {
+      discuss: "等待讨论与口径确认",
+      plan: "等待 Plan 逻辑验收",
+      worktree: "等待创建 Worktree",
+      execute: task.execution?.status === "needs_attention" ? "Review 仍有发现" : "等待执行 Plan",
+      verify: "等待人工验收",
+      commit: "等待 Commit 确认",
+      bugfix: "等待 Bug 反馈或任务归档"
+    };
+    return map[task.stage] || "等待操作";
+  }
+
+  function jobLabel(value) {
+    return ({ discussion: "需求讨论", plan: "Plan 生成", worktree: "Worktree 创建", execution: "Plan 执行" })[value] || value;
+  }
+
+  function render() {
+    workspaceRefreshPending = false;
+    renderShell();
+    const stageId = currentStageId();
+    const meta = stages.find((item) => item.id === stageId) || stages[0];
+    stageTitleEl.textContent = task?.git?.committed && stageId === "commit" ? "Commit 已完成" : meta.title;
+    stageDescriptionEl.textContent = meta.description;
+    const renderers = { input: renderInput, discuss: renderDiscuss, plan: renderPlan, worktree: renderWorktree, execute: renderExecute, verify: renderVerify, commit: renderCommit, bugfix: renderBugfix };
+    const archiveNotice = task?.archivedAt
+      ? callout(`<strong>该任务已归档。</strong> 当前仅供回看；请从左侧归档列表恢复后再继续执行。`, "warning")
+      : "";
+    stageContentEl.innerHTML = `${archiveNotice}${renderAgentMemory()}${renderers[stageId]()}`;
+    attachHandlers(stageId);
+    if (task?.archivedAt) {
+      stageContentEl.querySelectorAll("button, input, textarea, select").forEach((control) => { control.disabled = true; });
+    }
+    saveUi();
+  }
+
+  function renderShell() {
+    renderTaskConsole();
+    renderSteps();
+    globalStatusEl.textContent = statusText();
+    saveUi();
+  }
+
+  function stageEditorFocused() {
+    const active = document.activeElement;
+    return Boolean(active && stageContentEl.contains(active) && active.matches("input, textarea, select, [contenteditable='true']"));
+  }
+
+  function taskManagementReady() {
+    return Boolean(health?.features?.taskManagement);
+  }
+
+  function taskStateLabel(item) {
+    if (item.archivedAt) return "已归档";
+    if (item.state === "queued") return "排队中";
+    if (item.state === "running") return `${jobLabel(item.activeJob)}中`;
+    if (item.state === "done") return "已完成";
+    if (item.state === "error") return "需要处理";
+    return "等待操作";
+  }
+
+  function renderTaskConsole() {
+    const activeTasks = taskSummaries.filter((item) => !item.archivedAt);
+    const archivedTasks = taskSummaries.filter((item) => item.archivedAt);
+    const groups = {
+      all: activeTasks,
+      running: activeTasks.filter((item) => ["running", "queued"].includes(item.state)),
+      attention: activeTasks.filter((item) => ["attention", "error"].includes(item.state)),
+      done: activeTasks.filter((item) => item.state === "done")
+    };
+    const activeFilter = groups[ui.taskFilter] ? ui.taskFilter : "all";
+    const labels = { all: "全部", running: "运行", attention: "待处理", done: "完成" };
+    document.querySelectorAll("[data-task-filter]").forEach((button) => {
+      const id = button.dataset.taskFilter;
+      button.classList.toggle("active", id === activeFilter);
+      button.textContent = `${labels[id]} ${groups[id].length}`;
+      button.setAttribute("aria-pressed", id === activeFilter ? "true" : "false");
+    });
+    taskFiltersEl.hidden = ui.showArchived;
+    taskQueueTitleEl.textContent = ui.showArchived ? "归档任务" : "需求队列";
+    archiveViewButtonEl.textContent = ui.showArchived ? "返回队列" : `查看归档${archivedTasks.length ? ` ${archivedTasks.length}` : ""}`;
+    archiveViewButtonEl.setAttribute("aria-pressed", ui.showArchived ? "true" : "false");
+    const managementReady = taskManagementReady();
+    archiveViewButtonEl.disabled = busy || !managementReady;
+    archiveViewButtonEl.title = managementReady ? "" : "等待当前后台任务结束后安全更新本地服务";
+    createTaskButtonEl.disabled = busy;
+    taskCountEl.textContent = ui.showArchived
+      ? `${archivedTasks.length} 条归档任务`
+      : `${activeTasks.length} 条需求 · ${scheduler.runningJobs || 0} 运行${scheduler.queuedJobs ? ` / ${scheduler.queuedJobs} 排队` : ""}`;
+    schedulerNoteEl.textContent = ui.showArchived
+      ? "恢复后任务会回到原阶段；删除不会清理 Worktree、Plan 或 HTML。"
+      : `最多并行 ${scheduler.maxConcurrentJobs || 2} 个后台任务；切换查看不会停止执行。`;
+    const visible = ui.showArchived ? archivedTasks : groups[activeFilter];
+    taskListEl.innerHTML = visible.length ? visible.map((item) => {
+      const stage = stages.find((entry) => entry.id === item.stage)?.label || item.stage;
+      const intake = ({ existing_requirement: "已有文档", existing_plan: "已有 Plan" })[item.intakeMode];
+      const selected = item.id === task?.id;
+      const action = item.archivedAt ? "restore" : "archive";
+      const actionLabel = item.archivedAt ? "恢复" : "归档";
+      const locked = busy || !managementReady || Boolean(item.activeJob);
+      const lockTitle = item.activeJob
+        ? "任务正在执行，完成后才能操作"
+        : managementReady ? "" : "等待当前后台任务结束后安全更新本地服务";
+      return `<article class="task-card ${selected ? "active" : ""}" data-state="${escapeHTML(item.state)}">
+        <button type="button" class="task-card-main" data-task-open="${escapeHTML(item.id)}" ${selected ? 'aria-current="true"' : ""}>
+          <span class="task-card-title">${escapeHTML(item.title)}</span>
+          <span class="task-card-meta"><span>${escapeHTML(intake ? `${stage} · ${intake}` : stage)}</span><span>${escapeHTML(formatDateTime(item.archivedAt || item.updatedAt))}</span></span>
+          <span class="task-card-state"><strong>${escapeHTML(taskStateLabel(item))}</strong><span>Agent ${escapeHTML(item.agent?.id || item.id.slice(0, 8))} · ${Number(item.agent?.sessionCount || 0)} 会话</span></span>
+        </button>
+        <div class="task-card-actions"><button type="button" class="task-card-action" data-task-action="${action}" data-task-id="${escapeHTML(item.id)}" ${locked ? "disabled" : ""} title="${escapeHTML(lockTitle)}">${actionLabel}</button><button type="button" class="task-card-action danger" data-task-action="delete" data-task-id="${escapeHTML(item.id)}" ${locked ? "disabled" : ""} title="${escapeHTML(lockTitle)}">删除</button></div>
+      </article>`;
+    }).join("") : `<p class="task-empty">${ui.showArchived ? "还没有归档任务。" : activeFilter === "all" ? "还没有需求，点击上方“新建”。" : "当前筛选下没有需求。"}</p>`;
+  }
+
+  function renderSteps() {
+    const current = Math.max(0, stages.findIndex((item) => item.id === currentStageId()));
+    const furthest = task ? Math.max(0, Number(task.maxStageIndex) || 0) : 0;
+    stepsEl.innerHTML = stages.map((item, index) => {
+      const reached = index <= furthest;
+      const completed = task ? index < furthest || (item.id === "commit" && task.git?.committed) : false;
+      const cls = `${completed ? "completed" : ""} ${index === current ? "current" : ""}`.trim();
+      return `<button type="button" class="step ${cls}" data-stage-jump="${item.id}" ${reached ? "" : "disabled"} ${index === current ? 'aria-current="step"' : ""}><span class="step-number">${completed ? "✓" : index + 1}</span><span class="step-label">${item.label}</span></button>`;
+    }).join("");
+  }
+
+  function callout(text, type = "warning") {
+    return `<div class="callout ${type}"><p>${text}</p></div>`;
+  }
+
+  function eventLogDetails() {
+    if (!task) return "";
+    const operation = task.activeJob ? task[task.activeJob] : null;
+    const logs = [...(task.events || []), ...(operation?.logs || [])].slice(-30).reverse();
+    const rows = logs.length
+      ? logs.map((item) => `<div class="event-row"><span class="mono">${escapeHTML(formatTime(item.time))}</span><span>${escapeHTML(item.message)}</span></div>`).join("")
+      : '<span class="hint">还没有状态事件。</span>';
+    return `<details><summary>查看真实状态记录</summary><div class="event-log">${rows}</div></details>`;
+  }
+
+  function memoryBlock(title, items) {
+    const values = (items || []).filter(Boolean).slice(0, 8);
+    if (!values.length) return "";
+    return `<section class="agent-memory-block"><h3>${escapeHTML(title)}</h3><ul>${values.map((item) => `<li>${escapeHTML(item)}</li>`).join("")}</ul></section>`;
+  }
+
+  function renderAgentMemory() {
+    if (!task) return "";
+    const memory = task.agentMemory || {};
+    const sessions = memory.sessions || {};
+    const sessionCount = Object.values(sessions).filter(Boolean).length;
+    const sessionSummary = ["discussion", "execution", "review"]
+      .map((key) => `${key}: ${sessions[key] ? `${String(sessions[key]).slice(0, 8)}…` : "未建立"}`)
+      .join(" · ");
+    const boundary = [...(memory.nonScope || []), ...(memory.assumptions || []).map((item) => `假设：${item}`)];
+    const blocks = [
+      memoryBlock("已确认事实", memory.confirmedFacts),
+      memoryBlock("用户决策", memory.decisions),
+      memoryBlock("范围与边界", [...(memory.scope || []), ...boundary]),
+      memoryBlock("相关文件", memory.relevantFiles),
+      memoryBlock("已完成步骤", memory.completedSteps),
+      memoryBlock("验证证据", memory.verificationEvidence)
+    ].filter(Boolean).join("");
+    return `<details class="agent-memory" id="agentMemoryPanel" ${ui.agentMemoryOpen ? "open" : ""}><summary><span>逻辑 Agent ${escapeHTML(String(memory.logicalAgentId || task.id).slice(0, 8))} 的持久记忆</span><small>记忆 v${escapeHTML(memory.version || 1)} · ${sessionCount} 个会话 · ${escapeHTML(formatDateTime(memory.updatedAt || task.updatedAt))}</small></summary>
+      <div class="agent-memory-body"><p>${escapeHTML(memory.summary || task.title)}</p><p class="agent-next">下一步：${escapeHTML(memory.nextAction || "按当前流程继续。")}</p>
+      <div class="agent-memory-meta"><div><span>持久会话</span><strong class="mono">${escapeHTML(sessionSummary)}</strong></div><div><span>Plan 指纹</span><strong class="mono">${escapeHTML(memory.fingerprints?.planSha256 ? `${memory.fingerprints.planSha256.slice(0, 12)}…` : "尚未生成")}</strong></div><div><span>Worktree 目标</span><strong class="mono">${escapeHTML(memory.workspace?.worktree || "尚未创建")}</strong></div></div>
+      ${blocks ? `<div class="agent-memory-grid">${blocks}</div>` : ""}</div></details>`;
+  }
+
+  function renderProgress(section, title) {
+    const queued = section?.status === "queued";
+    const logs = section?.logs || [];
+    const rows = logs.length
+      ? logs.slice(-12).map((item, index) => `<div class="run-step ${index === logs.length - 1 ? "running" : "done"}"><span class="run-mark">${index === logs.length - 1 ? "…" : "✓"}</span><div><strong>${escapeHTML(item.message)}</strong><div class="hint">${escapeHTML(formatTime(item.time))}</div></div><small>${index === logs.length - 1 ? "进行中" : "完成"}</small></div>`).join("")
+      : `<div class="run-step running"><span class="run-mark">…</span><div><strong>${escapeHTML(title)}</strong><div class="hint">${queued ? "等待空闲并发槽位" : "等待 Codex 返回第一条事件"}</div></div><small>${queued ? "排队" : "进行中"}</small></div>`;
+    return `<section class="section">${callout(`<strong>${escapeHTML(title)}</strong> ${queued ? "任务已进入后台队列。" : "本地服务正在运行受控操作。"} 你可以切换查看其他需求；刷新后仍可恢复状态。`, "warning")}</section><section class="section"><h3>实时进度</h3><div class="run-list">${rows}</div></section>${eventLogDetails()}`;
+  }
+
+  function renderInput() {
+    const warning = !health?.ok
+      ? callout(`<strong>本地服务不可用。</strong> ${(health?.warnings || []).map(escapeHTML).join(" ")}`, "danger")
+      : (health.warnings || []).map((item) => callout(escapeHTML(item), "warning")).join("");
+    const panels = {
+      link: `<div class="field"><label for="sourceUrl">策划文档链接</label><input id="sourceUrl" type="url" placeholder="https://docs.example.com/..." value="${escapeHTML(ui.sourceUrl)}"><span class="hint">飞书 / Lark 链接强制通过 Chrome MCP 复用当前登录态只读获取；其他公开链接由 Codex 尝试读取。</span></div>`,
+      file: `<div class="field"><label for="sourceFile">选择策划文档</label><input id="sourceFile" type="file" accept=".md,.txt,.pdf,.doc,.docx,.html"><span class="hint">${selectedFile ? `已选择：${escapeHTML(selectedFile.name)}` : ui.sourceFileName ? `刷新后需重新选择：${escapeHTML(ui.sourceFileName)}` : "文件保存在本地任务运行目录，最大 8 MB。"}</span></div>`,
+      paste: `<div class="field"><label for="sourceText">粘贴策划内容</label><textarea id="sourceText" placeholder="粘贴需求目标、规则、流程或已有草稿……">${escapeHTML(ui.sourceText)}</textarea><span class="hint">材料会作为不可信需求输入交给只读 Codex 会话，不会被当作控制指令。</span></div>`
+    };
+    const intakeOptions = [
+      { id: "new", label: "新需求" },
+      { id: "existing_requirement", label: "已有需求文档" },
+      { id: "existing_plan", label: "已有执行 Plan" }
+    ];
+    const newFields = `<div class="field"><label for="baseBranch">Worktree 基准</label><input id="baseBranch" class="mono" type="text" value="${escapeHTML(ui.baseBranch)}"><span class="hint">默认使用本地 ${escapeHTML(health?.project?.defaultBaseBranch || "main")}，不自动 Fetch；创建前会执行真实 dry-run。</span></div>
+      <div class="field"><span>需求来源</span><div class="source-tabs" role="group" aria-label="选择需求来源">${["link", "file", "paste"].map((id) => `<button type="button" class="${ui.sourceType === id ? "active" : ""}" data-source-type="${id}">${({ link: "粘贴链接", file: "上传文档", paste: "粘贴内容" })[id]}</button>`).join("")}</div><div class="source-panel">${panels[ui.sourceType]}</div></div>`;
+    const isPlan = ui.intakeMode === "existing_plan";
+    const existingFields = `${callout(isPlan
+      ? `<strong>直接进入执行。</strong> Plan 必须是 Worktree 内或配置的文档目录 <code>${escapeHTML(health?.paths?.docs || "docsRoot")}</code> 内的 UTF-8 Markdown；本步只校验，不运行 Codex。`
+      : "<strong>继续需求梳理。</strong> 将读取已有文档完成 discussion、ask-first、Plan 和 HTML；已有 Worktree 只做接入，不创建新目录。", "warning")}
+      <div class="field"><label for="existingDocumentPath">${isPlan ? "执行 Plan 绝对路径" : "需求文档绝对路径"}</label><input id="existingDocumentPath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.workspace || "/absolute/project/path")}/${isPlan ? "plan.md" : "requirement.md"}" value="${escapeHTML(ui.existingDocumentPath)}"><span class="hint">${isPlan ? "仅支持 .md，最大 240 KB。" : "支持 md、txt、pdf、doc、docx、html，文件需位于 Profile 允许的项目路径。"}</span></div>
+      <div class="field"><label for="existingWorktreePath">已有 Worktree 绝对路径</label><input id="existingWorktreePath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.worktrees || "/absolute/worktrees")}/${escapeHTML(health?.project?.worktreeNamePrefix || "Project")}_feature" value="${escapeHTML(ui.existingWorktreePath)}"><span class="hint">必须是当前 Profile 主仓库的独立 linked worktree；会校验 Git 根目录、分支和未完成操作，不切换分支。</span></div>`;
+    const intro = ui.intakeMode === "new"
+      ? "<strong>新需求流程。</strong> 下一步只启动只读讨论，不写文档、不改代码。"
+      : isPlan
+        ? "<strong>接入已有执行资产。</strong> 校验通过后直接等待你点击“执行 Plan”。"
+        : "<strong>接入已有需求资产。</strong> 校验通过后从只读讨论开始，并复用填写的 Worktree。";
+    const actionHint = ui.intakeMode === "new" || ui.intakeMode === "existing_requirement"
+      ? "需求讨论使用 read-only sandbox；接入已有路径前先做本地只读校验。"
+      : "这一步不运行 Codex、不写文件，只校验 Plan 与 Worktree。";
+    const actionLabel = ui.intakeMode === "new" ? "开始梳理需求" : isPlan ? "接入并进入执行" : "接入并开始梳理";
+    return `<section class="section">${warning || callout(intro, "ok")}</section>
+      <section class="section"><div class="field"><span>任务接入方式</span><div class="source-tabs" role="group" aria-label="选择任务接入方式">${intakeOptions.map((item) => `<button type="button" class="${ui.intakeMode === item.id ? "active" : ""}" data-intake-mode="${item.id}">${item.label}</button>`).join("")}</div></div>
+      <div class="field"><label for="taskTitle">需求名称</label><input id="taskTitle" type="text" placeholder="例如：新手免费提示引导" value="${escapeHTML(ui.title)}"></div>
+      ${ui.intakeMode === "new" ? newFields : existingFields}</section>
+      <div class="actions"><div class="actions-secondary"><span class="hint">${actionHint}</span></div><div class="actions-primary"><button class="primary" id="startDiscussion" type="button" ${health?.ok && !busy ? "" : "disabled"}>${actionLabel}</button></div></div>`;
+  }
+
+  function renderDiscuss() {
+    const section = task.discussion;
+    if (["queued", "running"].includes(section.status)) {
+      const title = task.source?.reader === "chrome_mcp"
+        ? "Chrome MCP 正在只读获取飞书需求并扫描项目事实"
+        : "discussion-only / ask-first 正在读取项目事实";
+      return renderProgress(section, title);
+    }
+    if (["error", "interrupted"].includes(section.status)) {
+      return `<section class="section">${callout(`<strong>讨论阶段未完成：</strong>${escapeHTML(section.error)}`, "danger")}</section><div class="actions"><div class="actions-secondary"><button id="newTaskButton">返回新建需求</button></div></div>${eventLogDetails()}`;
+    }
+    const result = section.result || {};
+    const questions = result.questions || [];
+    const messages = (section.messages || []).map((message) => `<div class="message user"><span class="message-role">你</span>${escapeHTML(message.note || Object.values(message.answers || {}).join("；") || "已提交回答")}</div>`).join("");
+    return `<section class="section"><div class="summary-grid"><div class="summary-item"><span>Codex 结论</span><strong>${escapeHTML(result.summary || "已完成事实扫描")}</strong></div><div class="summary-item"><span>Plan 就绪度</span><strong>${result.ready_for_plan ? "可以形成 Solution Plan" : "仍有高返工点待确认"}</strong></div></div></section>
+      ${result.confirmed_facts?.length ? `<section class="section"><h3>已确认事实</h3><div class="checklist">${result.confirmed_facts.map((item) => staticCheck(item, "来自项目事实或当前需求材料")).join("")}</div></section>` : ""}
+      <section class="section"><h3>Ask-first：${questions.length ? `确认 ${questions.length} 个高返工问题` : "当前没有新的阻塞问题"}</h3><div class="question-list">${questions.map(questionFieldset).join("")}</div></section>
+      <section class="section"><h3>继续补充和讨论</h3><div class="conversation">${messages || '<div class="message"><span class="message-role">Codex · discussion-only</span>已读取需求和项目事实，等待你的回答。</div>'}</div><div class="field"><label for="discussionNote">补充说明</label><textarea id="discussionNote" placeholder="补充特殊口径，或在这里继续讨论……">${escapeHTML(ui.discussionNote)}</textarea></div></section>
+      <div class="actions"><div class="actions-secondary"><button id="backToInput" type="button">新建另一条需求</button>${questions.length ? '<button id="sendDiscussionNote" type="button">提交回答，继续讨论</button>' : ""}</div><div class="actions-primary"><button class="primary" id="generatePlan" type="button">确认口径并生成 Plan</button></div></div>${eventLogDetails()}`;
+  }
+
+  function questionFieldset(question, index) {
+    const id = String(question.id || `q${index + 1}`);
+    const selected = ui.answers[id] || "";
+    return `<fieldset class="question"><legend>${index + 1}. ${escapeHTML(question.question)}</legend><p class="question-help">${escapeHTML(question.reason)}</p>${(question.options || []).map((option) => `<label class="choice"><input type="radio" name="question-${escapeHTML(id)}" data-question-id="${escapeHTML(id)}" value="${escapeHTML(option.value)}" ${selected === option.value ? "checked" : ""}><span>${escapeHTML(option.label)}${option.recommended ? ' <span class="recommended">推荐</span>' : ""}</span></label>`).join("")}
+      <label class="choice"><input type="radio" name="question-${escapeHTML(id)}" data-question-id="${escapeHTML(id)}" value="__custom__" ${selected === "__custom__" ? "checked" : ""}><span>自定义回复</span></label>
+      <div class="custom-answer" data-custom-wrap="${escapeHTML(id)}" ${selected === "__custom__" ? "" : "hidden"}><label>填写你的口径</label><textarea data-custom-id="${escapeHTML(id)}" placeholder="输入这道问题的自定义答案……">${escapeHTML(ui.customAnswers[id] || "")}</textarea></div></fieldset>`;
+  }
+
+  function collectAnswers() {
+    const questions = task?.discussion?.result?.questions || [];
+    const answers = {};
+    for (const [index, question] of questions.entries()) {
+      const id = String(question.id || `q${index + 1}`);
+      const selected = ui.answers[id];
+      if (!selected) throw new Error(`请先回答第 ${index + 1} 个问题。`);
+      if (selected === "__custom__") {
+        const custom = String(ui.customAnswers[id] || "").trim();
+        if (!custom) throw new Error(`请填写第 ${index + 1} 个问题的自定义回复。`);
+        answers[id] = custom;
+      } else {
+        const option = (question.options || []).find((item) => item.value === selected);
+        answers[id] = option?.label || selected;
+      }
+    }
+    return answers;
+  }
+
+  function renderPlan() {
+    const section = task.plan;
+    if (["queued", "running"].includes(section.status)) return renderProgress(section, "prd-to-plan / clear-html 正在生成方案草案");
+    if (["error", "interrupted"].includes(section.status)) return `<section class="section">${callout(`<strong>Plan 生成失败：</strong>${escapeHTML(section.error)}`, "danger")}</section><div class="actions"><div class="actions-secondary"><button id="returnToDiscuss">返回讨论</button></div><div class="actions-primary"><button class="primary" id="retryPlan">重试生成 Plan</button></div></div>${eventLogDetails()}`;
+    if (section.status !== "ready") return renderProgress(section, "等待生成 Plan");
+    const result = section.result || {};
+    if (task.intake?.mode === "existing_plan") {
+      return `<section class="section">${callout("<strong>这是接入的已有执行 Plan。</strong> 控制台不会重新生成或覆盖它；执行前请在下方确认路径和内容。", "warning")}</section>
+        <section class="section"><div class="path-list"><div class="path-row"><span>Plan</span><strong class="mono">${escapeHTML(section.finalPath)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div><div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(task.worktree.branch)}</strong></div></div><div class="preview"><pre>${escapeHTML(section.markdown)}</pre></div></section>
+        <div class="actions"><div class="actions-secondary"><span class="hint">已有 Plan 已标记为批准；不会在此页面修改文件。</span></div><div class="actions-primary"><button class="primary" id="goCurrentStage">返回执行阶段</button></div></div>${eventLogDetails()}`;
+    }
+    const logic = `<div class="callout ok"><p><strong>HTML 验收页已落地。</strong> <a href="${escapeHTML(section.htmlUrl)}" target="_blank" rel="noopener">在新窗口打开逻辑验收页</a></p></div><iframe title="逻辑验收 HTML" src="${escapeHTML(section.htmlUrl)}" style="width:100%;height:620px;margin-top:16px;border:1px solid var(--line);background:#fff"></iframe>`;
+    const md = `<div class="preview"><pre>${escapeHTML(section.markdown)}</pre></div>`;
+    const importedWorktree = task.intake?.mode === "existing_requirement";
+    return `<section class="section"><div class="summary-grid"><div class="summary-item"><span>方案摘要</span><strong>${escapeHTML(result.summary)}</strong></div><div class="summary-item"><span>草案状态</span><strong>${section.approved ? "已批准" : "等待逻辑验收"}</strong></div></div></section>
+      <section class="section"><div class="view-tabs"><button data-plan-view="logic" class="${ui.planView === "logic" ? "active" : ""}">逻辑 HTML</button><button data-plan-view="md" class="${ui.planView === "md" ? "active" : ""}">Markdown</button></div>${ui.planView === "logic" ? logic : md}</section>
+      <section class="section"><h3>验收口径</h3><div class="checklist">${(result.acceptance || []).map((item) => staticCheck(item, "Plan 中的完成标准")).join("")}</div></section>
+      <div class="actions"><div class="actions-secondary"><button id="returnToDiscuss" ${section.approved ? "disabled" : ""}>退回讨论</button></div><div class="actions-primary">${section.approved ? '<button class="primary" id="goCurrentStage">返回当前阶段</button>' : `<button class="primary" id="approvePlan">${importedWorktree ? "逻辑没问题，预检已有 Worktree" : "逻辑没问题，批准并预检 Worktree"}</button>`}</div></div>${eventLogDetails()}`;
+  }
+
+  function renderWorktree() {
+    const section = task.worktree;
+    const imported = Boolean(section.imported);
+    if (["queued", "running"].includes(section.status)) return renderProgress(section, imported ? "正在重新验证已有 Worktree 并绑定 Plan" : `git-worktree 正在创建${health?.capabilities?.initializeSubmodules ? "并初始化 Submodule" : ""}`);
+    const retryHint = imported ? "未覆盖已有文件；请按错误信息处理后重试绑定。" : "如果目录已部分创建，再次点击会只接管本任务预期的路径和分支并重试 Submodule。";
+    const error = ["error", "partial", "interrupted"].includes(section.status) ? callout(`<strong>Worktree 未完成：</strong>${escapeHTML(section.error)}<br>${retryHint}`, "danger") : "";
+    const intro = imported
+      ? "<strong>已有 Worktree 预检已完成。</strong> 不创建目录、不切换分支、不初始化 Submodule；点击后只把已批准 Plan 写入该 Worktree。"
+      : "<strong>创建前预检已完成。</strong> 未提交的主仓库改动不会复制到新 Worktree；不会 Fetch、切换主仓库分支、Push 或 Merge。";
+    return `<section class="section">${error || callout(intro, "warning")}</section>
+      <section class="section"><div class="path-list"><div class="path-row"><span>主仓库</span><strong class="mono">${escapeHTML(health?.paths?.repo)}</strong></div>${imported ? "" : `<div class="path-row"><span>基准</span><strong class="mono">${escapeHTML(section.base)}</strong></div>`}<div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(section.branch)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(section.path)}</strong></div><div class="path-row"><span>Plan 目标</span><strong class="mono">${escapeHTML(task.paths.planRelative)}</strong></div></div></section>
+      <section class="section"><h3>${imported ? "已有 Worktree 校验" : "真实 dry-run"}</h3><div class="preview"><pre>${escapeHTML(section.preview || "等待预检输出")}</pre></div></section>
+      <div class="actions"><div class="actions-secondary"><button id="backToPlan">返回 Plan</button></div><div class="actions-primary"><button class="primary" id="createWorktree">${imported ? "绑定 Plan 到已有 Worktree" : section.status === "error" ? "重试创建 Worktree" : "创建 Worktree"}</button></div></div>${eventLogDetails()}`;
+  }
+
+  function reviewPanel(review) {
+    if (!review) return "";
+    const findings = review.findings || [];
+    return `<section class="section"><h3>Code Review</h3>${callout(`<strong>${review.verdict === "pass" ? "通过" : "仍需修复"}：</strong>${escapeHTML(review.summary)}`, review.verdict === "pass" ? "ok" : "danger")}${findings.length ? `<div class="checklist" style="margin-top:14px">${findings.map((item) => `<div class="check-row"><span>${escapeHTML(item.severity)}</span><div><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(item.file)}:${escapeHTML(item.line)} · ${escapeHTML(item.detail)}</span></div></div>`).join("")}</div>` : ""}</section>`;
+  }
+
+  function renderExecute() {
+    const section = task.execution;
+    if (["queued", "running"].includes(section.status)) {
+      const targeted = section.mode === "acceptance_fix";
+      const title = targeted ? `人工验收定向返修 · ${section.phase || "implementation"}` : `workmission 执行中 · ${section.phase || "implementation"}`;
+      const fixMinutes = Math.ceil(Number(health?.limits?.acceptanceFixSeconds || 480) / 60);
+      const reviewMinutes = Math.ceil(Number(health?.limits?.acceptanceReviewSeconds || 300) / 60);
+      const hint = targeted ? `只处理验收备注；返修最长 ${fixMinutes} 分钟，定向 Review 最长 ${reviewMinutes} 分钟。` : "停止后保留已有实施结果与 Worktree 改动。";
+      return `${renderProgress(section, title)}<div class="actions"><div class="actions-secondary"><span class="hint">${hint}</span></div><div class="actions-primary"><button class="danger" id="cancelExecution">停止当前执行</button></div></div>`;
+    }
+    const error = ["error", "interrupted"].includes(section.status) ? callout(`<strong>执行中断：</strong>${escapeHTML(section.error)}`, "danger") : "";
+    const needs = section.status === "needs_attention";
+    const canResetSession = Boolean(error && task.agentMemory?.sessions?.execution);
+    const imported = task.worktree?.imported ? "已有 Worktree 已接入" : "隔离环境已绑定";
+    return `<section class="section">${error || callout(`<strong>${imported}。</strong> Plan 位于 <code>${escapeHTML(task.plan.finalPath || task.paths.planRelative)}</code>；点击后 Codex 才会获得 Worktree 写权限。`, needs ? "danger" : "warning")}</section>
+      <section class="section"><div class="summary-grid"><div class="summary-item"><span>执行目录</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div><div class="summary-item"><span>Skill 链</span><strong>${escapeHTML([...(health?.skills?.execution || []), ...(health?.skills?.review || [])].join(" → ") || "通用项目规则")}</strong></div>${task.worktree?.imported ? `<div class="summary-item"><span>接入时 Git 改动</span><strong>${Number(task.git?.entries?.length || 0)} 个文件，Commit 前完整复核</strong></div>` : ""}</div></section>
+      ${reviewPanel(section.review)}
+      <div class="actions"><div class="actions-secondary"><span class="hint">不会 Commit、Push 或 Merge；每次点击最多执行一轮 Review。</span>${canResetSession ? '<button class="danger" id="resetExecutionSession">放弃旧会话，用任务记忆重建</button>' : ""}</div><div class="actions-primary"><button class="primary" id="executePlan">${needs ? "根据 Review 继续执行" : ["error", "interrupted"].includes(section.status) && section.phase === "review" && section.result ? "只重试 Code Review" : ["error", "interrupted"].includes(section.status) ? "重试原 execution 会话" : "执行 Plan"}</button></div></div>${eventLogDetails()}`;
+  }
+
+  function textItems(value) {
+    if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+    const item = String(value || "").trim();
+    return item ? [item] : [];
+  }
+
+  function isRequiredManualCase(item) {
+    return item?.required !== false;
+  }
+
+  function requiredManualIndexes(cases) {
+    return cases.map((item, index) => isRequiredManualCase(item) ? index : -1).filter((index) => index >= 0);
+  }
+
+  function logFilterToken(value) {
+    const filter = String(value || "").trim();
+    if (!filter) return '<span class="hint">无需额外筛选</span>';
+    return `<span class="log-filter"><code>${escapeHTML(filter)}</code><button class="small" type="button" data-copy-log="${escapeHTML(filter)}" aria-label="复制日志筛选词 ${escapeHTML(filter)}">复制</button></span>`;
+  }
+
+  function renderMinimumVerification(minimum) {
+    if (!minimum?.steps?.length) {
+      return `<section class="section verification-minimum"><div class="section-heading"><div><p class="section-kicker">先做这个</p><h3>最小人工验证</h3></div></div>${callout("本次执行结果没有返回最小验证路径。请退回执行，让 Codex 补充 3–5 分钟的最短步骤和验收日志。", "warning")}</section>`;
+    }
+    return `<section class="section verification-minimum"><div class="section-heading"><div><p class="section-kicker">先做这个</p><h3>最小人工验证</h3></div><strong class="time-estimate">约 ${Number(minimum.estimated_minutes) || 5} 分钟</strong></div>
+      <p class="section-copy">先用这条最短路径确认功能可测、主链路正常。详细回归仍以接下来的 P0 必测项为 Commit 门禁。</p>
+      <ol class="minimum-steps">${minimum.steps.map((item) => `<li><div class="minimum-step-head"><strong>${escapeHTML(item.title)}</strong>${logFilterToken(item.log_filter)}</div><p><b>操作</b>${escapeHTML(item.action)}</p><p><b>页面/功能应看到</b>${escapeHTML(item.expected)}</p><p class="evidence-ok"><b>日志应看到</b>${escapeHTML(item.expected_log)}</p><p class="evidence-fail"><b>失败信号</b>${escapeHTML(item.failure_signal)}</p></li>`).join("")}</ol>
+    </section>`;
+  }
+
+  function renderManualCase(item, index) {
+    const required = isRequiredManualCase(item);
+    const priority = item.priority || "P0";
+    const steps = textItems(item.steps);
+    const filters = textItems(item.log_filters);
+    const expectedLogs = textItems(item.expected_logs);
+    const failureSignals = textItems(item.failure_signals);
+    return `<article class="test-case ${required ? "required" : "optional"}">
+      <div class="test-case-head"><label class="test-case-check"><input type="checkbox" data-check-index="${index}" ${ui.checks[index] ? "checked" : ""}><span><strong>${escapeHTML(item.title)}</strong><small>${required ? "Commit 必测" : "补充回归"}</small></span></label><span class="priority priority-${escapeHTML(priority.toLowerCase())}">${escapeHTML(priority)}</span></div>
+      <div class="test-case-body"><p class="precondition"><b>前置条件</b>${escapeHTML(item.precondition || "无特殊前置条件")}</p>
+        <div class="test-case-grid"><div><h4>操作步骤</h4><ol>${steps.map((step) => `<li>${escapeHTML(step)}</li>`).join("")}</ol></div><div><h4>通过标准</h4><p>${escapeHTML(item.expected)}</p></div></div>
+        <div class="case-evidence"><div><h4>Console / 设备日志筛选</h4><div class="log-filter-list">${filters.length ? filters.map(logFilterToken).join("") : '<span class="hint">本案例未指定日志筛选词</span>'}</div></div>
+          <div class="evidence-ok"><h4>应看到</h4><ul>${expectedLogs.length ? expectedLogs.map((line) => `<li>${escapeHTML(line)}</li>`).join("") : "<li>以页面/功能预期结果为准。</li>"}</ul></div>
+          <div class="evidence-fail"><h4>不能看到 / 失败信号</h4><ul>${failureSignals.length ? failureSignals.map((line) => `<li>${escapeHTML(line)}</li>`).join("") : "<li>异常、报错或与预期不一致。</li>"}</ul></div>
+        </div>
+      </div>
+    </article>`;
+  }
+
+  function renderAcceptanceLogs(logs) {
+    if (!logs?.length) {
+      return `<section class="section"><h3>验收日志</h3>${callout("本次执行结果没有单独列出验收日志。请退回执行，要求补充精确筛选词、触发动作、预期字段和失败信号。", "warning")}</section>`;
+    }
+    return `<section class="section"><div class="section-heading"><div><p class="section-kicker">验收证据</p><h3>关键日志怎么查</h3></div><span class="hint">点击筛选词即可复制</span></div><div class="acceptance-log-list">${logs.map((item) => {
+      const failures = textItems(item.failure_signals);
+      return `<article class="acceptance-log"><div class="acceptance-log-head"><div><strong>${escapeHTML(item.name)}</strong><span>${escapeHTML(item.source)}</span></div>${logFilterToken(item.filter)}</div><dl><div><dt>何时触发</dt><dd>${escapeHTML(item.trigger)}</dd></div><div><dt>应看到</dt><dd>${escapeHTML(item.expected)}</dd></div><div class="log-failure"><dt>失败信号</dt><dd>${failures.length ? failures.map((line) => escapeHTML(line)).join("；") : "异常或缺少预期日志"}</dd></div></dl></article>`;
+    }).join("")}</div></section>`;
+  }
+
+  function renderVerify() {
+    const result = task.execution.result || {};
+    const cases = result.manual_cases?.length ? result.manual_cases : [{ title: "主流程", steps: "按 Plan 执行一次完整主流程。", expected: "结果与验收口径一致。" }];
+    while (ui.checks.length < cases.length) ui.checks.push(false);
+    ui.checks = ui.checks.slice(0, cases.length);
+    const requiredIndexes = requiredManualIndexes(cases);
+    const completedRequired = requiredIndexes.filter((index) => ui.checks[index]).length;
+    const requiredDone = requiredIndexes.length > 0 && completedRequired === requiredIndexes.length;
+    return `<section class="section"><div class="summary-grid"><div class="summary-item"><span>执行结果</span><strong>${escapeHTML(result.summary || "实现已完成")}</strong></div><div class="summary-item"><span>Code Review</span><strong>${task.execution.review?.verdict === "pass" ? "通过" : "请查看执行阶段"}</strong></div></div></section>
+      ${renderMinimumVerification(result.minimum_manual_verification)}
+      <section class="section"><h3>自动/逻辑验证</h3><div class="checklist">${(result.verification || []).map((item) => `<div class="check-row"><span>${item.status === "passed" ? "✓" : item.status === "failed" ? "!" : "–"}</span><div><strong>${escapeHTML(item.check)}</strong><span>${escapeHTML(item.result)} · ${escapeHTML(item.status)}</span></div></div>`).join("") || '<span class="hint">Codex 未返回自动验证条目。</span>'}</div></section>
+      <section class="section"><div class="section-heading"><div><p class="section-kicker">逐条勾选</p><h3>详细测试用例</h3></div><strong class="gate-progress">P0 / 必测 ${completedRequired} / ${requiredIndexes.length}</strong></div><p class="section-copy">只有标记为“Commit 必测”的用例会阻塞提交；P1/P2 补充回归可按本次发布风险选择执行，并在备注中记录。</p><div class="test-case-list">${cases.map(renderManualCase).join("")}</div></section>
+      ${renderAcceptanceLogs(result.acceptance_logs)}
+      <section class="section"><div class="field"><label for="verificationNote">验收备注或发现的问题</label><textarea id="verificationNote" placeholder="记录设备、操作证据，或描述需要定向返修的问题……">${escapeHTML(ui.verificationNote)}</textarea>${renderFeedbackImageInput("verification")}<span class="hint">文字和图片可以单独或一起提交。退回后只处理这条人工反馈，不会重新执行整份 Plan；上一轮未受影响的测试用例会保留。</span></div></section>
+      <div class="actions"><div class="actions-secondary"><button class="danger" id="returnToExecution" ${ui.verificationNote.trim() || feedbackImageItems("verification").length ? "" : "disabled"}>发现问题，启动定向返修</button></div><div class="actions-primary"><button class="primary" id="approveVerification" ${requiredDone ? "" : "disabled"}>P0 / 必测验证通过</button></div></div>${reviewPanel(task.execution.review)}${eventLogDetails()}`;
+  }
+
+  function renderCommit() {
+    if (task.git?.committed) {
+      const manual = task.git.commitSource === "manual";
+      const pendingEntries = task.git.entries || [];
+      return `<section class="section">${callout(`<strong>${manual ? "已确认人工 Commit" : "Commit 已完成"}。</strong> 提交：<code>${escapeHTML(task.git.commitId)}</code><br>${manual ? "控制台只记录当前 HEAD，没有执行 Git 写操作。" : "控制台没有执行 Push 或 Merge。"}`, "ok")}${pendingEntries.length ? callout(`<strong>Worktree 仍有 ${pendingEntries.length} 项未提交改动。</strong>这些改动没有被“确认人工提交”按钮处理，请按实际归属另行检查。`, "warning") : ""}</section><section class="section"><div class="path-list"><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div><div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(task.git.branch)}</strong></div><div class="path-row"><span>Commit 来源</span><strong>${manual ? "人工提交（控制台仅确认）" : "控制台执行"}</strong></div><div class="path-row"><span>Commit Message</span><strong>${escapeHTML(task.git.message)}</strong></div></div></section>${pendingEntries.length ? `<section class="section"><h3>仍未提交的文件</h3><div class="diff-wrap"><table class="diff-table"><thead><tr><th>状态</th><th>文件</th></tr></thead><tbody>${pendingEntries.map((item) => `<tr><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("")}</tbody></table></div></section>` : ""}<div class="actions"><div class="actions-primary"><button class="primary" id="newTaskButton">新建下一条需求</button></div></div>${eventLogDetails()}`;
+    }
+    const entries = task.git?.entries || [];
+    const defaultMessage = `feat: complete ${task.worktree.name}`.slice(0, 120);
+    if (!ui.commitMessage) ui.commitMessage = defaultMessage;
+    return `<section class="section">${callout(`<strong>最后一道 Git 写入门。</strong> Commit 只作用于当前 Worktree。配套验收 HTML 位于配置的 docsRoot：<code>${escapeHTML(health?.paths?.docs || "")}</code>；若它在仓库外则不属于此 Git 提交。不会 Push 或 Merge。`, "warning")}</section>
+      <section class="section"><h3>待提交文件 · ${escapeHTML(task.git.refreshedAt || "尚未刷新")}</h3><div class="diff-wrap"><table class="diff-table"><thead><tr><th>状态</th><th>文件</th></tr></thead><tbody>${entries.length ? entries.map((item) => `<tr><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("") : '<tr><td colspan="2">当前没有改动</td></tr>'}</tbody></table></div>${task.git.diffStat ? `<div class="preview"><pre>${escapeHTML(task.git.diffStat)}</pre></div>` : ""}</section>
+      <section class="section"><div class="field"><label for="commitMessage">Commit Message</label><input id="commitMessage" class="mono" type="text" maxlength="120" value="${escapeHTML(ui.commitMessage)}"></div><label class="choice"><input id="commitConfirmed" type="checkbox" ${ui.commitConfirmed ? "checked" : ""}><span>我已确认上方真实文件列表、自动验证和人工验收结果。</span></label></section>
+      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button><button id="backToVerify">返回人工验收</button></div><div class="actions-primary"><button id="confirmManualCommit" ${ui.commitConfirmed ? "" : "disabled"}>确认已人工提交</button><button class="primary" id="commitChanges" ${ui.commitConfirmed && entries.length ? "" : "disabled"}>Commit</button></div></div><p class="hint">“确认已人工提交”只记录当前 HEAD，不会再次执行 Commit；若仍有未提交改动，完成页会继续提示。</p>${eventLogDetails()}`;
+  }
+
+  function renderBugfix() {
+    const cycle = task.bugfix || {};
+    if (!task.git?.committed) {
+      const labels = { running: "正在实施与 Review", verify: "等待人工验收", commit: "等待新 Commit" };
+      return `<section class="section">${callout(`<strong>Bug 修复循环已启动。</strong>${escapeHTML(labels[cycle.status] || "请按当前流程阶段继续处理")}；原提交不会被重写。`, "warning")}</section>
+        ${cycle.description ? `<section class="section"><h3>本轮 Bug</h3><div class="preview"><pre>${escapeHTML(cycle.description)}</pre></div></section>` : ""}
+        <div class="actions"><div class="actions-primary"><button class="primary" id="goCurrentStage">返回当前阶段</button></div></div>${eventLogDetails()}`;
+    }
+    const pendingEntries = task.git.entries || [];
+    const completed = cycle.status === "complete";
+    return `<section class="section">${callout(`<strong>当前版本已经提交。</strong>如果验收后又发现 Bug，可从这里开启下一轮；控制台会复用当前 Worktree、Plan、任务记忆和 execution 会话。`, "ok")}${completed ? callout(`<strong>上一轮 Bug 修复已闭环。</strong>新提交：<code>${escapeHTML(cycle.resultCommit || task.git.commitId)}</code>`, "ok") : ""}${pendingEntries.length ? callout(`<strong>启动前注意：</strong>Worktree 当前还有 ${pendingEntries.length} 项未提交改动；修复 Agent 会被要求保留并区分无关改动。`, "warning") : ""}</section>
+      <section class="section"><div class="path-list"><div class="path-row"><span>当前 HEAD</span><strong class="mono">${escapeHTML(task.git.head || task.git.commitId)}</strong></div><div class="path-row"><span>最近确认的 Commit</span><strong class="mono">${escapeHTML(task.git.commitId)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div></div></section>
+      <section class="section"><div class="field"><label for="bugfixDescription">Bug 描述与复现信息</label><textarea id="bugfixDescription" maxlength="8000" placeholder="建议填写：复现步骤、实际结果、预期结果、设备/版本、关键日志……">${escapeHTML(ui.bugfixDescription)}</textarea>${renderFeedbackImageInput("bugfix")}</div><p class="hint">文字和图片可以单独或一起提交。启动后：修复 → Code Review → 人工验收 → 新 Commit → 回到本页。不会自动 Push 或 Merge。</p></section>
+      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button><button id="newTaskButton">没有 Bug，新建下一条需求</button></div><div class="actions-primary"><button class="primary" id="startBugfix" ${ui.bugfixDescription.trim() || feedbackImageItems("bugfix").length ? "" : "disabled"}>开始修复 Bug</button></div></div>${eventLogDetails()}`;
+  }
+
+  function staticCheck(title, detail) {
+    return `<div class="check-row"><span aria-hidden="true">✓</span><div><strong>${escapeHTML(title)}</strong><span>${escapeHTML(detail)}</span></div></div>`;
+  }
+
+  function captureVisibleFields() {
+    const values = {
+      title: document.querySelector("#taskTitle")?.value,
+      sourceUrl: document.querySelector("#sourceUrl")?.value,
+      sourceText: document.querySelector("#sourceText")?.value,
+      baseBranch: document.querySelector("#baseBranch")?.value,
+      existingDocumentPath: document.querySelector("#existingDocumentPath")?.value,
+      existingWorktreePath: document.querySelector("#existingWorktreePath")?.value,
+      discussionNote: document.querySelector("#discussionNote")?.value,
+      verificationNote: document.querySelector("#verificationNote")?.value,
+      commitMessage: document.querySelector("#commitMessage")?.value,
+      bugfixDescription: document.querySelector("#bugfixDescription")?.value
+    };
+    Object.entries(values).forEach(([key, value]) => { if (value !== undefined) ui[key] = value; });
+    saveUi();
+  }
+
+  function attachHandlers(stageId) {
+    document.querySelectorAll("[data-source-type]").forEach((button) => button.addEventListener("click", () => {
+      captureVisibleFields();
+      ui.sourceType = button.dataset.sourceType;
+      render();
+    }));
+    document.querySelectorAll("[data-intake-mode]").forEach((button) => button.addEventListener("click", () => {
+      captureVisibleFields();
+      ui.intakeMode = button.dataset.intakeMode;
+      render();
+    }));
+    document.querySelectorAll("[data-plan-view]").forEach((button) => button.addEventListener("click", () => {
+      ui.planView = button.dataset.planView;
+      render();
+    }));
+    document.querySelectorAll("[data-question-id]").forEach((input) => input.addEventListener("change", () => {
+      ui.answers[input.dataset.questionId] = input.value;
+      const wrap = document.querySelector(`[data-custom-wrap="${CSS.escape(input.dataset.questionId)}"]`);
+      if (wrap) wrap.hidden = input.value !== "__custom__";
+      saveUi();
+    }));
+    document.querySelectorAll("[data-custom-id]").forEach((input) => input.addEventListener("input", () => {
+      ui.customAnswers[input.dataset.customId] = input.value;
+      saveUi();
+    }));
+    document.querySelectorAll("[data-check-index]").forEach((input) => input.addEventListener("change", () => {
+      ui.checks[Number(input.dataset.checkIndex)] = input.checked;
+      saveUi();
+      const cases = task?.execution?.result?.manual_cases || [];
+      const requiredIndexes = requiredManualIndexes(cases);
+      const completedRequired = requiredIndexes.filter((index) => ui.checks[index]).length;
+      const approve = document.querySelector("#approveVerification");
+      if (approve) approve.disabled = !requiredIndexes.length || completedRequired !== requiredIndexes.length;
+      const progress = document.querySelector(".gate-progress");
+      if (progress) progress.textContent = `P0 / 必测 ${completedRequired} / ${requiredIndexes.length}`;
+    }));
+    document.querySelectorAll("[data-copy-log]").forEach((button) => button.addEventListener("click", async () => {
+      try {
+        await copyText(button.dataset.copyLog || "");
+        showToast("日志筛选词已复制。");
+      } catch (_) {
+        showToast("复制失败，请手动选择日志筛选词。", true);
+      }
+    }));
+    on("sourceFile", "change", (event) => {
+      selectedFile = event.target.files?.[0] || null;
+      ui.sourceFileName = selectedFile?.name || "";
+      saveUi();
+      render();
+    });
+    on("startDiscussion", "click", startDiscussion);
+    on("sendDiscussionNote", "click", () => submitDiscussion(false));
+    on("generatePlan", "click", () => submitDiscussion(true));
+    on("retryPlan", "click", () => submitDiscussion(true));
+    on("approvePlan", "click", approvePlan);
+    on("createWorktree", "click", createWorktree);
+    on("executePlan", "click", () => executePlan(""));
+    on("cancelExecution", "click", cancelExecution);
+    on("resetExecutionSession", "click", () => executePlan("", true));
+    on("agentMemoryPanel", "toggle", (event) => { ui.agentMemoryOpen = event.currentTarget.open; saveUi(); });
+    on("returnToExecution", "click", () => {
+      captureVisibleFields();
+      if (!ui.verificationNote.trim() && !feedbackImageItems("verification").length) return showToast("请填写发现的问题，或至少添加一张问题截图。", true);
+      executePlan(ui.verificationNote.trim());
+    });
+    on("approveVerification", "click", approveVerification);
+    on("refreshGit", "click", refreshGit);
+    on("confirmManualCommit", "click", confirmManualCommit);
+    on("commitChanges", "click", commitChanges);
+    on("startBugfix", "click", startBugfix);
+    on("bugfixDescription", "input", (event) => {
+      ui.bugfixDescription = event.target.value;
+      saveUi();
+      updateFeedbackActionState("bugfix");
+    });
+    on("verificationNote", "input", () => updateFeedbackActionState("verification"));
+    on("commitConfirmed", "change", (event) => { ui.commitConfirmed = event.target.checked; saveUi(); render(); });
+    on("backToInput", "click", newTask);
+    on("newTaskButton", "click", newTask);
+    on("returnToDiscuss", "click", () => { ui.viewStage = "discuss"; render(); });
+    on("backToPlan", "click", () => { ui.viewStage = "plan"; render(); });
+    on("backToVerify", "click", () => { ui.viewStage = "verify"; render(); });
+    on("goCurrentStage", "click", () => { ui.viewStage = task.stage; render(); });
+    ["taskTitle", "sourceUrl", "sourceText", "baseBranch", "existingDocumentPath", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage"].forEach((id) => on(id, "input", captureVisibleFields));
+    attachFeedbackImageHandlers("verification", "verificationNote");
+    attachFeedbackImageHandlers("bugfix", "bugfixDescription");
+  }
+
+  function on(id, eventName, handler) {
+    document.getElementById(id)?.addEventListener(eventName, handler);
+  }
+
+  async function copyText(value) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+    const input = document.createElement("textarea");
+    input.value = value;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    const copied = document.execCommand("copy");
+    input.remove();
+    if (!copied) throw new Error("copy failed");
+  }
+
+  async function withAction(action) {
+    if (busy) return;
+    busy = true;
+    render();
+    try { await action(); }
+    catch (error) { showToast(error.message, true); }
+    finally { busy = false; render(); }
+  }
+
+  function fileBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+      reader.onerror = () => reject(new Error("无法读取上传文件。"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function startDiscussion() {
+    captureVisibleFields();
+    if (!ui.title.trim()) return showToast("请先填写需求名称。", true);
+    if (ui.intakeMode !== "new") {
+      if (!ui.existingDocumentPath.trim()) return showToast("请填写已有文档的绝对路径。", true);
+      if (!ui.existingWorktreePath.trim()) return showToast("请填写已有 Worktree 的绝对路径。", true);
+      await withAction(async () => {
+        const result = await post("/api/tasks/import", {
+          title: ui.title.trim(),
+          intakeMode: ui.intakeMode,
+          documentPath: ui.existingDocumentPath.trim(),
+          worktreePath: ui.existingWorktreePath.trim()
+        });
+        ui.answers = {};
+        ui.customAnswers = {};
+        ui.discussionNote = "";
+        setTask(result.task, true);
+        showToast(ui.intakeMode === "existing_plan" ? "已有 Plan 与 Worktree 已接入，等待执行授权。" : "已有需求文档与 Worktree 已接入，开始只读讨论。" );
+      });
+      return;
+    }
+    if (ui.sourceType === "link" && !ui.sourceUrl.trim()) return showToast("请填写策划文档链接。", true);
+    if (ui.sourceType === "paste" && !ui.sourceText.trim()) return showToast("请粘贴需求内容。", true);
+    if (ui.sourceType === "file" && !selectedFile) return showToast("请重新选择要上传的策划文档。", true);
+    await withAction(async () => {
+      const body = { title: ui.title.trim(), sourceType: ui.sourceType, sourceUrl: ui.sourceUrl.trim(), sourceText: ui.sourceText, baseBranch: ui.baseBranch.trim() || health?.project?.defaultBaseBranch || "main" };
+      if (selectedFile) {
+        if (selectedFile.size > 8 * 1024 * 1024) throw new Error("上传文件不能超过 8 MB。");
+        body.fileName = selectedFile.name;
+        body.fileBase64 = await fileBase64(selectedFile);
+      }
+      const result = await post("/api/tasks", body);
+      ui.answers = {};
+      ui.customAnswers = {};
+      ui.discussionNote = "";
+      setTask(result.task, true);
+      if (result.task.source?.reader === "chrome_mcp") showToast("已交给 Chrome MCP 读取飞书需求；只读，不会编辑网页。" );
+    });
+  }
+
+  async function submitDiscussion(generatePlan) {
+    captureVisibleFields();
+    await withAction(async () => {
+      const answers = collectAnswers();
+      const result = await post(`/api/tasks/${task.id}/${generatePlan ? "plan" : "discussion"}`, { answers, note: ui.discussionNote.trim() });
+      ui.discussionNote = "";
+      if (!generatePlan) { ui.answers = {}; ui.customAnswers = {}; }
+      setTask(result.task, true);
+    });
+  }
+
+  async function approvePlan() {
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/plan/approve`, { approved: true });
+      setTask(result.task, true);
+      showToast(task.worktree?.imported ? "Plan 已批准，已有 Worktree 校验完成；尚未写入 Plan。" : "Plan 已批准，Worktree dry-run 完成。这里只预检，尚未创建。" );
+    });
+  }
+
+  async function createWorktree() {
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/worktree`, { confirmed: true });
+      setTask(result.task, true);
+      if (task.worktree?.imported) showToast("Plan 已绑定到已有 Worktree。" );
+    });
+  }
+
+  async function executePlan(feedback, resetSession = false) {
+    await withAction(async () => {
+      const images = task?.stage === "verify" && !resetSession ? feedbackImagesPayload("verification") : [];
+      const result = await post(`/api/tasks/${task.id}/execute`, { feedback, resetSession, images });
+      ui.checks = [];
+      ui.verificationNote = "";
+      clearFeedbackImages("verification");
+      setTask(result.task, true);
+    });
+  }
+
+  async function cancelExecution() {
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/cancel`, {});
+      setTask(result.task, false);
+      showToast("已请求停止当前执行；实施结果和 Worktree 改动会保留。" );
+    });
+  }
+
+  async function approveVerification() {
+    captureVisibleFields();
+    const cases = task?.execution?.result?.manual_cases || [];
+    const requiredIndexes = requiredManualIndexes(cases);
+    if (!requiredIndexes.length || requiredIndexes.some((index) => !ui.checks[index])) return showToast("请先完成全部 P0 / 必测人工验收项。", true);
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/verification`, { checks: ui.checks, note: ui.verificationNote });
+      ui.commitConfirmed = false;
+      setTask(result.task, true);
+    });
+  }
+
+  async function refreshGit() {
+    await withAction(async () => {
+      const result = await api(`/api/tasks/${task.id}/git-status`);
+      ui.commitConfirmed = false;
+      setTask(result.task, false);
+      showToast("已重新读取 Worktree Git 状态，请再次核对。" );
+    });
+  }
+
+  async function commitChanges() {
+    captureVisibleFields();
+    if (!ui.commitConfirmed) return showToast("请先确认真实文件列表和验收结果。", true);
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/commit`, { message: ui.commitMessage.trim(), digest: task.git.digest });
+      ui.commitConfirmed = false;
+      setTask(result.task, true);
+      showToast(`Commit 完成：${result.commitId.slice(0, 12)}`);
+    });
+  }
+
+  async function confirmManualCommit() {
+    captureVisibleFields();
+    if (!ui.commitConfirmed) return showToast("请先确认真实文件列表和验收结果。", true);
+    const pendingCount = task.git?.entries?.length || 0;
+    const suffix = pendingCount ? `\n\n当前仍有 ${pendingCount} 项未提交改动；这些改动会保留并继续显示。` : "";
+    const confirmed = window.confirm(`把当前 HEAD ${task.git.head.slice(0, 12)} 标记为“已人工提交”？\n\n控制台不会执行 git commit。${suffix}`);
+    if (!confirmed) return;
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/commit/confirm-manual`, { digest: task.git.digest });
+      ui.commitConfirmed = false;
+      setTask(result.task, true);
+      showToast(`已确认人工 Commit：${result.commitId.slice(0, 12)}`);
+    });
+  }
+
+  async function startBugfix() {
+    captureVisibleFields();
+    const description = ui.bugfixDescription.trim();
+    const images = feedbackImagesPayload("bugfix");
+    if (!description && !images.length) return showToast("请填写 Bug 描述，或至少添加一张问题截图。", true);
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/bugfix`, { description, digest: task.git.digest, images });
+      ui.bugfixDescription = "";
+      ui.checks = [];
+      ui.verificationNote = "";
+      ui.commitConfirmed = false;
+      clearFeedbackImages("bugfix");
+      setTask(result.task, true);
+      showToast("Bug 修复已进入执行队列。" );
+    });
+  }
+
+  async function manageTask(taskId, action) {
+    if (!taskId || !["archive", "restore", "delete"].includes(action)) return;
+    const summary = taskSummaries.find((item) => item.id === taskId);
+    if (!summary) return showToast("任务状态已经变化，请等待列表刷新。", true);
+    if (summary.activeJob) return showToast("任务正在执行，完成后才能归档或删除。", true);
+    if (action === "delete") {
+      const confirmed = window.confirm(`删除“${summary.title}”的控制台任务记录？\n\n记录会移入本地回收目录；不会删除 Worktree、Plan、HTML 或 Git 改动。`);
+      if (!confirmed) return;
+    }
+    captureVisibleFields();
+    saveUi();
+    await withAction(async () => {
+      const selected = task?.id === taskId;
+      const result = await post(`/api/tasks/${taskId}/${action}`, {});
+      if (action === "delete") delete ui.taskViews?.[taskId];
+      await refreshTaskSummaries();
+      if (selected && action === "restore") {
+        task = result.task;
+        ui.taskId = task.id;
+      } else if (selected) {
+        task = null;
+        selectedFile = null;
+        activateTaskView("__new__");
+      }
+      saveUi();
+      const messages = { archive: "任务已归档。", restore: "任务已恢复到需求队列。", delete: "任务记录已移入本地回收目录。" };
+      showToast(messages[action]);
+    });
+  }
+
+  async function switchTask(taskId) {
+    if (!taskId || taskId === task?.id) return;
+    captureVisibleFields();
+    saveUi();
+    await withAction(async () => {
+      const result = await api(`/api/tasks/${taskId}`);
+      selectedFile = null;
+      setTask(result.task, false);
+    });
+  }
+
+  function newTask() {
+    captureVisibleFields();
+    saveUi();
+    task = null;
+    selectedFile = null;
+    const taskViews = ui.taskViews || {};
+    delete taskViews.__new__;
+    ui.showArchived = false;
+    activateTaskView("__new__");
+    saveUi();
+    render();
+    schedulePoll();
+  }
+
+  boot();
+})();
