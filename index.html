@@ -308,9 +308,15 @@
     .step.completed { color: var(--ok); }
     .step.completed .step-number { border-color: var(--ok); background: var(--ok-soft); }
     .step.completed:not(:last-child)::after { background: #8fc8ae; }
+    .step[data-stage-jump="bugfix"]::after { display: none; }
     .step.current { background: var(--accent-soft); color: var(--accent); }
     button.step.current:hover:not(:disabled) { background: var(--accent-soft); }
     .step.current .step-number { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+    .ask-module-nav { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .ask-module-nav small { display: block; padding: 0 10px 5px 47px; color: var(--muted); font-size: .72rem; }
+    .ask-step { color: #566477; }
+    .ask-step .step-number { border-style: dashed; }
 
     main { min-width: 0; }
 
@@ -465,6 +471,15 @@
     .message { max-width: 88%; padding: 10px 12px; border: 1px solid var(--line); background: var(--surface); }
     .message.user { justify-self: end; border-color: #b9cceb; background: var(--accent-soft); }
     .message-role { display: block; margin-bottom: 3px; color: var(--muted); font-size: .76rem; font-weight: 750; }
+    .ask-conversation { max-height: 520px; }
+    .ask-answer { max-width: 96%; }
+    .ask-answer p { margin: 0; line-height: 1.65; }
+    .ask-evidence, .ask-uncertainties { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+    .ask-evidence > strong, .ask-uncertainties > strong { color: var(--muted); font-size: .78rem; }
+    .ask-evidence ul, .ask-uncertainties ul { display: grid; gap: 6px; margin: 8px 0 0; padding-left: 18px; }
+    .ask-evidence li { display: grid; gap: 2px; }
+    .ask-evidence code { overflow-wrap: anywhere; }
+    .ask-templates { margin-top: 4px; }
 
     .summary-grid {
       display: grid;
@@ -759,7 +774,7 @@
       <div>
         <p class="eyebrow" id="projectEyebrow">Project · Project Flow</p>
         <h1>需求工作流控制台</h1>
-        <p class="lede">从策划文档、讨论澄清、Plan 验收到 Worktree 执行、Commit 和提交后的 Bug 修复，用一条可恢复的状态流推进。</p>
+        <p class="lede">从策划文档、讨论澄清、Plan 验收到 Worktree 执行、Commit 和提交后的 Bug 修复，用一条可恢复的状态流推进；随时可用 Ask 只读了解当前实现。</p>
       </div>
       <span class="prototype-badge" id="serviceBadge">正在连接本地服务</span>
     </div>
@@ -815,7 +830,7 @@
   </div>
 
   <footer>
-    本页只连接 127.0.0.1 本地服务。生成文档、创建 Worktree、执行 Plan、Commit 与 Bug 修复均需单独点击授权；不会自动 Push 或 Merge。
+    本页只连接 127.0.0.1 本地服务。生成文档、创建 Worktree、执行 Plan、Commit 与 Bug 修复均需单独点击授权；Ask 严格只读；不会自动 Push 或 Merge。
   </footer>
 
   <div class="toast" id="toast" role="status" hidden></div>

@@ -4,7 +4,9 @@
 
 它通过 Project Profile 适配不同 Git 项目，把下面这些原本散落在对话、终端和文档里的步骤，收拢成一条可恢复、可人工审批的工作流：
 
-> 需求输入 → 只读讨论 → Plan / HTML 验收 → Git Worktree → Codex 执行 → Code Review → 人工验收 → Commit → Bug 返修
+> 需求输入 → 只读讨论 → Plan / HTML 验收 → Git Worktree → Codex 执行 → Code Review → 人工验收 → Commit → Bug 修复闭环
+
+每条任务还提供独立的 **Ask · 只读问答** 模块，可以随时询问当前实现、状态来源、相关文件和修改影响；Ask 不属于流程阶段，不会修改文件或改变任务状态。
 
 控制台支持多个需求并行排队、任务切换、归档与恢复，也支持接入已经存在的需求文档、Plan 和 Worktree。
 
@@ -39,7 +41,8 @@
 - 生成人工验收最短路径、详细测试案例和关键日志筛选词。
 - 人工验收返修和 Commit 后 Bug 修复都可附加多张截图，支持选择、粘贴、拖入、预览和单张删除。
 - Commit 前重新校验真实 Git 状态，防止确认后文件又发生变化。
-- Commit 后发现问题时，复用当前 Worktree 和任务记忆进入 Bug 修复循环。
+- Commit 后发现问题时，复用当前 Worktree 和任务记忆进入 Bug 修复循环；定向修改、Code Review、人工复验和新 Commit 全部留在 Bug 修复模块内，不重新执行整份 Plan。
+- 每条任务都有独立 Ask 模块，可只读询问当前实现、状态来源、相关文件和修改影响，不改变流程阶段。
 - 多需求队列可切换查看，支持归档、删除、恢复和有限并行。
 - 每个项目由独立 Profile 配置，不在服务代码中写死路径。
 
@@ -206,7 +209,8 @@ My Project Project Flow: http://127.0.0.1:4318/
 | 执行 | 在 Worktree 内执行 Plan 和项目 Skill 链 | 不自动 Commit、Push、Merge |
 | 人工验收 | 展示最小验证步骤、详细用例和验收日志；问题反馈可填写文字或附截图 | 用户逐项确认 P0 / 必测项；截图仅进入任务运行目录 |
 | Commit | 刷新 Git 摘要并校验状态指纹 | 需要单独确认；只提交当前 Worktree |
-| Bug 修复 | 根据文字、截图或两者组合做定向返修并重新 Review | 复用当前 Worktree，不重写旧 Commit |
+| Bug 修复 | 根据文字、截图或两者组合做定向修改，并在本模块内完成 Review、人工复验和新 Commit | 复用当前 Worktree；不重跑整份 Plan，不重写旧 Commit |
+| Ask · 只读问答 | 询问当前实现、状态来源、相关文件和修改影响 | 严格只读；独立会话，不改变流程阶段 |
 
 任务在后台运行时可以切换查看其他需求。服务重启后，进行中的操作会标记为中断，已有文档和 Worktree 改动会保留，可从对应阶段重试。
 
@@ -305,7 +309,7 @@ python3 server.py
 每条需求拥有独立的：
 
 - 状态记录
-- Codex discussion / execution / review 会话槽
+- Codex discussion / execution / review / ask 会话槽
 - 持久任务记忆
 - Plan、HTML 和 Worktree 绑定信息
 

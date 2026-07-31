@@ -14,12 +14,19 @@
     { id: "commit", label: "Commit", title: "确认真实 Diff 后提交", description: "提交前重新读取 Git 状态；状态摘要变化时会拒绝 Commit。" },
     { id: "bugfix", label: "Bug 修复", title: "提交后发现问题，进入修复循环", description: "填写复现信息后复用当前 Worktree 和任务记忆；修复仍需经过 Review、人工验收和新 Commit。" }
   ];
+  const askModule = {
+    id: "ask",
+    label: "Ask",
+    title: "询问当前实现",
+    description: "复用当前任务、Plan 和 Worktree 上下文进行只读问答；不会修改文件或改变任务阶段。"
+  };
 
   const defaultUi = {
     taskId: "",
     taskFilter: "all",
     showArchived: false,
     taskViews: {},
+    module: "flow",
     viewStage: "input",
     intakeMode: "new",
     sourceType: "link",
@@ -39,7 +46,8 @@
     verificationNote: "",
     commitMessage: "",
     commitConfirmed: false,
-    bugfixDescription: ""
+    bugfixDescription: "",
+    askQuestion: ""
   };
 
   let ui = loadUi();
@@ -78,9 +86,17 @@
     renderTaskConsole();
   });
   stepsEl.addEventListener("click", (event) => {
+    const moduleButton = event.target.closest("[data-module-jump]");
+    if (moduleButton && !moduleButton.disabled) {
+      captureVisibleFields();
+      ui.module = moduleButton.dataset.moduleJump;
+      render();
+      return;
+    }
     const button = event.target.closest("[data-stage-jump]");
     if (!button || button.disabled) return;
     captureVisibleFields();
+    ui.module = "flow";
     ui.viewStage = button.dataset.stageJump;
     render();
   });
@@ -102,9 +118,9 @@
   });
 
   const taskViewKeys = [
-    "viewStage", "intakeMode", "sourceType", "title", "sourceUrl", "sourceText", "sourceFileName", "baseBranch",
+    "module", "viewStage", "intakeMode", "sourceType", "title", "sourceUrl", "sourceText", "sourceFileName", "baseBranch",
     "existingDocumentPath", "existingWorktreePath",
-    "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "checks", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription"
+    "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "checks", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
   ];
 
   function taskViewSnapshot(source) {
@@ -418,7 +434,10 @@
     task = next;
     if (changingTask) activateTaskView(next?.id || "__new__", draftFallback);
     ui.taskId = next?.id || "";
-    if (next && (followStage || !hasStoredView)) ui.viewStage = next.stage;
+    if (next && (followStage || !hasStoredView)) {
+      ui.module = "flow";
+      ui.viewStage = next.stage;
+    }
     if (next) upsertTaskSummary(next);
     saveUi();
     render();
@@ -534,7 +553,11 @@
     if (task.archivedAt) return "任务已归档 · 恢复后可继续";
     if (task.git?.committed) return `Commit 完成 · ${task.git.commitId.slice(0, 12)}${task.stage === "bugfix" ? " · 可继续修 Bug" : ""}`;
     if (task.activeJob) {
-      const label = task.activeJob === "execution" && task.execution?.mode === "acceptance_fix" ? "人工验收定向返修" : jobLabel(task.activeJob);
+      const label = task.activeJob === "execution" && task.stage === "bugfix"
+        ? "Bug 定向修改"
+        : task.activeJob === "execution" && task.execution?.mode === "acceptance_fix"
+          ? "人工验收定向返修"
+          : jobLabel(task.activeJob);
       return `${label}${task.jobState === "queued" ? "排队中" : "正在运行"}`;
     }
     const map = {
@@ -544,28 +567,29 @@
       execute: task.execution?.status === "needs_attention" ? "Review 仍有发现" : "等待执行 Plan",
       verify: "等待人工验收",
       commit: "等待 Commit 确认",
-      bugfix: "等待 Bug 反馈或任务归档"
+      bugfix: ({ running: "Bug 定向修改中", review: "Bug Review 等待继续修改", verify: "等待 Bug 人工复验", commit: "等待 Bug 修复 Commit" })[task.bugfix?.status] || "等待 Bug 反馈或任务归档"
     };
     return map[task.stage] || "等待操作";
   }
 
   function jobLabel(value) {
-    return ({ discussion: "需求讨论", plan: "Plan 生成", worktree: "Worktree 创建", execution: "Plan 执行" })[value] || value;
+    return ({ discussion: "需求讨论", plan: "Plan 生成", worktree: "Worktree 创建", execution: "Plan 执行", ask: "Ask 只读问答" })[value] || value;
   }
 
   function render() {
     workspaceRefreshPending = false;
     renderShell();
     const stageId = currentStageId();
-    const meta = stages.find((item) => item.id === stageId) || stages[0];
-    stageTitleEl.textContent = task?.git?.committed && stageId === "commit" ? "Commit 已完成" : meta.title;
+    const askActive = Boolean(task && ui.module === "ask");
+    const meta = askActive ? askModule : stages.find((item) => item.id === stageId) || stages[0];
+    stageTitleEl.textContent = askActive ? meta.title : task?.git?.committed && stageId === "commit" ? "Commit 已完成" : meta.title;
     stageDescriptionEl.textContent = meta.description;
     const renderers = { input: renderInput, discuss: renderDiscuss, plan: renderPlan, worktree: renderWorktree, execute: renderExecute, verify: renderVerify, commit: renderCommit, bugfix: renderBugfix };
     const archiveNotice = task?.archivedAt
       ? callout(`<strong>该任务已归档。</strong> 当前仅供回看；请从左侧归档列表恢复后再继续执行。`, "warning")
       : "";
-    stageContentEl.innerHTML = `${archiveNotice}${renderAgentMemory()}${renderers[stageId]()}`;
-    attachHandlers(stageId);
+    stageContentEl.innerHTML = `${archiveNotice}${renderAgentMemory()}${askActive ? renderAsk() : renderers[stageId]()}`;
+    attachHandlers(askActive ? "ask" : stageId);
     if (task?.archivedAt) {
       stageContentEl.querySelectorAll("button, input, textarea, select").forEach((control) => { control.disabled = true; });
     }
@@ -591,7 +615,7 @@
   function taskStateLabel(item) {
     if (item.archivedAt) return "已归档";
     if (item.state === "queued") return "排队中";
-    if (item.state === "running") return `${jobLabel(item.activeJob)}中`;
+    if (item.state === "running") return `${item.activeJob === "execution" && item.stage === "bugfix" ? "Bug 修改" : jobLabel(item.activeJob)}中`;
     if (item.state === "done") return "已完成";
     if (item.state === "error") return "需要处理";
     return "等待操作";
@@ -653,12 +677,15 @@
   function renderSteps() {
     const current = Math.max(0, stages.findIndex((item) => item.id === currentStageId()));
     const furthest = task ? Math.max(0, Number(task.maxStageIndex) || 0) : 0;
-    stepsEl.innerHTML = stages.map((item, index) => {
+    const flowSteps = stages.map((item, index) => {
       const reached = index <= furthest;
       const completed = task ? index < furthest || (item.id === "commit" && task.git?.committed) : false;
-      const cls = `${completed ? "completed" : ""} ${index === current ? "current" : ""}`.trim();
-      return `<button type="button" class="step ${cls}" data-stage-jump="${item.id}" ${reached ? "" : "disabled"} ${index === current ? 'aria-current="step"' : ""}><span class="step-number">${completed ? "✓" : index + 1}</span><span class="step-label">${item.label}</span></button>`;
+      const active = ui.module !== "ask" && index === current;
+      const cls = `${completed ? "completed" : ""} ${active ? "current" : ""}`.trim();
+      return `<button type="button" class="step ${cls}" data-stage-jump="${item.id}" ${reached ? "" : "disabled"} ${active ? 'aria-current="step"' : ""}><span class="step-number">${completed ? "✓" : index + 1}</span><span class="step-label">${item.label}</span></button>`;
     }).join("");
+    const askStep = `<div class="ask-module-nav"><button type="button" class="step ask-step ${ui.module === "ask" ? "current" : ""}" data-module-jump="ask" ${task ? "" : "disabled"} ${ui.module === "ask" ? 'aria-current="page"' : ""}><span class="step-number">?</span><span class="step-label">Ask · 只读问答</span></button><small>不改变流程阶段</small></div>`;
+    stepsEl.innerHTML = `${flowSteps}${askStep}`;
   }
 
   function callout(text, type = "warning") {
@@ -686,7 +713,7 @@
     const memory = task.agentMemory || {};
     const sessions = memory.sessions || {};
     const sessionCount = Object.values(sessions).filter(Boolean).length;
-    const sessionSummary = ["discussion", "execution", "review"]
+    const sessionSummary = ["discussion", "execution", "review", "ask"]
       .map((key) => `${key}: ${sessions[key] ? `${String(sessions[key]).slice(0, 8)}…` : "未建立"}`)
       .join(" · ");
     const boundary = [...(memory.nonScope || []), ...(memory.assumptions || []).map((item) => `假设：${item}`)];
@@ -702,6 +729,37 @@
       <div class="agent-memory-body"><p>${escapeHTML(memory.summary || task.title)}</p><p class="agent-next">下一步：${escapeHTML(memory.nextAction || "按当前流程继续。")}</p>
       <div class="agent-memory-meta"><div><span>持久会话</span><strong class="mono">${escapeHTML(sessionSummary)}</strong></div><div><span>Plan 指纹</span><strong class="mono">${escapeHTML(memory.fingerprints?.planSha256 ? `${memory.fingerprints.planSha256.slice(0, 12)}…` : "尚未生成")}</strong></div><div><span>Worktree 目标</span><strong class="mono">${escapeHTML(memory.workspace?.worktree || "尚未创建")}</strong></div></div>
       ${blocks ? `<div class="agent-memory-grid">${blocks}</div>` : ""}</div></details>`;
+  }
+
+  function multilineHTML(value) {
+    return escapeHTML(value || "").replaceAll("\n", "<br>");
+  }
+
+  function renderAsk() {
+    const section = task.ask || { status: "idle", messages: [], logs: [], error: "" };
+    const messages = section.messages || [];
+    const conversation = messages.length
+      ? messages.map((message) => {
+        const evidence = (message.evidence || []).length
+          ? `<div class="ask-evidence"><strong>依据</strong><ul>${message.evidence.map((item) => `<li><code>${escapeHTML(item.path)}</code><span>${escapeHTML(item.detail)}</span></li>`).join("")}</ul></div>`
+          : "";
+        const uncertainties = (message.uncertainties || []).length
+          ? `<div class="ask-uncertainties"><strong>尚不能确认</strong><ul>${message.uncertainties.map((item) => `<li>${escapeHTML(item)}</li>`).join("")}</ul></div>`
+          : "";
+        const answer = message.answer
+          ? `<div class="message ask-answer"><span class="message-role">Codex · Ask</span><p>${multilineHTML(message.answer)}</p>${evidence}${uncertainties}</div>`
+          : `<div class="message"><span class="message-role">Codex · Ask</span><span class="hint">${section.status === "error" ? "本次回答失败，可在下方重新提问。" : "正在基于当前代码和任务事实查找答案……"}</span></div>`;
+        return `<div class="message user"><span class="message-role">你 · ${escapeHTML(formatDateTime(message.askedAt))}</span>${multilineHTML(message.question)}</div>${answer}`;
+      }).join("")
+      : '<div class="message"><span class="message-role">Codex · Ask</span>可以询问“当前功能怎么实现”“状态从哪里读取”“涉及哪些文件”等问题。本模块严格只读。</div>';
+    const running = ["queued", "running"].includes(section.status) && task.activeJob === "ask";
+    const blocked = busy || Boolean(task.activeJob);
+    const error = section.status === "error" ? callout(`<strong>Ask 失败：</strong>${escapeHTML(section.error)}`, "danger") : "";
+    return `<section class="section">${callout("<strong>独立只读模块。</strong> Ask 会复用当前任务、Plan、持久记忆和已绑定 Worktree，只回答实现问题；不会写文件、执行 Plan 或改变当前流程阶段。", "ok")}${error}</section>
+      <section class="section"><h3>问答记录</h3><div class="conversation ask-conversation">${conversation}</div></section>
+      ${running ? renderProgress(section, "Ask 正在检查当前实现") : ""}
+      <section class="section"><div class="field"><label for="askQuestion">询问当前实现</label><textarea id="askQuestion" maxlength="4000" placeholder="例如：这个功能现在是怎么实现的？状态保存在哪里？哪些文件负责这条调用链？" ${blocked ? "disabled" : ""}>${escapeHTML(ui.askQuestion)}</textarea><div class="source-tabs ask-templates" role="group" aria-label="Ask 快捷问题"><button type="button" data-ask-template="这个功能当前是怎么实现的？请说明关键调用链和相关文件。" ${blocked ? "disabled" : ""}>当前怎么实现</button><button type="button" data-ask-template="这个状态从哪里读取、在哪里更新和保存？" ${blocked ? "disabled" : ""}>状态从哪里来</button><button type="button" data-ask-template="如果要修改这块逻辑，最小影响范围和主要风险是什么？只分析，不要修改。" ${blocked ? "disabled" : ""}>修改影响范围</button></div><span class="hint">Ask 使用独立只读 Codex 会话，并在当前任务内保留对话记录。</span></div></section>
+      <div class="actions"><div class="actions-secondary">${running ? '<button class="danger" id="cancelAsk">停止 Ask</button>' : '<span class="hint">当前任务有其他后台操作时，Ask 会暂时禁用。</span>'}</div><div class="actions-primary"><button class="primary" id="submitAsk" ${blocked || !ui.askQuestion.trim() ? "disabled" : ""}>发送问题</button></div></div>${running ? "" : eventLogDetails()}`;
   }
 
   function renderProgress(section, title) {
@@ -919,7 +977,7 @@
     }).join("")}</div></section>`;
   }
 
-  function renderVerify() {
+  function renderVerification(inBugfix = false) {
     const result = task.execution.result || {};
     const cases = result.manual_cases?.length ? result.manual_cases : [{ title: "主流程", steps: "按 Plan 执行一次完整主流程。", expected: "结果与验收口径一致。" }];
     while (ui.checks.length < cases.length) ui.checks.push(false);
@@ -927,16 +985,20 @@
     const requiredIndexes = requiredManualIndexes(cases);
     const completedRequired = requiredIndexes.filter((index) => ui.checks[index]).length;
     const requiredDone = requiredIndexes.length > 0 && completedRequired === requiredIndexes.length;
-    return `<section class="section"><div class="summary-grid"><div class="summary-item"><span>执行结果</span><strong>${escapeHTML(result.summary || "实现已完成")}</strong></div><div class="summary-item"><span>Code Review</span><strong>${task.execution.review?.verdict === "pass" ? "通过" : "请查看执行阶段"}</strong></div></div></section>
+    return `<section class="section"><div class="summary-grid"><div class="summary-item"><span>${inBugfix ? "Bug 修改结果" : "执行结果"}</span><strong>${escapeHTML(result.summary || "实现已完成")}</strong></div><div class="summary-item"><span>Code Review</span><strong>${task.execution.review?.verdict === "pass" ? "通过" : inBugfix ? "请查看本模块 Review" : "请查看执行阶段"}</strong></div></div></section>
       ${renderMinimumVerification(result.minimum_manual_verification)}
       <section class="section"><h3>自动/逻辑验证</h3><div class="checklist">${(result.verification || []).map((item) => `<div class="check-row"><span>${item.status === "passed" ? "✓" : item.status === "failed" ? "!" : "–"}</span><div><strong>${escapeHTML(item.check)}</strong><span>${escapeHTML(item.result)} · ${escapeHTML(item.status)}</span></div></div>`).join("") || '<span class="hint">Codex 未返回自动验证条目。</span>'}</div></section>
       <section class="section"><div class="section-heading"><div><p class="section-kicker">逐条勾选</p><h3>详细测试用例</h3></div><strong class="gate-progress">P0 / 必测 ${completedRequired} / ${requiredIndexes.length}</strong></div><p class="section-copy">只有标记为“Commit 必测”的用例会阻塞提交；P1/P2 补充回归可按本次发布风险选择执行，并在备注中记录。</p><div class="test-case-list">${cases.map(renderManualCase).join("")}</div></section>
       ${renderAcceptanceLogs(result.acceptance_logs)}
       <section class="section"><div class="field"><label for="verificationNote">验收备注或发现的问题</label><textarea id="verificationNote" placeholder="记录设备、操作证据，或描述需要定向返修的问题……">${escapeHTML(ui.verificationNote)}</textarea>${renderFeedbackImageInput("verification")}<span class="hint">文字和图片可以单独或一起提交。退回后只处理这条人工反馈，不会重新执行整份 Plan；上一轮未受影响的测试用例会保留。</span></div></section>
-      <div class="actions"><div class="actions-secondary"><button class="danger" id="returnToExecution" ${ui.verificationNote.trim() || feedbackImageItems("verification").length ? "" : "disabled"}>发现问题，启动定向返修</button></div><div class="actions-primary"><button class="primary" id="approveVerification" ${requiredDone ? "" : "disabled"}>P0 / 必测验证通过</button></div></div>${reviewPanel(task.execution.review)}${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><button class="danger" id="returnToExecution" ${ui.verificationNote.trim() || feedbackImageItems("verification").length ? "" : "disabled"}>发现问题，启动定向返修</button></div><div class="actions-primary"><button class="primary" id="approveVerification" ${requiredDone ? "" : "disabled"}>${inBugfix ? "Bug 复验通过" : "P0 / 必测验证通过"}</button></div></div>${reviewPanel(task.execution.review)}${eventLogDetails()}`;
   }
 
-  function renderCommit() {
+  function renderVerify() {
+    return renderVerification(false);
+  }
+
+  function renderCommit(inBugfix = false) {
     if (task.git?.committed) {
       const manual = task.git.commitSource === "manual";
       const pendingEntries = task.git.entries || [];
@@ -945,26 +1007,40 @@
     const entries = task.git?.entries || [];
     const defaultMessage = `feat: complete ${task.worktree.name}`.slice(0, 120);
     if (!ui.commitMessage) ui.commitMessage = defaultMessage;
-    return `<section class="section">${callout(`<strong>最后一道 Git 写入门。</strong> Commit 只作用于当前 Worktree。配套验收 HTML 位于配置的 docsRoot：<code>${escapeHTML(health?.paths?.docs || "")}</code>；若它在仓库外则不属于此 Git 提交。不会 Push 或 Merge。`, "warning")}</section>
+    return `<section class="section">${callout(`<strong>${inBugfix ? "Bug 修复的最后一道 Git 写入门" : "最后一道 Git 写入门"}。</strong> Commit 只作用于当前 Worktree。配套验收 HTML 位于配置的 docsRoot：<code>${escapeHTML(health?.paths?.docs || "")}</code>；若它在仓库外则不属于此 Git 提交。不会 Push 或 Merge。`, "warning")}</section>
       <section class="section"><h3>待提交文件 · ${escapeHTML(task.git.refreshedAt || "尚未刷新")}</h3><div class="diff-wrap"><table class="diff-table"><thead><tr><th>状态</th><th>文件</th></tr></thead><tbody>${entries.length ? entries.map((item) => `<tr><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("") : '<tr><td colspan="2">当前没有改动</td></tr>'}</tbody></table></div>${task.git.diffStat ? `<div class="preview"><pre>${escapeHTML(task.git.diffStat)}</pre></div>` : ""}</section>
       <section class="section"><div class="field"><label for="commitMessage">Commit Message</label><input id="commitMessage" class="mono" type="text" maxlength="120" value="${escapeHTML(ui.commitMessage)}"></div><label class="choice"><input id="commitConfirmed" type="checkbox" ${ui.commitConfirmed ? "checked" : ""}><span>我已确认上方真实文件列表、自动验证和人工验收结果。</span></label></section>
-      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button><button id="backToVerify">返回人工验收</button></div><div class="actions-primary"><button id="confirmManualCommit" ${ui.commitConfirmed ? "" : "disabled"}>确认已人工提交</button><button class="primary" id="commitChanges" ${ui.commitConfirmed && entries.length ? "" : "disabled"}>Commit</button></div></div><p class="hint">“确认已人工提交”只记录当前 HEAD，不会再次执行 Commit；若仍有未提交改动，完成页会继续提示。</p>${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button>${inBugfix ? "" : '<button id="backToVerify">返回人工验收</button>'}</div><div class="actions-primary"><button id="confirmManualCommit" ${ui.commitConfirmed ? "" : "disabled"}>确认已人工提交</button><button class="primary" id="commitChanges" ${ui.commitConfirmed && entries.length ? "" : "disabled"}>Commit</button></div></div><p class="hint">“确认已人工提交”只记录当前 HEAD，不会再次执行 Commit；若仍有未提交改动，完成页会继续提示。</p>${eventLogDetails()}`;
   }
 
   function renderBugfix() {
     const cycle = task.bugfix || {};
     if (!task.git?.committed) {
-      const labels = { running: "正在实施与 Review", verify: "等待人工验收", commit: "等待新 Commit" };
-      return `<section class="section">${callout(`<strong>Bug 修复循环已启动。</strong>${escapeHTML(labels[cycle.status] || "请按当前流程阶段继续处理")}；原提交不会被重写。`, "warning")}</section>
+      if (cycle.status === "verify") {
+        return `<section class="section">${callout("<strong>Bug 修改与 Code Review 已通过。</strong> 直接在当前模块完成受影响范围的人工复验；不会跳回执行 Plan。", "ok")}</section>${renderVerification(true)}`;
+      }
+      if (cycle.status === "commit") {
+        return `<section class="section">${callout("<strong>Bug 复验已通过。</strong> 继续在当前模块核对真实 Git 状态并完成新 Commit。", "ok")}</section>${renderCommit(true)}`;
+      }
+      const section = task.execution || {};
+      if (["queued", "running"].includes(section.status)) {
+        const targeted = section.mode === "acceptance_fix" ? "Bug 人工反馈定向返修" : "Bug 定向修改";
+        return `<section class="section">${cycle.description ? callout(`<strong>本轮 Bug：</strong>${escapeHTML(cycle.description)}`, "warning") : ""}</section>${renderProgress(section, `${targeted} · ${section.phase || "implementation"}`)}<div class="actions"><div class="actions-secondary"><span class="hint">只修改本 Bug 及 Review findings，不重新执行 Plan。</span></div><div class="actions-primary"><button class="danger" id="cancelExecution">停止当前修改</button></div></div>`;
+      }
+      const interrupted = ["error", "interrupted"].includes(section.status);
+      const needsReviewFix = section.status === "needs_attention" || cycle.status === "review";
+      const retryReviewOnly = interrupted && section.phase === "review" && section.result;
+      return `<section class="section">${interrupted ? callout(`<strong>Bug 修改中断：</strong>${escapeHTML(section.error)}`, "danger") : callout(`<strong>Bug 修复 Review 仍有发现。</strong> 继续只处理本轮 finding，不会重新执行 Plan。`, needsReviewFix ? "danger" : "warning")}</section>
         ${cycle.description ? `<section class="section"><h3>本轮 Bug</h3><div class="preview"><pre>${escapeHTML(cycle.description)}</pre></div></section>` : ""}
-        <div class="actions"><div class="actions-primary"><button class="primary" id="goCurrentStage">返回当前阶段</button></div></div>${eventLogDetails()}`;
+        ${reviewPanel(section.review || section.previousReview)}
+        <div class="actions"><div class="actions-secondary"><span class="hint">当前阶段始终保持在 Bug 修复模块。</span></div><div class="actions-primary"><button class="primary" id="continueBugfix">${retryReviewOnly ? "只重试 Code Review" : interrupted ? "重试 Bug 定向修改" : "根据 Review 继续修改"}</button></div></div>${eventLogDetails()}`;
     }
     const pendingEntries = task.git.entries || [];
     const completed = cycle.status === "complete";
-    return `<section class="section">${callout(`<strong>当前版本已经提交。</strong>如果验收后又发现 Bug，可从这里开启下一轮；控制台会复用当前 Worktree、Plan、任务记忆和 execution 会话。`, "ok")}${completed ? callout(`<strong>上一轮 Bug 修复已闭环。</strong>新提交：<code>${escapeHTML(cycle.resultCommit || task.git.commitId)}</code>`, "ok") : ""}${pendingEntries.length ? callout(`<strong>启动前注意：</strong>Worktree 当前还有 ${pendingEntries.length} 项未提交改动；修复 Agent 会被要求保留并区分无关改动。`, "warning") : ""}</section>
+    return `<section class="section">${callout(`<strong>当前版本已经提交。</strong>如果验收后又发现 Bug，可从这里直接启动定向修改；整个修改、Review、复验和 Commit 都留在本模块内。`, "ok")}${completed ? callout(`<strong>上一轮 Bug 修复已闭环。</strong>新提交：<code>${escapeHTML(cycle.resultCommit || task.git.commitId)}</code>`, "ok") : ""}${pendingEntries.length ? callout(`<strong>启动前注意：</strong>Worktree 当前还有 ${pendingEntries.length} 项未提交改动；修复 Agent 会被要求保留并区分无关改动。`, "warning") : ""}</section>
       <section class="section"><div class="path-list"><div class="path-row"><span>当前 HEAD</span><strong class="mono">${escapeHTML(task.git.head || task.git.commitId)}</strong></div><div class="path-row"><span>最近确认的 Commit</span><strong class="mono">${escapeHTML(task.git.commitId)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div></div></section>
-      <section class="section"><div class="field"><label for="bugfixDescription">Bug 描述与复现信息</label><textarea id="bugfixDescription" maxlength="8000" placeholder="建议填写：复现步骤、实际结果、预期结果、设备/版本、关键日志……">${escapeHTML(ui.bugfixDescription)}</textarea>${renderFeedbackImageInput("bugfix")}</div><p class="hint">文字和图片可以单独或一起提交。启动后：修复 → Code Review → 人工验收 → 新 Commit → 回到本页。不会自动 Push 或 Merge。</p></section>
-      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button><button id="newTaskButton">没有 Bug，新建下一条需求</button></div><div class="actions-primary"><button class="primary" id="startBugfix" ${ui.bugfixDescription.trim() || feedbackImageItems("bugfix").length ? "" : "disabled"}>开始修复 Bug</button></div></div>${eventLogDetails()}`;
+      <section class="section"><div class="field"><label for="bugfixDescription">Bug 描述与复现信息</label><textarea id="bugfixDescription" maxlength="8000" placeholder="建议填写：复现步骤、实际结果、预期结果、设备/版本、关键日志……">${escapeHTML(ui.bugfixDescription)}</textarea>${renderFeedbackImageInput("bugfix")}</div><p class="hint">文字和图片可以单独或一起提交。启动后将在本模块依次完成：定向修改 → Code Review → 人工复验 → 新 Commit。不会自动 Push 或 Merge。</p></section>
+      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button><button id="newTaskButton">没有 Bug，新建下一条需求</button></div><div class="actions-primary"><button class="primary" id="startBugfix" ${!task.activeJob && (ui.bugfixDescription.trim() || feedbackImageItems("bugfix").length) ? "" : "disabled"}>开始修复 Bug</button></div></div>${eventLogDetails()}`;
   }
 
   function staticCheck(title, detail) {
@@ -982,7 +1058,8 @@
       discussionNote: document.querySelector("#discussionNote")?.value,
       verificationNote: document.querySelector("#verificationNote")?.value,
       commitMessage: document.querySelector("#commitMessage")?.value,
-      bugfixDescription: document.querySelector("#bugfixDescription")?.value
+      bugfixDescription: document.querySelector("#bugfixDescription")?.value,
+      askQuestion: document.querySelector("#askQuestion")?.value
     };
     Object.entries(values).forEach(([key, value]) => { if (value !== undefined) ui[key] = value; });
     saveUi();
@@ -1058,6 +1135,21 @@
     on("confirmManualCommit", "click", confirmManualCommit);
     on("commitChanges", "click", commitChanges);
     on("startBugfix", "click", startBugfix);
+    on("continueBugfix", "click", () => executePlan(""));
+    on("submitAsk", "click", submitAsk);
+    on("cancelAsk", "click", () => cancelActiveJob("Ask"));
+    on("askQuestion", "input", (event) => {
+      ui.askQuestion = event.target.value;
+      saveUi();
+      const submit = document.querySelector("#submitAsk");
+      if (submit) submit.disabled = busy || Boolean(task?.activeJob) || !ui.askQuestion.trim();
+    });
+    document.querySelectorAll("[data-ask-template]").forEach((button) => button.addEventListener("click", () => {
+      ui.askQuestion = button.dataset.askTemplate || "";
+      saveUi();
+      render();
+      document.querySelector("#askQuestion")?.focus();
+    }));
     on("bugfixDescription", "input", (event) => {
       ui.bugfixDescription = event.target.value;
       saveUi();
@@ -1071,7 +1163,7 @@
     on("backToPlan", "click", () => { ui.viewStage = "plan"; render(); });
     on("backToVerify", "click", () => { ui.viewStage = "verify"; render(); });
     on("goCurrentStage", "click", () => { ui.viewStage = task.stage; render(); });
-    ["taskTitle", "sourceUrl", "sourceText", "baseBranch", "existingDocumentPath", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage"].forEach((id) => on(id, "input", captureVisibleFields));
+    ["taskTitle", "sourceUrl", "sourceText", "baseBranch", "existingDocumentPath", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage", "askQuestion"].forEach((id) => on(id, "input", captureVisibleFields));
     attachFeedbackImageHandlers("verification", "verificationNote");
     attachFeedbackImageHandlers("bugfix", "bugfixDescription");
   }
@@ -1184,7 +1276,8 @@
 
   async function executePlan(feedback, resetSession = false) {
     await withAction(async () => {
-      const images = task?.stage === "verify" && !resetSession ? feedbackImagesPayload("verification") : [];
+      const verificationFeedback = task?.stage === "verify" || (task?.stage === "bugfix" && task?.bugfix?.status === "verify");
+      const images = verificationFeedback && !resetSession ? feedbackImagesPayload("verification") : [];
       const result = await post(`/api/tasks/${task.id}/execute`, { feedback, resetSession, images });
       ui.checks = [];
       ui.verificationNote = "";
@@ -1194,10 +1287,26 @@
   }
 
   async function cancelExecution() {
+    return cancelActiveJob("当前执行");
+  }
+
+  async function cancelActiveJob(label) {
     await withAction(async () => {
       const result = await post(`/api/tasks/${task.id}/cancel`, {});
       setTask(result.task, false);
-      showToast("已请求停止当前执行；实施结果和 Worktree 改动会保留。" );
+      showToast(`已请求停止${label}；已有结果和任务状态会保留。`);
+    });
+  }
+
+  async function submitAsk() {
+    captureVisibleFields();
+    const question = ui.askQuestion.trim();
+    if (!question) return showToast("请先填写要询问的问题。", true);
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/ask`, { question });
+      ui.askQuestion = "";
+      setTask(result.task, false);
+      showToast("Ask 已进入只读队列。" );
     });
   }
 
@@ -1261,7 +1370,7 @@
       ui.commitConfirmed = false;
       clearFeedbackImages("bugfix");
       setTask(result.task, true);
-      showToast("Bug 修复已进入执行队列。" );
+      showToast("Bug 定向修改已在当前模块进入队列。" );
     });
   }
 

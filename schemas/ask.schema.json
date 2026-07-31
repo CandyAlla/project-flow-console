@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "properties": {
+    "answer": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "detail": { "type": "string" }
+        },
+        "required": ["path", "detail"],
+        "additionalProperties": false
+      }
+    },
+    "uncertainties": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["answer", "evidence", "uncertainties"],
+  "additionalProperties": false
+}

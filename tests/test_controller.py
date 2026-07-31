@@ -213,8 +213,9 @@ class ControllerTests(unittest.TestCase):
 
         task = server.get_task_copy(task_id)
         self.assertEqual(server.git_status(self.repo)["head"], head_before)
-        self.assertEqual(task["stage"], "execute")
+        self.assertEqual(task["stage"], "bugfix")
         self.assertEqual(task["maxStageIndex"], server.STAGE_INDEX["bugfix"])
+        self.assertEqual(task["execution"]["mode"], "bugfix")
         self.assertFalse(task["git"]["committed"])
         self.assertEqual(len(task["git"]["entries"]), 1)
         self.assertEqual(task["bugfix"]["status"], "running")
@@ -243,6 +244,95 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(Path(attachments[0]["path"]).is_file())
         self.assertIn("未填写文字说明", feedback)
         self.assertIn("图片附件", feedback)
+
+    def test_bugfix_execution_stays_in_bugfix_module_and_does_not_reexecute_plan(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000043"
+        server.TASKS[task_id] = {
+            "id": task_id,
+            "title": "设置页计时 Bug",
+            "updatedAt": "",
+            "stage": "bugfix",
+            "maxStageIndex": server.STAGE_INDEX["bugfix"],
+            "activeJob": "execution",
+            "jobState": "running",
+            "sessions": {"discussion": None, "execution": "saved-execution-thread", "review": None, "ask": None},
+            "discussion": {},
+            "plan": {"finalPath": "/tmp/plan.md", "markdown": "# Plan"},
+            "paths": {},
+            "worktree": {"status": "ready", "path": str(self.repo), "branch": "main"},
+            "execution": {
+                "status": "idle", "phase": "idle", "mode": "bugfix", "threadId": "saved-execution-thread",
+                "result": {"summary": "原需求已完成", "changed_files": [], "verification": [], "manual_cases": []},
+                "review": {"verdict": "pass", "summary": "原需求通过", "findings": []}, "logs": [], "error": "",
+            },
+            "verification": {"approved": False},
+            "git": {"committed": False, "entries": [], "digest": "old"},
+            "bugfix": {"status": "running", "description": "设置页返回后计时没有恢复", "attachments": [], "history": []},
+            "events": [],
+        }
+        fix_result = {
+            "summary": "已修复计时恢复", "changed_files": ["reported.cs"], "verification": [],
+            "manual_cases": [], "acceptance_logs": [], "risks": [], "docs_backfill": [],
+        }
+        clean_status = {"entries": [], "digest": "clean", "branch": "main", "head": "abc", "diffStat": "", "refreshedAt": "now"}
+
+        with mock.patch.object(server, "worktree_change_snapshot", side_effect=[{"timer.cs": "before"}, {"timer.cs": "after"}]), \
+                mock.patch.object(server, "run_implementation", return_value=(fix_result, None)) as run_implementation, \
+                mock.patch.object(server, "run_review", return_value={"verdict": "pass", "summary": "通过", "findings": []}), \
+                mock.patch.object(server, "git_status", return_value=clean_status):
+            server.execution_job(task_id, "")
+
+        prompt = run_implementation.call_args.args[1]
+        self.assertIn("不得重新执行整份 Plan", prompt)
+        self.assertNotIn("用户已在控制台明确点击“执行 Plan”", prompt)
+        self.assertEqual(run_implementation.call_args.args[2], "saved-execution-thread")
+        self.assertEqual(run_implementation.call_args.kwargs["output_schema"], server.SCHEMA_ROOT / "acceptance-fix.schema.json")
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "bugfix")
+        self.assertEqual(task["bugfix"]["status"], "verify")
+        self.assertEqual(task["execution"]["mode"], "bugfix")
+        self.assertEqual(task["execution"]["roundChangedFiles"], ["timer.cs"])
+
+    def test_ask_is_read_only_persists_answer_and_keeps_stage(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000044"
+        server.TASKS[task_id] = {
+            "id": task_id,
+            "title": "询问当前实现",
+            "updatedAt": "",
+            "stage": "verify",
+            "maxStageIndex": server.STAGE_INDEX["verify"],
+            "activeJob": None,
+            "jobState": "idle",
+            "sessions": {"discussion": None, "execution": None, "review": None, "ask": None},
+            "discussion": {},
+            "plan": {"finalPath": "/tmp/plan.md", "markdown": "# Plan"},
+            "paths": {},
+            "worktree": {"status": "ready", "path": str(self.repo), "branch": "main"},
+            "execution": {"status": "complete", "result": {}, "review": {}, "logs": []},
+            "verification": {"approved": False},
+            "git": {"committed": False},
+            "bugfix": {"status": "idle"},
+            "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
+            "events": [],
+        }
+        message_id = server.prepare_ask_request(task_id, "当前状态是怎么保存的？")
+        answer = {
+            "answer": "状态保存在任务 JSON 中。",
+            "evidence": [{"path": "server.py", "detail": "save_task_locked 持久化任务。"}],
+            "uncertainties": [],
+        }
+
+        with mock.patch.object(server, "run_codex_structured", return_value=(answer, "ask-thread")) as run_codex:
+            server.ask_job(task_id, message_id)
+
+        command = run_codex.call_args.args[2]
+        self.assertIn("--sandbox", command)
+        self.assertIn("read-only", command)
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "verify")
+        self.assertEqual(task["ask"]["status"], "ready")
+        self.assertEqual(task["ask"]["messages"][0]["answer"], "状态保存在任务 JSON 中。")
+        self.assertEqual(task["sessions"]["ask"], "ask-thread")
 
     def test_prepare_bugfix_rejects_stale_git_state_without_losing_commit(self) -> None:
         task_id = self.seed_task()
@@ -700,7 +790,7 @@ class ControllerTests(unittest.TestCase):
         disk = server.json.loads(server.task_file(task_id).read_text(encoding="utf-8"))["agentMemory"]
         self.assertEqual(memory, disk)
         self.assertEqual(memory["summary"], "实现完成")
-        self.assertEqual(memory["sessions"], {"discussion": "discussion-thread", "execution": "execution-thread", "review": "review-thread"})
+        self.assertEqual(memory["sessions"], {"discussion": "discussion-thread", "execution": "execution-thread", "review": "review-thread", "ask": None})
         self.assertIn("worker_count: 2", memory["decisions"])
         self.assertIn("server.py", memory["relevantFiles"])
         self.assertIn("人工验收", memory["completedSteps"])
@@ -998,6 +1088,9 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(server.should_run_acceptance_fix(task, "真机发现计时错误", True))
         task["stage"] = "execute"
         self.assertFalse(server.should_run_acceptance_fix(task, "真机发现计时错误", False))
+        task["stage"] = "bugfix"
+        task["bugfix"] = {"status": "verify"}
+        self.assertTrue(server.should_run_acceptance_fix(task, "Bug 复验仍有问题", False))
 
     def test_acceptance_fix_uses_fresh_bounded_worker_and_targeted_review(self) -> None:
         task_id = "00000000-0000-0000-0000-000000000037"
@@ -1159,6 +1252,33 @@ class ControllerTests(unittest.TestCase):
         task = server.get_task_copy(task_id)
         self.assertTrue(task["verification"]["approved"])
         self.assertEqual(task["stage"], "commit")
+
+    def test_bugfix_verification_enters_commit_without_leaving_bugfix_module(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000045"
+        server.TASKS[task_id] = {
+            "id": task_id,
+            "updatedAt": "",
+            "stage": "bugfix",
+            "maxStageIndex": server.STAGE_INDEX["bugfix"],
+            "activeJob": None,
+            "execution": {
+                "status": "complete",
+                "result": {"manual_cases": [{"title": "Bug 复验", "required": True}]},
+                "review": {"verdict": "pass"},
+            },
+            "verification": {"approved": False},
+            "bugfix": {"status": "verify"},
+            "events": [],
+        }
+
+        with mock.patch.object(server, "refresh_git_task") as refresh_git:
+            server.approve_manual_verification(task_id, [True], "复验通过")
+
+        refresh_git.assert_called_once_with(task_id)
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "bugfix")
+        self.assertEqual(task["bugfix"]["status"], "commit")
+        self.assertTrue(task["verification"]["approved"])
 
     def test_failed_new_review_does_not_display_the_previous_pass_as_current(self) -> None:
         task_id = "00000000-0000-0000-0000-000000000036"
