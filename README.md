@@ -4,7 +4,7 @@
 
 它通过 Project Profile 适配不同 Git 项目，把下面这些原本散落在对话、终端和文档里的步骤，收拢成一条可恢复、可人工审批的工作流：
 
-> 需求输入 → 只读讨论 → Plan / HTML 验收 → Git Worktree → Codex 执行 → Code Review → 人工验收 → Commit → Bug 修复闭环
+> 需求输入 → 只读讨论 → Plan / HTML 验收 → Git Worktree → 快速修改或标准执行 → 人工验收 → Commit → Bug 返修
 
 每条任务还提供独立的 **Ask · 只读问答** 模块，可以随时询问当前实现、状态来源、相关文件和修改影响；Ask 不属于流程阶段，不会修改文件或改变任务状态。
 
@@ -36,13 +36,15 @@
 - 先运行只读 discussion / ask-first，再生成执行 Plan。
 - 同时输出 Markdown Plan 和自包含的逻辑验收 HTML。
 - 创建 Worktree 前先展示真实 dry-run；也可以接入已有 Worktree。
+- 每个需求可绑定一个持久 Codex App Thread，并通过 `codex://threads/<thread-id>` 直接打开。
+- 快速修改复用同一个 App Thread，一轮完成实现和自检；标准流程保留独立 Code Review。
 - 在任务绑定的 Worktree 中执行 Codex 和项目 Skills。
 - 将实施与 Code Review 分开，Review 不通过时进入定向修复。
 - 生成人工验收最短路径、详细测试案例和关键日志筛选词。
 - 人工验收返修和 Commit 后 Bug 修复都可附加多张截图，支持选择、粘贴、拖入、预览和单张删除。
 - Commit 前重新校验真实 Git 状态，防止确认后文件又发生变化。
-- Commit 后发现问题时，复用当前 Worktree 和任务记忆进入 Bug 修复循环；定向修改、Code Review、人工复验和新 Commit 全部留在 Bug 修复模块内，不重新执行整份 Plan。
-- 每条任务都有独立 Ask 模块，可只读询问当前实现、状态来源、相关文件和修改影响，不改变流程阶段。
+- Commit 后发现问题时，复用当前 Worktree 和任务记忆，在 Bug 修复模块内完成定向修改、Review、复验和新 Commit，不重新执行 Plan。
+- 每个任务提供独立 Ask 只读问答，可询问当前实现、状态来源、相关文件和修改影响范围，不改变任务阶段。
 - 多需求队列可切换查看，支持归档、删除、恢复和有限并行。
 - 每个项目由独立 Profile 配置，不在服务代码中写死路径。
 
@@ -209,10 +211,47 @@ My Project Project Flow: http://127.0.0.1:4318/
 | 执行 | 在 Worktree 内执行 Plan 和项目 Skill 链 | 不自动 Commit、Push、Merge |
 | 人工验收 | 展示最小验证步骤、详细用例和验收日志；问题反馈可填写文字或附截图 | 用户逐项确认 P0 / 必测项；截图仅进入任务运行目录 |
 | Commit | 刷新 Git 摘要并校验状态指纹 | 需要单独确认；只提交当前 Worktree |
-| Bug 修复 | 根据文字、截图或两者组合做定向修改，并在本模块内完成 Review、人工复验和新 Commit | 复用当前 Worktree；不重跑整份 Plan，不重写旧 Commit |
-| Ask · 只读问答 | 询问当前实现、状态来源、相关文件和修改影响 | 严格只读；独立会话，不改变流程阶段 |
+| Bug 修复 | 根据文字、截图或两者组合，在本模块内完成定向修改、Review、人工复验和新 Commit | 不重新执行 Plan；复用当前 Worktree，不重写旧 Commit |
+| Ask | 基于当前任务、Plan、持久记忆和 Worktree 回答实现问题 | 严格只读，不修改文件，不改变流程阶段 |
 
 任务在后台运行时可以切换查看其他需求。服务重启后，进行中的操作会标记为中断，已有文档和 Worktree 改动会保留，可从对应阶段重试。
+
+## Codex App 联动与两种执行模式
+
+任务创建后，页面顶部会出现“Codex App 联动”面板。点击“连接并在 Codex App 打开”后，控制台会通过官方 [Codex App Server](https://learn.chatgpt.com/docs/app-server.md) 协议创建持久 Thread，并记录到当前任务：
+
+```text
+task.sessions.app
+task.app.threadId
+task.app.deepLink
+```
+
+再次点击只会打开或恢复同一个 Thread，不会重复创建。Worktree 准备完成后，后续 Turn 以该 Worktree 为工作目录；控制台继续负责流程状态、验收证据和 Git 门禁，Codex App 用于交互式查看与补充指令。
+
+| 模式 | 执行方式 | 独立 Review | 适合场景 |
+|---|---|---|---|
+| 快速修改（默认） | 持久 `codex app-server` Thread，一轮实现并自检 | 跳过；页面明确标记 `skipped` | 小改动、验收返修、定向 Bug 修复 |
+| 标准流程 | 原有 `codex exec` 实施会话，再运行独立只读 Review | 保留 | 大改动、共享逻辑、高风险需求 |
+
+两种模式都会保留：
+
+- 当前 Worktree 的写入边界。
+- 最小人工验证步骤、详细测试案例和关键日志。
+- P0 / 必测人工验收门禁。
+- Commit 前真实 Git 状态与指纹复核。
+- 不自动 Push 或 Merge。
+
+快速模式只是省去第二个独立 Review，不会把“未 Review”伪装成“Review 通过”。用户停止快速任务时，服务只中断当前需求的 Turn，不会结束其他需求共享的 App Server 进程。
+
+已有 `.runtime`、任务、Worktree 以及 discussion / execution / review / ask session 会在加载时兼容迁移；不使用快速模式时，原有标准流程行为保持不变。
+
+快速 Turn 默认最长 360 秒，可在启动前调整为 120–900 秒：
+
+```bash
+PROJECT_FLOW_QUICK_TIMEOUT=480 \
+PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" \
+python3 server.py
+```
 
 ## 接入已有文档和 Worktree
 
@@ -310,6 +349,7 @@ python3 server.py
 
 - 状态记录
 - Codex discussion / execution / review / ask 会话槽
+- Codex App 持久 Thread 槽
 - 持久任务记忆
 - Plan、HTML 和 Worktree 绑定信息
 
@@ -348,7 +388,7 @@ python3 server.py
 - 修改类 API 需要当前服务生成的会话令牌。
 - 上传和请求体有大小限制。
 - 反馈截图仅支持 PNG、JPEG、WebP，一次最多 6 张、单张最多 4 MB、总计最多 8 MB。
-- 反馈截图保存在 `.runtime/<project-id>/tasks/<task-id>/feedback-images/`，通过 Codex CLI 的 `--image` 参数读取，不复制到 Worktree，也不会进入 Commit。
+- 反馈截图保存在 `.runtime/<project-id>/tasks/<task-id>/feedback-images/`，标准模式通过 Codex CLI `--image` 读取，快速模式通过 App Server `localImage` 输入读取；不复制到 Worktree，也不会进入 Commit。
 - Codex 阶段使用明确的 read-only 或 workspace-write sandbox。
 - 需求网页、文档和粘贴内容一律按不可信输入处理。
 
@@ -372,7 +412,7 @@ python3 -m py_compile \
   skills/project-flow-setup/scripts/configure_project.py
 ```
 
-测试覆盖控制器门禁、任务队列、归档恢复、Git 指纹、人工验收、Commit、返修、Profile 校验、配置脚本，以及通用 Worktree provider。
+测试覆盖控制器门禁、任务队列、归档恢复、Git 指纹、人工验收、Commit、返修、App Thread 创建与复用、快速模式、旧任务迁移、Profile 校验、配置脚本，以及通用 Worktree provider。
 
 ## 常见问题
 
@@ -387,6 +427,14 @@ python3 -m py_compile \
 ### 服务重启后任务还在吗？
 
 在。任务记录位于 `.runtime/<project-id>/tasks`。重启时正在运行的阶段会变成 `interrupted`，已有 Worktree 改动不会被清理。
+
+### 快速模式为什么更快？
+
+它复用当前需求的持久 App Thread，并把实现和自检合并为一轮，不再等待第二个独立 Review。人工验收和 Commit 门禁仍然保留；共享逻辑或高风险改动建议切换到标准流程。
+
+### 不打开 Codex App 还能使用吗？
+
+可以。标准流程继续使用原有 `codex exec`。选择快速模式时，服务会自动创建或恢复任务的 App Thread；“打开 Codex App”只是把同一个 Thread 显示到桌面 App，便于交互式跟进。
 
 ### 会自动 Push 或合并吗？
 

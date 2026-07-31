@@ -12,6 +12,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import queue
 import re
 import secrets
 import signal
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime
@@ -130,19 +132,252 @@ try:
 except ValueError:
     ASK_TIMEOUT_SECONDS = 300
 
+try:
+    QUICK_EXECUTION_TIMEOUT_SECONDS = max(120, min(900, int(os.environ.get("PROJECT_FLOW_QUICK_TIMEOUT", "360"))))
+except ValueError:
+    QUICK_EXECUTION_TIMEOUT_SECONDS = 360
+
 LOCK = threading.RLock()
 GIT_WRITE_LOCK = threading.Lock()
 JOB_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_JOBS)
 TASKS: dict[str, dict[str, Any]] = {}
 ACTIVE_THREADS: dict[str, threading.Thread] = {}
 ACTIVE_PROCESSES: dict[str, subprocess.Popen[str]] = {}
+ACTIVE_APP_TURNS: dict[str, tuple[str, str]] = {}
 CANCEL_REQUESTED: set[str] = set()
 SESSION_TOKEN = secrets.token_urlsafe(32)
 CODEX_BIN = resolve_codex_bin()
+APP_SERVER_CLIENT: AppServerClient | None = None
+APP_SERVER_CLIENT_LOCK = threading.Lock()
 
 
 class WorkflowError(RuntimeError):
     pass
+
+
+class AppServerRPCError(WorkflowError):
+    """Raised when Codex app-server returns a JSON-RPC error."""
+
+
+class AppServerClient:
+    """Small persistent JSONL client for the official Codex app-server protocol."""
+
+    def __init__(self, codex_bin: str) -> None:
+        self.codex_bin = codex_bin
+        self.process: subprocess.Popen[str] | None = None
+        self._initialized = False
+        self._lifecycle_lock = threading.RLock()
+        self._write_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._next_id = 1
+        self._pending: dict[int, dict[str, Any]] = {}
+        self._listeners: dict[str, set[queue.Queue[dict[str, Any]]]] = {}
+        self._stderr_lines: list[str] = []
+
+    @property
+    def running(self) -> bool:
+        process = self.process
+        return bool(process and process.poll() is None)
+
+    def start(self) -> None:
+        if self.running and self._initialized:
+            return
+        if not self.codex_bin:
+            raise WorkflowError(CODEX_MISSING_MESSAGE)
+        with self._lifecycle_lock:
+            if self.running and self._initialized:
+                return
+            self._initialized = False
+            try:
+                process = subprocess.Popen(
+                    [self.codex_bin, "app-server"],
+                    text=True,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=1,
+                    start_new_session=True,
+                )
+            except FileNotFoundError as exc:
+                raise WorkflowError(CODEX_MISSING_MESSAGE) from exc
+            except PermissionError as exc:
+                raise WorkflowError(f"Codex CLI 不可执行：{safe_log(self.codex_bin)}") from exc
+            self.process = process
+            self._stderr_lines = []
+            threading.Thread(target=self._reader_loop, name="project-flow-app-server-reader", daemon=True).start()
+            threading.Thread(target=self._stderr_loop, name="project-flow-app-server-stderr", daemon=True).start()
+            try:
+                self._request(
+                    "initialize",
+                    {
+                        "clientInfo": {
+                            "name": "project_flow_console",
+                            "title": "Project Flow Console",
+                            "version": "2.2.0",
+                        }
+                    },
+                    timeout=20,
+                )
+                self.notify("initialized", {})
+                self._initialized = True
+            except Exception:
+                self.close()
+                raise
+
+    def close(self) -> None:
+        with self._lifecycle_lock:
+            process = self.process
+            self.process = None
+            self._initialized = False
+            if process and process.poll() is None:
+                stop_codex_process(process)
+            self._fail_pending("Codex App Server 已停止。")
+
+    def request(self, method: str, params: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
+        self.start()
+        return self._request(method, params, timeout)
+
+    def _request(self, method: str, params: dict[str, Any], timeout: int) -> dict[str, Any]:
+        with self._state_lock:
+            request_id = self._next_id
+            self._next_id += 1
+            pending = {"event": threading.Event(), "response": None}
+            self._pending[request_id] = pending
+        try:
+            self._send({"method": method, "id": request_id, "params": params})
+        except Exception:
+            with self._state_lock:
+                self._pending.pop(request_id, None)
+            raise
+        if not pending["event"].wait(timeout):
+            with self._state_lock:
+                self._pending.pop(request_id, None)
+            raise WorkflowError(f"Codex App Server 请求超时：{method}")
+        response = pending.get("response") or {}
+        error = response.get("error")
+        if error:
+            raise AppServerRPCError(safe_log(error.get("message") or error, 2400))
+        result = response.get("result")
+        return result if isinstance(result, dict) else {}
+
+    def notify(self, method: str, params: dict[str, Any]) -> None:
+        self._send({"method": method, "params": params})
+
+    def add_listener(self, thread_id: str, target: queue.Queue[dict[str, Any]]) -> None:
+        with self._state_lock:
+            self._listeners.setdefault(thread_id, set()).add(target)
+
+    def remove_listener(self, thread_id: str, target: queue.Queue[dict[str, Any]]) -> None:
+        with self._state_lock:
+            listeners = self._listeners.get(thread_id)
+            if not listeners:
+                return
+            listeners.discard(target)
+            if not listeners:
+                self._listeners.pop(thread_id, None)
+
+    def interrupt(self, thread_id: str, turn_id: str) -> None:
+        try:
+            self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=10)
+        except WorkflowError:
+            pass
+
+    def stderr_summary(self) -> str:
+        with self._state_lock:
+            return "\n".join(self._stderr_lines[-8:])
+
+    def _send(self, message: dict[str, Any]) -> None:
+        process = self.process
+        if not process or process.poll() is not None or process.stdin is None:
+            raise WorkflowError("Codex App Server 未运行。")
+        encoded = json.dumps(message, ensure_ascii=False)
+        with self._write_lock:
+            try:
+                process.stdin.write(encoded + "\n")
+                process.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                raise WorkflowError("Codex App Server 连接已断开。") from exc
+
+    def _reader_loop(self) -> None:
+        process = self.process
+        if not process or process.stdout is None:
+            return
+        for line in process.stdout:
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(message, dict):
+                continue
+            if message.get("method") and "id" in message:
+                self._handle_server_request(message)
+                continue
+            if "id" in message:
+                with self._state_lock:
+                    pending = self._pending.pop(message.get("id"), None)
+                if pending:
+                    pending["response"] = message
+                    pending["event"].set()
+                continue
+            self._dispatch_notification(message)
+        details = self.stderr_summary() or "Codex App Server 进程已退出。"
+        if self.process is not process:
+            return
+        self._initialized = False
+        self._fail_pending(details)
+        with self._state_lock:
+            listeners = [item for values in self._listeners.values() for item in values]
+        for listener in listeners:
+            listener.put({"method": "app-server/closed", "params": {"message": details}})
+
+    def _stderr_loop(self) -> None:
+        process = self.process
+        if not process or process.stderr is None:
+            return
+        for line in process.stderr:
+            cleaned = safe_log(line)
+            if not cleaned:
+                continue
+            with self._state_lock:
+                self._stderr_lines.append(cleaned)
+                if len(self._stderr_lines) > 80:
+                    del self._stderr_lines[:-80]
+
+    def _handle_server_request(self, message: dict[str, Any]) -> None:
+        method = str(message.get("method") or "")
+        request_id = message.get("id")
+        if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
+            result: dict[str, Any] = {"decision": "decline"}
+            response = {"id": request_id, "result": result}
+        elif method == "mcpServer/elicitation/request":
+            response = {"id": request_id, "result": {"action": "decline", "content": None}}
+        else:
+            response = {"id": request_id, "error": {"code": -32601, "message": "Project Flow Console 不处理此交互请求。"}}
+        try:
+            self._send(response)
+        except WorkflowError:
+            pass
+
+    def _dispatch_notification(self, message: dict[str, Any]) -> None:
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        thread_id = params.get("threadId")
+        if not thread_id:
+            thread = params.get("thread") if isinstance(params.get("thread"), dict) else {}
+            thread_id = thread.get("id")
+        if not thread_id:
+            return
+        with self._state_lock:
+            listeners = list(self._listeners.get(str(thread_id), set()))
+        for listener in listeners:
+            listener.put(message)
+
+    def _fail_pending(self, message: str) -> None:
+        with self._state_lock:
+            pending_values = list(self._pending.values())
+            self._pending.clear()
+        for pending in pending_values:
+            pending["response"] = {"error": {"message": message}}
+            pending["event"].set()
 
 
 def _profile_path(value: Any, key: str) -> Path:
@@ -517,6 +752,7 @@ def build_agent_memory(task: dict[str, Any]) -> dict[str, Any]:
             "execution": sessions.get("execution") or execution.get("threadId"),
             "review": sessions.get("review") or execution.get("reviewThreadId"),
             "ask": sessions.get("ask") or task.get("ask", {}).get("threadId"),
+            "app": sessions.get("app") or task.get("app", {}).get("threadId"),
         },
         "workspace": {
             "worktree": task.get("worktree", {}).get("path", ""),
@@ -762,6 +998,7 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         },
         "committed": bool(task.get("git", {}).get("committed")),
         "intakeMode": task.get("intake", {}).get("mode", "new"),
+        "appLinked": bool(task.get("app", {}).get("threadId")),
         "agent": {
             "id": str(memory.get("logicalAgentId") or task.get("id", ""))[:8],
             "memoryVersion": memory.get("version", 1),
@@ -853,8 +1090,19 @@ def load_tasks() -> None:
                 task["sessions"].setdefault("execution", task.get("execution", {}).get("threadId"))
                 task["sessions"].setdefault("review", task.get("execution", {}).get("reviewThreadId"))
                 task["sessions"].setdefault("ask", task.get("ask", {}).get("threadId"))
+                task["sessions"].setdefault("app", task.get("app", {}).get("threadId"))
                 task.setdefault("ask", {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""})
-                for key in ("discussion", "plan", "worktree", "execution", "ask"):
+                app = task.setdefault("app", {
+                    "status": "idle", "threadId": None, "turnId": None, "deepLink": "", "logs": [], "error": "",
+                })
+                app["threadId"] = app.get("threadId") or task["sessions"].get("app")
+                if not app.get("status") or (app.get("status") == "idle" and app.get("threadId")):
+                    app["status"] = "ready" if app.get("threadId") else "idle"
+                app.setdefault("turnId", None)
+                app["deepLink"] = app.get("deepLink") or codex_app_deep_link(app.get("threadId"))
+                app.setdefault("logs", [])
+                app.setdefault("error", "")
+                for key in ("discussion", "plan", "worktree", "execution", "ask", "app"):
                     section = task.get(key)
                     if isinstance(section, dict) and section.get("status") == "running":
                         section["status"] = "interrupted"
@@ -886,6 +1134,91 @@ def stop_codex_process(process: subprocess.Popen[str], force: bool = False) -> N
             pass
 
 
+def codex_app_deep_link(thread_id: Any) -> str:
+    value = str(thread_id or "").strip()
+    if not value or len(value) > 160 or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        return ""
+    return f"codex://threads/{quote(value, safe='')}"
+
+
+def get_app_server_client() -> AppServerClient:
+    global APP_SERVER_CLIENT
+    with APP_SERVER_CLIENT_LOCK:
+        if APP_SERVER_CLIENT is None or APP_SERVER_CLIENT.codex_bin != CODEX_BIN:
+            if APP_SERVER_CLIENT is not None:
+                APP_SERVER_CLIENT.close()
+            APP_SERVER_CLIENT = AppServerClient(CODEX_BIN)
+        return APP_SERVER_CLIENT
+
+
+def shutdown_app_server() -> None:
+    global APP_SERVER_CLIENT
+    with APP_SERVER_CLIENT_LOCK:
+        client = APP_SERVER_CLIENT
+        APP_SERVER_CLIENT = None
+    if client is not None:
+        client.close()
+
+
+def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, Any]:
+    task = get_task_copy(task_id)
+    if task.get("activeJob") and not allow_active:
+        raise WorkflowError("任务正在执行，请等待完成后再连接 Codex App。")
+    worktree_path = Path(task.get("worktree", {}).get("path") or "")
+    cwd = worktree_path if worktree_path.is_dir() else REPO_ROOT
+    existing = task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId")
+    client = get_app_server_client()
+    thread_id: str | None = str(existing) if existing else None
+    if thread_id:
+        try:
+            response = client.request("thread/resume", {"threadId": thread_id, "cwd": str(cwd)}, timeout=20)
+            thread_id = str((response.get("thread") or {}).get("id") or thread_id)
+        except AppServerRPCError:
+            thread_id = None
+    if not thread_id:
+        response = client.request(
+            "thread/start",
+            {
+                "cwd": str(cwd),
+                "approvalPolicy": "never",
+                "sandbox": "workspace-write",
+                "serviceName": "project_flow_console",
+                "ephemeral": False,
+            },
+            timeout=20,
+        )
+        thread_id = str((response.get("thread") or {}).get("id") or "")
+    if not thread_id:
+        raise WorkflowError("Codex App Server 未返回 Thread ID。")
+    try:
+        client.request(
+            "thread/name/set",
+            {"threadId": thread_id, "name": f"Project Flow · {safe_log(task.get('title'), 80)}"},
+            timeout=10,
+        )
+    except AppServerRPCError:
+        pass
+    deep_link = codex_app_deep_link(thread_id)
+    thread_changed = str(existing or "") != thread_id
+    with mutate_task(task_id) as live:
+        live.setdefault("sessions", {})["app"] = thread_id
+        live.setdefault("app", {}).update({
+            "status": "ready",
+            "threadId": thread_id,
+            "turnId": None,
+            "deepLink": deep_link,
+            "error": "",
+        })
+        live["app"].setdefault("logs", [])
+        if thread_changed:
+            add_event(live, "已绑定持久 Codex App Thread；任务阶段未改变。", "ok")
+    return get_task_copy(task_id)
+
+
+def ensure_task_app_thread(task_id: str) -> dict[str, Any]:
+    return _ensure_task_app_thread(task_id, allow_active=True)
+
+
 def cancel_task(task_id: str) -> dict[str, Any]:
     with LOCK:
         task = TASKS.get(task_id)
@@ -896,6 +1229,7 @@ def cancel_task(task_id: str) -> dict[str, Any]:
             raise WorkflowError("当前没有可停止的 Codex 任务。")
         CANCEL_REQUESTED.add(task_id)
         process = ACTIVE_PROCESSES.get(task_id)
+        app_turn = ACTIVE_APP_TURNS.get(task_id)
     with mutate_task(task_id) as task:
         section = task.setdefault(active_job, {})
         if active_job == "execution":
@@ -906,6 +1240,8 @@ def cancel_task(task_id: str) -> dict[str, Any]:
         force_timer = threading.Timer(5, stop_codex_process, args=(process, True))
         force_timer.daemon = True
         force_timer.start()
+    if app_turn:
+        get_app_server_client().interrupt(*app_turn)
     return get_task_copy(task_id)
 
 
@@ -1375,6 +1711,159 @@ def run_codex_structured(
         return payload, thread_id
     sources = "、".join(invalid_sources)
     raise WorkflowError(f"Codex {sources}未返回有效 JSON；当前执行方式可能未遵循 output schema。")
+
+
+def record_app_server_event(task_id: str, operation: str, event: dict[str, Any]) -> None:
+    method = str(event.get("method") or "")
+    params = event.get("params") if isinstance(event.get("params"), dict) else {}
+    if method == "turn/started":
+        add_job_log(task_id, operation, "Codex App Thread 已开始本轮处理。")
+    elif method == "turn/completed":
+        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        status = turn.get("status", "completed")
+        add_job_log(task_id, operation, f"Codex App Thread 本轮结束：{status}。", "ok" if status == "completed" else "warning")
+    elif method == "warning":
+        add_job_log(task_id, operation, params.get("message") or "Codex App Server 返回警告。", "warning")
+    elif method == "error":
+        error = params.get("error") if isinstance(params.get("error"), dict) else {}
+        add_job_log(task_id, operation, error.get("message") or "Codex App Server 返回错误。", "error")
+    elif method == "item/started":
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        item_type = item.get("type")
+        if item_type == "commandExecution":
+            add_job_log(task_id, operation, f"App Thread 执行检查：{safe_log(item.get('command'), 300)}")
+        elif item_type == "fileChange":
+            add_job_log(task_id, operation, "App Thread 正在应用文件改动。")
+    elif method == "item/completed":
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        item_type = item.get("type")
+        if item_type == "commandExecution":
+            add_job_log(task_id, operation, f"App Thread 检查结束，退出码 {item.get('exitCode', item.get('status', '未知'))}。")
+        elif item_type == "fileChange":
+            add_job_log(task_id, operation, "App Thread 已完成文件改动。")
+        elif item_type == "agentMessage":
+            add_job_log(task_id, operation, "App Thread 已返回结构化结果。", "ok")
+
+
+def run_app_server_structured(
+    task_id: str,
+    operation: str,
+    prompt: str,
+    cwd: Path,
+    schema_path: Path,
+    *,
+    timeout_seconds: int,
+    timeout_label: str,
+    allow_docs_root: bool,
+    attachments: Any = None,
+) -> tuple[dict[str, Any], str]:
+    if not CODEX_BIN:
+        raise WorkflowError(CODEX_MISSING_MESSAGE)
+    task = _ensure_task_app_thread(task_id, allow_active=True)
+    thread_id = str(task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId") or "")
+    if not thread_id:
+        raise WorkflowError("当前任务没有可用的 Codex App Thread。")
+    try:
+        output_schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkflowError(f"无法读取结构化输出 Schema：{schema_path}") from exc
+    client = get_app_server_client()
+    notifications: queue.Queue[dict[str, Any]] = queue.Queue()
+    client.add_listener(thread_id, notifications)
+    writable_roots = [str(cwd)]
+    if allow_docs_root and DOCS_ROOT.is_dir() and DOCS_ROOT.resolve() != cwd.resolve():
+        writable_roots.append(str(DOCS_ROOT))
+    inputs: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for image_path in feedback_attachment_paths(task_id, attachments):
+        inputs.append({"type": "localImage", "path": str(image_path)})
+    turn_id = ""
+    last_agent_message = ""
+    completed: dict[str, Any] | None = None
+    add_job_log(task_id, operation, "通过持久 Codex App Thread 启动快速模式。")
+    try:
+        response = client.request(
+            "turn/start",
+            {
+                "threadId": thread_id,
+                "input": inputs,
+                "cwd": str(cwd),
+                "approvalPolicy": "never",
+                "summary": "concise",
+                "sandboxPolicy": {
+                    "type": "workspaceWrite",
+                    "writableRoots": writable_roots,
+                    "networkAccess": False,
+                },
+                "outputSchema": output_schema,
+            },
+            timeout=30,
+        )
+        turn = response.get("turn") if isinstance(response.get("turn"), dict) else {}
+        turn_id = str(turn.get("id") or "")
+        if not turn_id:
+            raise WorkflowError("Codex App Server 未返回 Turn ID。")
+        with LOCK:
+            ACTIVE_APP_TURNS[task_id] = (thread_id, turn_id)
+        with mutate_task(task_id) as live:
+            live.setdefault("app", {}).update({
+                "status": "running", "threadId": thread_id, "turnId": turn_id,
+                "deepLink": codex_app_deep_link(thread_id), "error": "",
+            })
+        deadline = time.monotonic() + timeout_seconds
+        while completed is None:
+            if task_id in CANCEL_REQUESTED:
+                client.interrupt(thread_id, turn_id)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                client.interrupt(thread_id, turn_id)
+                minutes = max(1, timeout_seconds // 60)
+                raise WorkflowError(f"{timeout_label} 超过 {minutes} 分钟，已自动停止；已有 Worktree 改动均已保留。")
+            try:
+                event = notifications.get(timeout=min(1.0, remaining))
+            except queue.Empty:
+                continue
+            if event.get("method") == "app-server/closed":
+                raise WorkflowError(str((event.get("params") or {}).get("message") or "Codex App Server 已停止。"))
+            record_app_server_event(task_id, operation, event)
+            params = event.get("params") if isinstance(event.get("params"), dict) else {}
+            if event.get("method") == "item/completed":
+                item = params.get("item") if isinstance(params.get("item"), dict) else {}
+                if item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
+                    last_agent_message = item["text"]
+            if event.get("method") == "turn/completed":
+                event_turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+                if str(event_turn.get("id") or "") == turn_id:
+                    completed = event_turn
+        if task_id in CANCEL_REQUESTED or completed.get("status") == "interrupted":
+            raise WorkflowError("用户已停止当前任务。")
+        if completed.get("status") != "completed":
+            error = completed.get("error") if isinstance(completed.get("error"), dict) else {}
+            raise WorkflowError(safe_log(error.get("message") or "Codex App Thread 执行失败。", 2400))
+        if not last_agent_message.strip():
+            raise WorkflowError("Codex App Thread 没有返回结构化结果。")
+        try:
+            payload = json.loads(last_agent_message)
+        except json.JSONDecodeError as exc:
+            raise WorkflowError("Codex App Thread 最终消息不是有效 JSON。") from exc
+        if not isinstance(payload, dict):
+            raise WorkflowError("Codex App Thread 的结构化结果不是对象。")
+        with mutate_task(task_id) as live:
+            live.setdefault("app", {}).update({
+                "status": "ready", "threadId": thread_id, "turnId": turn_id,
+                "deepLink": codex_app_deep_link(thread_id), "error": "", "updatedAt": now_iso(),
+            })
+        return payload, thread_id
+    except Exception as exc:
+        with mutate_task(task_id) as live:
+            live.setdefault("app", {}).update({
+                "status": "error", "threadId": thread_id, "turnId": turn_id or None,
+                "deepLink": codex_app_deep_link(thread_id), "error": safe_log(exc, 2400),
+            })
+        raise
+    finally:
+        client.remove_listener(thread_id, notifications)
+        with LOCK:
+            ACTIVE_APP_TURNS.pop(task_id, None)
 
 
 def launch_job(task_id: str, job_name: str, target: Callable[[], None]) -> None:
@@ -1855,7 +2344,10 @@ def should_run_acceptance_fix(
         and (task.get("stage") == "verify" or bugfix_verification)
         and execution.get("status") == "complete"
         and isinstance(execution.get("result"), dict)
-        and review.get("verdict") == "pass"
+        and (
+            review.get("verdict") == "pass"
+            or (execution.get("flowMode") == "fast" and review.get("verdict") == "skipped")
+        )
     )
 
 
@@ -2022,25 +2514,164 @@ def execution_job(
             add_event(live, message, "warning")
 
 
+def quick_mode_prompt(base_prompt: str) -> str:
+    return f"""
+这是 Project Flow Console 的快速模式，目标是减少重复上下文恢复和独立 Review 等待。
+- 复用当前任务绑定的持久 Codex App Thread，直接完成当前这一轮最小必要修改。
+- 不重新讨论需求、不重新制定整份 Plan、不扫描与本轮无关的目录。
+- 修改后自行检查本轮 diff，并运行与改动直接相关的最小测试或静态检查。
+- 本模式不会再启动第二个独立 Code Review；必须在结构化结果中如实列出验证、风险和人工验收步骤。
+- 不 Commit、不 Push、不 Merge。
+
+下面是当前轮次的具体任务：
+<quick-task>
+{base_prompt}
+</quick-task>
+""".strip()
+
+
+def quick_execution_job(
+    task_id: str,
+    feedback: str,
+    acceptance_fix: bool = False,
+    attachments: Any = None,
+) -> None:
+    task = get_task_copy(task_id)
+    previous_execution = task.get("execution", {})
+    previous_result = previous_execution.get("result") if isinstance(previous_execution.get("result"), dict) else {}
+    bugfix_cycle = task.get("bugfix") or {}
+    bugfix_active = bool(
+        task.get("stage") == "bugfix"
+        and not task.get("git", {}).get("committed")
+        and bugfix_cycle.get("status") in {"running", "review", "verify", "commit"}
+    )
+    acceptance_feedback = feedback or (str(previous_execution.get("feedback") or "") if acceptance_fix else "")
+    if acceptance_fix and not attachments:
+        attachments = previous_execution.get("attachments") or []
+    if bugfix_active:
+        base_prompt = bugfix_execution_prompt(task)
+        schema = SCHEMA_ROOT / "acceptance-fix.schema.json"
+        allow_docs_root = False
+        mode = "bugfix"
+        timeout_label = "快速 Bug 修改"
+    elif acceptance_fix:
+        base_prompt = acceptance_fix_prompt(task, acceptance_feedback, attachments)
+        schema = SCHEMA_ROOT / "acceptance-fix.schema.json"
+        allow_docs_root = False
+        mode = "acceptance_fix"
+        timeout_label = "快速人工验收返修"
+    else:
+        base_prompt = execution_prompt(task, feedback)
+        schema = SCHEMA_ROOT / "execution.schema.json"
+        allow_docs_root = True
+        mode = "standard"
+        timeout_label = "快速执行"
+    worktree = Path(task["worktree"]["path"])
+    before_snapshot = worktree_change_snapshot(worktree)
+    with mutate_task(task_id) as live:
+        execution = live.setdefault("execution", {})
+        if isinstance(execution.get("review"), dict):
+            execution["previousReview"] = execution["review"]
+        execution.update({
+            "status": "running",
+            "phase": "implementation",
+            "mode": mode,
+            "flowMode": "fast",
+            "transport": "app-server",
+            "review": None,
+            "error": "",
+            "logs": [],
+        })
+        if acceptance_fix:
+            execution["feedback"] = acceptance_feedback
+            execution["attachments"] = copy.deepcopy(attachments or [])
+        live["verification"] = {"approved": False, "checks": [], "note": ""}
+        live["stage"] = "bugfix" if bugfix_active else "execute"
+        add_event(live, "使用持久 Codex App Thread 启动快速模式；本轮不运行独立 Code Review。", "ok")
+    payload, thread_id = run_app_server_structured(
+        task_id,
+        "execution",
+        quick_mode_prompt(base_prompt),
+        worktree,
+        schema,
+        timeout_seconds=QUICK_EXECUTION_TIMEOUT_SECONDS,
+        timeout_label=timeout_label,
+        allow_docs_root=allow_docs_root,
+        attachments=bugfix_cycle.get("attachments") or attachments,
+    )
+    after_snapshot = worktree_change_snapshot(worktree)
+    round_changed_files = changed_paths_between(before_snapshot, after_snapshot)
+    reported_files = compact_strings(payload.get("changed_files"), 80, 1200)
+    if reported_files != round_changed_files:
+        add_job_log(
+            task_id,
+            "execution",
+            f"已按快速模式前后文件指纹校正范围：Agent 汇报 {len(reported_files)} 个，实际净变化 {len(round_changed_files)} 个。",
+            "warning",
+        )
+    payload["changed_files"] = round_changed_files
+    result = merge_acceptance_fix_result(previous_result, payload) if acceptance_fix or bugfix_active else payload
+    review = {
+        "verdict": "skipped",
+        "summary": "快速模式已由同一 App Thread 完成自检；未启动第二个独立 Code Review。",
+        "findings": [],
+        "verification_gaps": ["独立 Code Review 未运行；人工验收仍是 Commit 门禁。"],
+    }
+    status = git_status(worktree)
+    with mutate_task(task_id) as live:
+        live.setdefault("sessions", {})["app"] = thread_id
+        live["execution"].update({
+            "status": "complete",
+            "phase": "complete",
+            "mode": mode,
+            "flowMode": "fast",
+            "transport": "app-server",
+            "result": result,
+            "roundResult": payload,
+            "roundChangedFiles": round_changed_files,
+            "review": review,
+            "error": "",
+        })
+        live["git"] = {**status, "committed": False, "commitId": ""}
+        if bugfix_active:
+            live["bugfix"]["status"] = "verify"
+            live["bugfix"]["executionMode"] = "fast"
+            live["stage"] = "bugfix"
+            live["maxStageIndex"] = max(live["maxStageIndex"], STAGE_INDEX["bugfix"])
+            message = "快速 Bug 修改完成，留在 Bug 修复模块等待人工复验。"
+        else:
+            live["stage"] = "verify"
+            live["maxStageIndex"] = max(live["maxStageIndex"], STAGE_INDEX["verify"])
+            message = "快速修改完成；未运行独立 Review，等待人工验收。"
+        add_event(live, message, "ok")
+
+
 def prepare_execution_request(
     task_id: str,
     reset_session: bool,
     acceptance_fix: bool = False,
     feedback: str = "",
     attachments: Any = None,
+    flow_mode: str = "standard",
 ) -> None:
     with mutate_task(task_id) as task:
         task["verification"] = {"approved": False, "checks": [], "note": ""}
+        task.setdefault("execution", {})["flowMode"] = flow_mode
+        task["execution"]["transport"] = "app-server" if flow_mode == "fast" else "exec"
         if acceptance_fix:
             task.setdefault("execution", {})["mode"] = "acceptance_fix"
             task["execution"]["feedback"] = safe_block(feedback, 4000)
             task["execution"]["attachments"] = copy.deepcopy(attachments or [])
         if reset_session:
-            task.setdefault("sessions", {})["execution"] = None
-            task.setdefault("execution", {})["threadId"] = None
+            session_key = "app" if flow_mode == "fast" else "execution"
+            task.setdefault("sessions", {})[session_key] = None
+            if flow_mode == "fast":
+                task.setdefault("app", {}).update({"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "error": ""})
+            else:
+                task.setdefault("execution", {})["threadId"] = None
             task["execution"]["mode"] = "standard"
             task["execution"].pop("feedback", None)
-            add_event(task, "用户授权放弃旧 execution 会话；将使用持久任务记忆建立新会话。", "warning")
+            add_event(task, f"用户授权放弃旧 {session_key} 会话；将使用持久任务记忆建立新会话。", "warning")
 
 
 def approve_manual_verification(task_id: str, checks: Any, note: str) -> None:
@@ -2055,7 +2686,10 @@ def approve_manual_verification(task_id: str, checks: Any, note: str) -> None:
             raise WorkflowError("当前任务不在人工验收阶段，不能确认通过。")
         execution = task.get("execution", {})
         review = execution.get("review") or {}
-        if execution.get("status") != "complete" or review.get("verdict") != "pass":
+        review_ready = review.get("verdict") == "pass" or (
+            execution.get("flowMode") == "fast" and review.get("verdict") == "skipped"
+        )
+        if execution.get("status") != "complete" or not review_ready:
             raise WorkflowError("实施或 Code Review 尚未完成，不能确认人工验收。")
         if not manual_verification_checks_pass(task, checks):
             raise WorkflowError("请先完成全部 P0 / 必测人工验收项。")
@@ -2077,7 +2711,13 @@ def approve_manual_verification(task_id: str, checks: Any, note: str) -> None:
     refresh_git_task(task_id)
 
 
-def prepare_bugfix_request(task_id: str, description: str, expected_digest: str, image_payload: Any = None) -> str:
+def prepare_bugfix_request(
+    task_id: str,
+    description: str,
+    expected_digest: str,
+    image_payload: Any = None,
+    execution_mode: str = "standard",
+) -> str:
     description = description.strip()
     if len(description) > 8000:
         raise WorkflowError("Bug 描述不能超过 8000 个字符。")
@@ -2130,6 +2770,9 @@ def prepare_bugfix_request(task_id: str, description: str, expected_digest: str,
         live["verification"] = {"approved": False, "checks": [], "note": ""}
         live["git"] = {**status, "committed": False, "commitId": ""}
         live.setdefault("execution", {})["mode"] = "bugfix"
+        live["execution"]["flowMode"] = execution_mode
+        live["execution"]["transport"] = "app-server" if execution_mode == "fast" else "exec"
+        live["bugfix"]["executionMode"] = execution_mode
         live["stage"] = "bugfix"
         live["maxStageIndex"] = max(live["maxStageIndex"], STAGE_INDEX["bugfix"])
         summary = safe_log(description, 300) or f"{len(attachments)} 张问题截图"
@@ -2334,7 +2977,7 @@ def create_task(payload: dict[str, Any]) -> dict[str, Any]:
         "maxStageIndex": STAGE_INDEX["discuss"],
         "activeJob": None,
         "jobState": "idle",
-        "sessions": {"discussion": None, "execution": None, "review": None, "ask": None},
+        "sessions": {"discussion": None, "execution": None, "review": None, "ask": None, "app": None},
         "source": source,
         "paths": {
             "planRelative": f"{PLAN_RELATIVE_DIR}/{plan_name}",
@@ -2351,6 +2994,7 @@ def create_task(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
         "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
+        "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "logs": [], "error": ""},
         "verification": {"approved": False, "checks": [], "note": ""},
         "git": {"entries": [], "digest": "", "committed": False, "commitId": ""},
         "bugfix": {"status": "idle", "description": "", "history": []},
@@ -2424,7 +3068,7 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
         "maxStageIndex": STAGE_INDEX["execute" if imported_plan else "discuss"],
         "activeJob": None,
         "jobState": "idle",
-        "sessions": {"discussion": None, "execution": None, "review": None, "ask": None},
+        "sessions": {"discussion": None, "execution": None, "review": None, "ask": None, "app": None},
         "intake": {
             "mode": mode,
             "documentPath": str(document_path),
@@ -2467,6 +3111,7 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
         "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
+        "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "logs": [], "error": ""},
         "verification": {"approved": False, "checks": [], "note": ""},
         "git": {**status, "committed": False, "commitId": ""},
         "bugfix": {"status": "idle", "description": "", "history": []},
@@ -2503,12 +3148,27 @@ def health_payload() -> dict[str, Any]:
     return {
         "ok": REPO_ROOT.is_dir() and WORKTREE_SCRIPT.is_file() and codex_ready,
         "service": "Project Flow Controller",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "token": SESSION_TOKEN,
-        "codex": {"ready": codex_ready, "version": codex_version},
-        "features": {"taskManagement": True, "ask": True, "bugfixInPlace": True},
+        "codex": {
+            "ready": codex_ready,
+            "version": codex_version,
+            "appServer": {
+                "available": codex_ready,
+                "running": bool(APP_SERVER_CLIENT and APP_SERVER_CLIENT.running),
+            },
+        },
+        "features": {
+            "taskManagement": True,
+            "ask": True,
+            "bugfixInPlace": True,
+            "codexAppLink": True,
+            "appServer": True,
+            "quickMode": True,
+        },
         "limits": {
             "askSeconds": ASK_TIMEOUT_SECONDS,
+            "quickExecutionSeconds": QUICK_EXECUTION_TIMEOUT_SECONDS,
             "acceptanceFixSeconds": ACCEPTANCE_FIX_TIMEOUT_SECONDS,
             "acceptanceReviewSeconds": ACCEPTANCE_FIX_REVIEW_TIMEOUT_SECONDS,
             "feedbackImages": {
@@ -2542,7 +3202,7 @@ def health_payload() -> dict[str, Any]:
 
 
 class WorkflowHandler(BaseHTTPRequestHandler):
-    server_version = "ProjectFlow/2.0"
+    server_version = "ProjectFlow/2.2"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(f"[{now_iso()}] {self.client_address[0]} {fmt % args}\n")
@@ -2674,7 +3334,7 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                     delete_task(task_id)
                     self.send_json({"ok": True, "deletedId": task_id})
                 return
-            match = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/(discussion|plan|plan/approve|worktree|execute|cancel|verification|commit/confirm-manual|commit|bugfix|ask)", path)
+            match = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/(discussion|plan|plan/approve|worktree|execute|cancel|verification|commit/confirm-manual|commit|bugfix|ask|app/open)", path)
             if not match:
                 self.send_error_json("未知 API。", HTTPStatus.NOT_FOUND)
                 return
@@ -2682,6 +3342,9 @@ class WorkflowHandler(BaseHTTPRequestHandler):
             task = get_task_copy(task_id)
             if task.get("archivedAt"):
                 raise WorkflowError("任务已归档，请先恢复后再继续执行。")
+            if action == "app/open":
+                self.send_json({"ok": True, "task": ensure_task_app_thread(task_id)})
+                return
             if action == "ask":
                 message_id = prepare_ask_request(task_id, str(payload.get("question") or ""))
                 launch_job(task_id, "ask", lambda: ask_job(task_id, message_id))
@@ -2724,30 +3387,47 @@ class WorkflowHandler(BaseHTTPRequestHandler):
             if action == "execute":
                 if task["worktree"].get("status") != "ready":
                     raise WorkflowError("Worktree 尚未准备完成。")
+                flow_mode = str(payload.get("mode") or "standard")
+                if flow_mode not in {"fast", "standard"}:
+                    raise WorkflowError("执行模式必须是 fast 或 standard。")
                 feedback = str(payload.get("feedback") or "").strip()[:4000]
                 images = decode_feedback_images(payload.get("images"))
                 reset_session = payload.get("resetSession") is True
-                retry_review_only = should_retry_review_only(task, feedback, reset_session)
+                retry_review_only = flow_mode == "standard" and should_retry_review_only(task, feedback, reset_session)
                 acceptance_fix = should_run_acceptance_fix(task, feedback, reset_session, bool(images))
                 if images and not acceptance_fix:
                     raise WorkflowError("图片附件只能用于人工验收后的定向返修。")
                 attachments = persist_feedback_images(task_id, images, "acceptance-fix") if acceptance_fix else []
-                prepare_execution_request(task_id, reset_session, acceptance_fix, feedback, attachments)
-                launch_job(
-                    task_id, "execution",
-                    lambda: execution_job(task_id, feedback, retry_review_only, acceptance_fix, attachments),
-                )
+                prepare_execution_request(task_id, reset_session, acceptance_fix, feedback, attachments, flow_mode)
+                if flow_mode == "fast":
+                    launch_job(
+                        task_id, "execution",
+                        lambda: quick_execution_job(task_id, feedback, acceptance_fix, attachments),
+                    )
+                else:
+                    launch_job(
+                        task_id, "execution",
+                        lambda: execution_job(task_id, feedback, retry_review_only, acceptance_fix, attachments),
+                    )
                 self.send_json({"ok": True, "task": get_task_copy(task_id)}, HTTPStatus.ACCEPTED)
                 return
             if action == "bugfix":
+                flow_mode = str(payload.get("mode") or "standard")
+                if flow_mode not in {"fast", "standard"}:
+                    raise WorkflowError("Bug 修复模式必须是 fast 或 standard。")
                 description = str(payload.get("description") or "")
                 feedback = prepare_bugfix_request(
-                    task_id, description, str(payload.get("digest") or ""), payload.get("images")
+                    task_id, description, str(payload.get("digest") or ""), payload.get("images"), flow_mode
                 )
                 attachments = get_task_copy(task_id).get("bugfix", {}).get("attachments") or []
-                launch_job(
-                    task_id, "execution", lambda: execution_job(task_id, feedback, False, False, attachments)
-                )
+                if flow_mode == "fast":
+                    launch_job(
+                        task_id, "execution", lambda: quick_execution_job(task_id, feedback, False, attachments)
+                    )
+                else:
+                    launch_job(
+                        task_id, "execution", lambda: execution_job(task_id, feedback, False, False, attachments)
+                    )
                 self.send_json({"ok": True, "task": get_task_copy(task_id)}, HTTPStatus.ACCEPTED)
                 return
             if action == "cancel":
@@ -2812,6 +3492,7 @@ def main() -> int:
             processes = list(ACTIVE_PROCESSES.values())
         for process in processes:
             stop_codex_process(process)
+        shutdown_app_server()
         server.server_close()
     return 0
 

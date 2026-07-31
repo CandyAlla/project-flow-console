@@ -68,6 +68,7 @@
     button.small { min-height: 34px; padding-inline: 11px; font-size: .9rem; }
 
     button:focus-visible,
+    .app-link-button:focus-visible,
     input:focus-visible,
     textarea:focus-visible,
     .image-drop-zone:focus-visible,
@@ -351,6 +352,50 @@
       padding: 28px clamp(20px, 4vw, 38px) 34px;
     }
 
+    .codex-app-panel {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 22px;
+      padding: 18px 19px;
+      border: 1px solid #b9cceb;
+      border-left: 4px solid var(--accent);
+      background: #f5f9ff;
+    }
+
+    .codex-app-panel.linked { border-color: #a8d0bc; border-left-color: var(--ok); background: #f2faf6; }
+    .codex-app-copy { min-width: 0; }
+    .codex-app-title { display: flex; align-items: center; gap: 11px; }
+    .codex-app-title h3 { font-size: 1.05rem; }
+    .codex-app-title .section-kicker { margin-bottom: 1px; }
+    .app-status-dot { flex: 0 0 auto; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+    .codex-app-panel.linked .app-status-dot { background: var(--ok); box-shadow: 0 0 0 4px var(--ok-soft); }
+    .codex-app-copy > p { max-width: 68ch; margin: 8px 0 0; color: #465568; font-size: .9rem; }
+    .codex-app-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 9px; color: var(--muted); font-size: .78rem; }
+    .codex-app-meta span { min-width: 0; overflow-wrap: anywhere; }
+    .codex-app-meta code { color: #35465c; }
+    .codex-app-copy .app-error { color: var(--danger); }
+    .codex-app-action { display: grid; flex: 0 0 auto; gap: 6px; justify-items: stretch; text-align: center; }
+    .codex-app-action small { color: var(--muted); font-size: .72rem; }
+
+    .app-link-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 17px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      color: var(--ink);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .app-link-button.primary { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 700; }
+    .app-link-button.primary:hover { border-color: var(--accent-strong); background: var(--accent-strong); }
+    .app-link-button.disabled { cursor: not-allowed; opacity: .55; }
+
     .section + .section { margin-top: 32px; }
     .section > h3 { margin-bottom: 12px; }
     .section-copy { max-width: var(--reading); margin: 7px 0 0; color: var(--muted); }
@@ -629,6 +674,31 @@
     .actions-primary, .actions-secondary { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
     .actions-primary { margin-left: auto; }
 
+    .execution-mode-section { padding: 19px; border: 1px solid var(--line); background: var(--soft); }
+    .execution-mode-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+    .execution-mode-card {
+      position: relative;
+      display: grid;
+      gap: 7px;
+      min-width: 0;
+      padding: 15px 15px 14px 42px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--surface);
+      color: #465568;
+      cursor: pointer;
+    }
+
+    .execution-mode-card:hover { border-color: #8f9baa; }
+    .execution-mode-card.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: #f7faff; }
+    .execution-mode-card input { position: absolute; top: 20px; left: 15px; }
+    .execution-mode-card > span:not(.mode-card-head) { font-size: .88rem; }
+    .execution-mode-card > small { color: var(--muted); font-size: .76rem; }
+    .mode-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--ink); }
+    .mode-card-head em { padding: 2px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: .7rem; font-style: normal; font-weight: 800; }
+    .execution-mode-card:nth-child(2) .mode-card-head em { background: var(--warning-soft); color: var(--warning); }
+    .review-gaps { margin: 12px 0 0; padding-left: 1.2rem; color: var(--warning); font-size: .85rem; }
+
     details {
       max-width: var(--reading);
       margin-top: 22px;
@@ -719,7 +789,9 @@
       .step { flex: 0 0 136px; width: auto; min-height: 46px; }
       .step:not(:last-child)::after { top: 26px; left: 38px; width: 106px; height: 1px; }
       .step-label { padding-right: 5px; background: inherit; white-space: nowrap; }
-      .summary-grid { grid-template-columns: 1fr; }
+      .summary-grid, .execution-mode-grid { grid-template-columns: 1fr; }
+      .codex-app-panel { align-items: stretch; flex-direction: column; gap: 14px; }
+      .codex-app-action { justify-items: stretch; }
       .agent-memory-meta, .agent-memory-grid { grid-template-columns: 1fr; }
       .agent-memory > summary { align-items: flex-start; flex-direction: column; gap: 3px; }
       .logic-flow { grid-template-columns: 1fr; }
@@ -774,7 +846,7 @@
       <div>
         <p class="eyebrow" id="projectEyebrow">Project · Project Flow</p>
         <h1>需求工作流控制台</h1>
-        <p class="lede">从策划文档、讨论澄清、Plan 验收到 Worktree 执行、Commit 和提交后的 Bug 修复，用一条可恢复的状态流推进；随时可用 Ask 只读了解当前实现。</p>
+        <p class="lede">控制台负责需求、Plan、验收和 Git 门禁；Codex App 负责交互式编码。每个需求可绑定持久 Thread，并在快速修改与带独立 Review 的标准流程之间切换。</p>
       </div>
       <span class="prototype-badge" id="serviceBadge">正在连接本地服务</span>
     </div>
@@ -830,7 +902,7 @@
   </div>
 
   <footer>
-    本页只连接 127.0.0.1 本地服务。生成文档、创建 Worktree、执行 Plan、Commit 与 Bug 修复均需单独点击授权；Ask 严格只读；不会自动 Push 或 Merge。
+    本页只连接 127.0.0.1 本地服务和本机 Codex App Server。生成文档、创建 Worktree、执行、Commit 与 Bug 修复均需单独点击；快速模式仍保留人工验收和 Commit 门禁；不会自动 Push 或 Merge。
   </footer>
 
   <div class="toast" id="toast" role="status" hidden></div>

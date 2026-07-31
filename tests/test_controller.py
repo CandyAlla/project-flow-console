@@ -48,6 +48,7 @@ class ControllerTests(unittest.TestCase):
         server.TASKS.clear()
         server.ACTIVE_THREADS.clear()
         server.ACTIVE_PROCESSES.clear()
+        server.ACTIVE_APP_TURNS.clear()
         server.CANCEL_REQUESTED.clear()
         server.JOB_SLOTS = threading.BoundedSemaphore(2)
 
@@ -55,6 +56,7 @@ class ControllerTests(unittest.TestCase):
         server.TASKS.clear()
         server.ACTIVE_THREADS.clear()
         server.ACTIVE_PROCESSES.clear()
+        server.ACTIVE_APP_TURNS.clear()
         server.CANCEL_REQUESTED.clear()
         server.TASK_ROOT = self.old_task_root
         server.JOB_SLOTS = self.old_job_slots
@@ -79,6 +81,47 @@ class ControllerTests(unittest.TestCase):
         }
         server.TASKS[task_id] = task
         return task_id
+
+    def seed_execution_task(self, task_id: str = "00000000-0000-0000-0000-000000000051") -> str:
+        status = server.git_status(self.repo)
+        server.TASKS[task_id] = {
+            "id": task_id,
+            "title": "Codex App 快速模式",
+            "createdAt": "2026-07-31T10:00:00+08:00",
+            "updatedAt": "2026-07-31T10:00:00+08:00",
+            "stage": "execute",
+            "maxStageIndex": server.STAGE_INDEX["execute"],
+            "activeJob": None,
+            "jobState": "idle",
+            "sessions": {"discussion": None, "execution": None, "review": None, "ask": None, "app": None},
+            "discussion": {"status": "ready", "result": {"summary": "需求已确认"}, "messages": []},
+            "plan": {"status": "ready", "approved": True, "finalPath": str(self.repo / "plan.md"), "markdown": "# Plan"},
+            "paths": {"planRelative": "plan.md", "htmlRelative": ""},
+            "worktree": {"status": "ready", "path": str(self.repo), "branch": "main", "name": "quick-mode"},
+            "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
+            "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
+            "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "logs": [], "error": ""},
+            "verification": {"approved": False, "checks": [], "note": ""},
+            "git": {**status, "committed": False, "commitId": ""},
+            "bugfix": {"status": "idle", "description": "", "history": []},
+            "events": [],
+        }
+        return task_id
+
+    def quick_result(self) -> dict[str, object]:
+        return {
+            "summary": "快速修改与自检完成",
+            "changed_files": ["feature.cs"],
+            "verification": [{"check": "静态检查", "result": "通过", "status": "passed"}],
+            "minimum_manual_verification": {
+                "estimated_minutes": 3,
+                "steps": [{"title": "主流程", "action": "运行", "expected": "功能正常", "log_filter": "FLOW", "expected_log": "ok", "failure_signal": "error"}],
+            },
+            "manual_cases": [{"title": "主流程", "required": True, "priority": "P0", "steps": ["运行"], "expected": "功能正常"}],
+            "acceptance_logs": [],
+            "risks": [],
+            "docs_backfill": [],
+        }
 
     def create_linked_worktree(self) -> Path:
         path = self.root / "worktrees" / "existing-task"
@@ -790,7 +833,7 @@ class ControllerTests(unittest.TestCase):
         disk = server.json.loads(server.task_file(task_id).read_text(encoding="utf-8"))["agentMemory"]
         self.assertEqual(memory, disk)
         self.assertEqual(memory["summary"], "实现完成")
-        self.assertEqual(memory["sessions"], {"discussion": "discussion-thread", "execution": "execution-thread", "review": "review-thread", "ask": None})
+        self.assertEqual(memory["sessions"], {"discussion": "discussion-thread", "execution": "execution-thread", "review": "review-thread", "ask": None, "app": None})
         self.assertIn("worker_count: 2", memory["decisions"])
         self.assertIn("server.py", memory["relevantFiles"])
         self.assertIn("人工验收", memory["completedSteps"])
@@ -1363,6 +1406,246 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(task["verification"]["approved"])
         self.assertEqual(task["agentMemory"]["summary"], "已确认口径")
         self.assertEqual(task["agentMemory"]["scope"], ["保留任务记忆"])
+
+    def test_codex_app_deep_link_accepts_only_safe_thread_ids(self) -> None:
+        self.assertEqual(server.codex_app_deep_link("thread_123-abc"), "codex://threads/thread_123-abc")
+        self.assertEqual(server.codex_app_deep_link("thread/escape"), "")
+        self.assertEqual(server.codex_app_deep_link(""), "")
+
+    def test_ensure_task_app_thread_creates_then_reuses_one_persistent_thread(self) -> None:
+        task_id = self.seed_execution_task()
+        calls: list[tuple[str, dict[str, object]]] = []
+        client = mock.Mock()
+
+        def request(method, params, timeout=30):
+            calls.append((method, params))
+            if method == "thread/start":
+                return {"thread": {"id": "app-thread-123"}}
+            if method == "thread/resume":
+                return {"thread": {"id": params["threadId"]}}
+            return {}
+
+        client.request.side_effect = request
+        with mock.patch.object(server, "get_app_server_client", return_value=client):
+            first = server.ensure_task_app_thread(task_id)
+            second = server.ensure_task_app_thread(task_id)
+
+        methods = [method for method, _ in calls]
+        self.assertEqual(methods.count("thread/start"), 1)
+        self.assertEqual(methods.count("thread/resume"), 1)
+        start_params = next(params for method, params in calls if method == "thread/start")
+        self.assertEqual(start_params["sandbox"], "workspace-write")
+        self.assertFalse(start_params["ephemeral"])
+        self.assertEqual(first["stage"], "execute")
+        self.assertEqual(second["sessions"]["app"], "app-thread-123")
+        self.assertEqual(second["app"]["deepLink"], "codex://threads/app-thread-123")
+        self.assertEqual(sum("已绑定持久 Codex App Thread" in item["message"] for item in second["events"]), 1)
+
+    def test_app_server_initialization_is_shared_by_concurrent_first_requests(self) -> None:
+        client = server.AppServerClient("/mock/codex")
+        initialize_entered = threading.Event()
+        release_initialize = threading.Event()
+        errors: list[Exception] = []
+
+        def initialize(_method, _params, timeout=20):
+            initialize_entered.set()
+            if not release_initialize.wait(2):
+                raise AssertionError("test did not release initialize")
+            return {}
+
+        def start_client():
+            try:
+                client.start()
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        first = threading.Thread(target=start_client)
+        second = threading.Thread(target=start_client)
+        process = mock.Mock()
+        process.poll.return_value = None
+        background_thread = mock.Mock()
+
+        with mock.patch.object(server.subprocess, "Popen", return_value=process) as popen, \
+                mock.patch.object(server.threading, "Thread", return_value=background_thread), \
+                mock.patch.object(client, "_request", side_effect=initialize) as request, \
+                mock.patch.object(client, "notify") as notify:
+            first.start()
+            self.assertTrue(initialize_entered.wait(1))
+            second.start()
+            self.assertTrue(second.is_alive())
+            release_initialize.set()
+            first.join(2)
+            second.join(2)
+
+        self.assertEqual(errors, [])
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        popen.assert_called_once()
+        request.assert_called_once()
+        notify.assert_called_once_with("initialized", {})
+        self.assertTrue(client._initialized)
+        client.process = None
+
+    def test_app_server_turn_uses_installed_workspace_policy_shape(self) -> None:
+        task_id = self.seed_execution_task()
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["app"] = "app-thread-456"
+            task["app"].update({"status": "ready", "threadId": "app-thread-456", "deepLink": "codex://threads/app-thread-456"})
+
+        class FakeClient:
+            def __init__(self, payload):
+                self.payload = payload
+                self.listener = None
+                self.turn_params = None
+
+            def add_listener(self, _thread_id, listener):
+                self.listener = listener
+
+            def remove_listener(self, _thread_id, _listener):
+                self.listener = None
+
+            def request(self, method, params, timeout=30):
+                if method != "turn/start":
+                    return {}
+                self.turn_params = params
+                self.listener.put({
+                    "method": "item/completed",
+                    "params": {"threadId": "app-thread-456", "item": {"type": "agentMessage", "text": json.dumps(self.payload, ensure_ascii=False)}},
+                })
+                self.listener.put({
+                    "method": "turn/completed",
+                    "params": {"threadId": "app-thread-456", "turn": {"id": "turn-1", "status": "completed"}},
+                })
+                return {"turn": {"id": "turn-1"}}
+
+            def interrupt(self, _thread_id, _turn_id):
+                raise AssertionError("completed turn must not be interrupted")
+
+        client = FakeClient(self.quick_result())
+        with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                mock.patch.object(server, "_ensure_task_app_thread", return_value=server.get_task_copy(task_id)), \
+                mock.patch.object(server, "get_app_server_client", return_value=client):
+            result, thread_id = server.run_app_server_structured(
+                task_id,
+                "execution",
+                "quick task",
+                self.repo,
+                server.SCHEMA_ROOT / "execution.schema.json",
+                timeout_seconds=5,
+                timeout_label="快速执行",
+                allow_docs_root=False,
+            )
+
+        self.assertEqual(result["summary"], "快速修改与自检完成")
+        self.assertEqual(thread_id, "app-thread-456")
+        self.assertEqual(client.turn_params["sandboxPolicy"]["type"], "workspaceWrite")
+        self.assertNotIn("readOnlyAccess", client.turn_params["sandboxPolicy"])
+        self.assertFalse(client.turn_params["sandboxPolicy"]["networkAccess"])
+
+    def test_quick_mode_skips_independent_review_and_enters_manual_verification(self) -> None:
+        task_id = self.seed_execution_task()
+        with mock.patch.object(server, "run_app_server_structured", return_value=(self.quick_result(), "app-thread-fast")), \
+                mock.patch.object(server, "run_review") as run_review:
+            server.quick_execution_job(task_id, "")
+
+        run_review.assert_not_called()
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "verify")
+        self.assertEqual(task["execution"]["status"], "complete")
+        self.assertEqual(task["execution"]["flowMode"], "fast")
+        self.assertEqual(task["execution"]["review"]["verdict"], "skipped")
+        self.assertEqual(task["sessions"]["app"], "app-thread-fast")
+
+    def test_quick_bugfix_stays_inside_bugfix_module(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000052")
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "bugfix"
+            task["maxStageIndex"] = server.STAGE_INDEX["bugfix"]
+            task["bugfix"] = {"status": "running", "description": "返回后计时未恢复", "attachments": [], "history": []}
+            task["execution"]["result"] = self.quick_result()
+            task["git"]["committed"] = False
+        with mock.patch.object(server, "run_app_server_structured", return_value=(self.quick_result(), "app-thread-bug")), \
+                mock.patch.object(server, "run_review") as run_review:
+            server.quick_execution_job(task_id, "bugfix prompt")
+
+        run_review.assert_not_called()
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "bugfix")
+        self.assertEqual(task["bugfix"]["status"], "verify")
+        self.assertEqual(task["bugfix"]["executionMode"], "fast")
+        self.assertEqual(task["execution"]["review"]["verdict"], "skipped")
+
+    def test_fast_manual_verification_accepts_skipped_independent_review(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000053")
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "verify"
+            task["maxStageIndex"] = server.STAGE_INDEX["verify"]
+            task["execution"].update({
+                "status": "complete",
+                "flowMode": "fast",
+                "result": self.quick_result(),
+                "review": {"verdict": "skipped", "summary": "快速自检", "findings": []},
+            })
+        with mock.patch.object(server, "refresh_git_task") as refresh_git:
+            server.approve_manual_verification(task_id, [True], "人工通过")
+
+        refresh_git.assert_called_once_with(task_id)
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "commit")
+        self.assertTrue(task["verification"]["approved"])
+
+    def test_cancel_interrupts_only_the_active_app_server_turn(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000054")
+        server.TASKS[task_id].update({"activeJob": "execution", "jobState": "running"})
+        server.TASKS[task_id]["execution"].update({"status": "running", "phase": "implementation"})
+        server.ACTIVE_APP_TURNS[task_id] = ("app-thread-cancel", "turn-cancel")
+        client = mock.Mock()
+
+        with mock.patch.object(server, "get_app_server_client", return_value=client):
+            server.cancel_task(task_id)
+
+        client.interrupt.assert_called_once_with("app-thread-cancel", "turn-cancel")
+        self.assertNotIn(task_id, server.ACTIVE_PROCESSES)
+        self.assertIn(task_id, server.CANCEL_REQUESTED)
+
+    def test_load_tasks_migrates_legacy_app_thread_without_changing_stage(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000055"
+        legacy = {
+            "id": task_id,
+            "title": "旧任务迁移",
+            "updatedAt": "2026-07-30T10:00:00+08:00",
+            "stage": "execute",
+            "maxStageIndex": server.STAGE_INDEX["execute"],
+            "sessions": {"app": "legacy-app-thread"},
+            "discussion": {"status": "ready"},
+            "plan": {"status": "ready", "markdown": "# Plan"},
+            "worktree": {"status": "ready", "path": str(self.repo), "branch": "main"},
+            "execution": {"status": "idle"},
+            "verification": {"approved": False},
+            "git": {"committed": False},
+            "events": [],
+        }
+        target = server.task_file(task_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+        server.TASKS.clear()
+
+        server.load_tasks()
+
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "execute")
+        self.assertEqual(task["sessions"]["app"], "legacy-app-thread")
+        self.assertEqual(task["app"]["status"], "ready")
+        self.assertEqual(task["app"]["deepLink"], "codex://threads/legacy-app-thread")
+
+    def test_health_advertises_codex_app_and_quick_mode(self) -> None:
+        with mock.patch.object(server, "CODEX_BIN", ""):
+            health = server.health_payload()
+
+        self.assertTrue(health["features"]["codexAppLink"])
+        self.assertTrue(health["features"]["appServer"])
+        self.assertTrue(health["features"]["quickMode"])
+        self.assertGreaterEqual(health["limits"]["quickExecutionSeconds"], 120)
 
 
 if __name__ == "__main__":
