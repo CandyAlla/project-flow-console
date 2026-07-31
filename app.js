@@ -710,15 +710,15 @@
     const action = task.archivedAt
       ? '<span class="app-link-button disabled">任务已归档</span>'
       : linked
-        ? `<a class="app-link-button primary" href="${escapeHTML(deepLink)}">打开 Codex App</a>`
-        : `<button class="primary" id="connectCodexApp" type="button" ${busy ? "disabled" : ""}>连接并在 Codex App 打开</button>`;
-    const workspace = task.worktree?.status === "ready" ? task.worktree.path : health?.paths?.repo;
+        ? `<button class="app-link-button primary" id="openCodexApp" type="button">打开 Codex App</button>`
+        : `<button class="primary" id="openCodexApp" type="button" ${busy ? "disabled" : ""}>连接并在 Codex App 打开</button>`;
+    const workspace = app.cwd || (task.worktree?.status === "ready" ? task.worktree.path : health?.paths?.repo);
     return `<section class="codex-app-panel ${linked ? "linked" : ""}">
       <div class="codex-app-copy"><div class="codex-app-title"><span class="app-status-dot" aria-hidden="true"></span><div><p class="section-kicker">Codex App 联动</p><h3>${escapeHTML(status)}</h3></div></div>
       <p>${linked ? "这个需求已经绑定持久 Thread。控制台负责流程和验收，Codex App 负责交互式查看与随时补充指令。" : "为这个需求创建一个持久 Codex App Thread；后续快速修改会复用它，不必反复恢复上下文。"}</p>
-      <div class="codex-app-meta"><span>工作目录 <code>${escapeHTML(workspace || "尚未绑定")}</code></span>${threadId ? `<span>Thread <code>${escapeHTML(`${threadId.slice(0, 12)}…`)}</code></span>` : ""}</div>
+      <div class="codex-app-meta"><span>${linked ? "当前连接目录" : "项目目录"} <code>${escapeHTML(workspace || "尚未绑定")}</code></span>${threadId ? `<span>Thread <code>${escapeHTML(`${threadId.slice(0, 12)}…`)}</code></span>` : ""}</div>
       ${app.error ? `<p class="app-error">${escapeHTML(app.error)}</p>` : ""}</div>
-      <div class="codex-app-action">${action}<small>${linked ? "打开的是当前需求的同一个 Thread" : "只建立连接，不会执行 Plan"}</small></div>
+      <div class="codex-app-action">${action}<small>${linked ? "打开前同步当前项目目录，Thread 保持不变" : "只建立连接，不会执行 Plan"}</small></div>
     </section>`;
   }
 
@@ -1192,7 +1192,7 @@
     on("retryPlan", "click", () => submitDiscussion(true));
     on("approvePlan", "click", approvePlan);
     on("createWorktree", "click", createWorktree);
-    on("connectCodexApp", "click", connectCodexApp);
+    on("openCodexApp", "click", openCodexApp);
     on("executePlan", "click", () => executePlan(""));
     on("cancelExecution", "click", cancelExecution);
     on("resetExecutionSession", "click", () => executePlan("", true));
@@ -1346,13 +1346,13 @@
     });
   }
 
-  async function connectCodexApp() {
+  async function openCodexApp() {
     await withAction(async () => {
       const result = await post(`/api/tasks/${task.id}/app/open`, {});
       const deepLink = result.task?.app?.deepLink;
       setTask(result.task, false);
       if (!deepLink) throw new Error("服务已建立 App Thread，但没有返回可打开的链接。");
-      showToast("已绑定持久 Codex App Thread。" );
+      showToast("已同步当前项目目录并打开 Codex App。" );
       window.location.href = deepLink;
     });
   }

@@ -1093,13 +1093,14 @@ def load_tasks() -> None:
                 task["sessions"].setdefault("app", task.get("app", {}).get("threadId"))
                 task.setdefault("ask", {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""})
                 app = task.setdefault("app", {
-                    "status": "idle", "threadId": None, "turnId": None, "deepLink": "", "logs": [], "error": "",
+                    "status": "idle", "threadId": None, "turnId": None, "deepLink": "", "cwd": "", "logs": [], "error": "",
                 })
                 app["threadId"] = app.get("threadId") or task["sessions"].get("app")
                 if not app.get("status") or (app.get("status") == "idle" and app.get("threadId")):
                     app["status"] = "ready" if app.get("threadId") else "idle"
                 app.setdefault("turnId", None)
                 app["deepLink"] = app.get("deepLink") or codex_app_deep_link(app.get("threadId"))
+                app.setdefault("cwd", "")
                 app.setdefault("logs", [])
                 app.setdefault("error", "")
                 for key in ("discussion", "plan", "worktree", "execution", "ask", "app"):
@@ -1141,6 +1142,16 @@ def codex_app_deep_link(thread_id: Any) -> str:
     return f"codex://threads/{quote(value, safe='')}"
 
 
+def task_app_cwd(task: dict[str, Any]) -> Path:
+    worktree = task.get("worktree") if isinstance(task.get("worktree"), dict) else {}
+    worktree_value = str(worktree.get("path") or "").strip()
+    if worktree.get("status") == "ready" and worktree_value:
+        worktree_path = Path(worktree_value)
+        if worktree_path.is_dir():
+            return worktree_path.resolve()
+    return REPO_ROOT.resolve()
+
+
 def get_app_server_client() -> AppServerClient:
     global APP_SERVER_CLIENT
     with APP_SERVER_CLIENT_LOCK:
@@ -1164,9 +1175,18 @@ def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, An
     task = get_task_copy(task_id)
     if task.get("activeJob") and not allow_active:
         raise WorkflowError("任务正在执行，请等待完成后再连接 Codex App。")
-    worktree_path = Path(task.get("worktree", {}).get("path") or "")
-    cwd = worktree_path if worktree_path.is_dir() else REPO_ROOT
+    cwd = task_app_cwd(task)
+    previous_cwd = str(task.get("app", {}).get("cwd") or "")
     existing = task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId")
+    with LOCK:
+        active_app_turn = ACTIVE_APP_TURNS.get(task_id)
+    if (
+        existing
+        and active_app_turn
+        and active_app_turn[0] == str(existing)
+        and previous_cwd == str(cwd)
+    ):
+        return task
     client = get_app_server_client()
     thread_id: str | None = str(existing) if existing else None
     if thread_id:
@@ -1200,6 +1220,7 @@ def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, An
         pass
     deep_link = codex_app_deep_link(thread_id)
     thread_changed = str(existing or "") != thread_id
+    cwd_changed = previous_cwd != str(cwd)
     with mutate_task(task_id) as live:
         live.setdefault("sessions", {})["app"] = thread_id
         live.setdefault("app", {}).update({
@@ -1207,11 +1228,14 @@ def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, An
             "threadId": thread_id,
             "turnId": None,
             "deepLink": deep_link,
+            "cwd": str(cwd),
             "error": "",
         })
         live["app"].setdefault("logs", [])
         if thread_changed:
-            add_event(live, "已绑定持久 Codex App Thread；任务阶段未改变。", "ok")
+            add_event(live, f"已绑定持久 Codex App Thread；项目目录：{cwd}；任务阶段未改变。", "ok")
+        elif cwd_changed:
+            add_event(live, f"Codex App Thread 已切换到当前项目目录：{cwd}。", "ok")
     return get_task_copy(task_id)
 
 
@@ -2994,7 +3018,7 @@ def create_task(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
         "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
-        "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "logs": [], "error": ""},
+        "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "cwd": str(REPO_ROOT.resolve()), "logs": [], "error": ""},
         "verification": {"approved": False, "checks": [], "note": ""},
         "git": {"entries": [], "digest": "", "committed": False, "commitId": ""},
         "bugfix": {"status": "idle", "description": "", "history": []},
@@ -3111,7 +3135,11 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
         "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
-        "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "logs": [], "error": ""},
+        "app": {
+            "status": "idle", "threadId": None, "turnId": None, "deepLink": "",
+            "cwd": str(worktree_path.resolve()) if imported_plan else str(REPO_ROOT.resolve()),
+            "logs": [], "error": "",
+        },
         "verification": {"approved": False, "checks": [], "note": ""},
         "git": {**status, "committed": False, "commitId": ""},
         "bugfix": {"status": "idle", "description": "", "history": []},

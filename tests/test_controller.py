@@ -100,7 +100,7 @@ class ControllerTests(unittest.TestCase):
             "worktree": {"status": "ready", "path": str(self.repo), "branch": "main", "name": "quick-mode"},
             "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
             "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
-            "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "logs": [], "error": ""},
+            "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "cwd": str(self.repo), "logs": [], "error": ""},
             "verification": {"approved": False, "checks": [], "note": ""},
             "git": {**status, "committed": False, "commitId": ""},
             "bugfix": {"status": "idle", "description": "", "history": []},
@@ -1436,10 +1436,87 @@ class ControllerTests(unittest.TestCase):
         start_params = next(params for method, params in calls if method == "thread/start")
         self.assertEqual(start_params["sandbox"], "workspace-write")
         self.assertFalse(start_params["ephemeral"])
+        self.assertEqual(start_params["cwd"], str(self.repo.resolve()))
         self.assertEqual(first["stage"], "execute")
         self.assertEqual(second["sessions"]["app"], "app-thread-123")
         self.assertEqual(second["app"]["deepLink"], "codex://threads/app-thread-123")
+        self.assertEqual(second["app"]["cwd"], str(self.repo.resolve()))
         self.assertEqual(sum("已绑定持久 Codex App Thread" in item["message"] for item in second["events"]), 1)
+
+    def test_existing_app_thread_rebinds_to_new_ready_worktree_without_duplication(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000056")
+        pending_worktree = self.root / "worktrees" / "later-ready"
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["app"] = "app-thread-existing"
+            task["app"].update({
+                "status": "ready",
+                "threadId": "app-thread-existing",
+                "deepLink": "codex://threads/app-thread-existing",
+                "cwd": str(self.repo.resolve()),
+            })
+            task["worktree"].update({"status": "idle", "path": str(pending_worktree)})
+        calls: list[tuple[str, dict[str, object]]] = []
+        client = mock.Mock()
+
+        def request(method, params, timeout=30):
+            calls.append((method, params))
+            if method == "thread/resume":
+                return {"thread": {"id": params["threadId"]}}
+            return {}
+
+        client.request.side_effect = request
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "get_app_server_client", return_value=client):
+            before = server.ensure_task_app_thread(task_id)
+            pending_worktree.mkdir(parents=True)
+            with server.mutate_task(task_id) as task:
+                task["worktree"]["status"] = "ready"
+            after = server.ensure_task_app_thread(task_id)
+
+        resumes = [params for method, params in calls if method == "thread/resume"]
+        self.assertEqual([params["cwd"] for params in resumes], [str(self.repo.resolve()), str(pending_worktree.resolve())])
+        self.assertNotIn("thread/start", [method for method, _ in calls])
+        self.assertEqual(before["sessions"]["app"], "app-thread-existing")
+        self.assertEqual(after["sessions"]["app"], "app-thread-existing")
+        self.assertEqual(after["app"]["cwd"], str(pending_worktree.resolve()))
+        self.assertEqual(sum("切换到当前项目目录" in item["message"] for item in after["events"]), 1)
+
+    def test_task_app_cwd_ignores_unready_or_missing_worktree(self) -> None:
+        candidate = self.root / "worktrees" / "candidate"
+        candidate.mkdir(parents=True)
+        with mock.patch.object(server, "REPO_ROOT", self.repo):
+            self.assertEqual(server.task_app_cwd({"worktree": {"status": "validated", "path": str(candidate)}}), self.repo.resolve())
+            self.assertEqual(server.task_app_cwd({"worktree": {"status": "ready", "path": str(candidate)}}), candidate.resolve())
+            self.assertEqual(server.task_app_cwd({"worktree": {"status": "ready", "path": str(candidate / "missing")}}), self.repo.resolve())
+            self.assertEqual(server.task_app_cwd({"worktree": {"status": "ready", "path": ""}}), self.repo.resolve())
+
+    def test_linked_codex_app_button_refreshes_backend_binding_before_deep_link(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="openCodexApp"', app_js)
+        self.assertIn('on("openCodexApp", "click", openCodexApp)', app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/app/open`, {})', app_js)
+        self.assertNotIn('<a class="app-link-button primary"', app_js)
+
+    def test_opening_active_app_thread_preserves_running_turn(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000057")
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["app"] = "app-thread-running"
+            task["app"].update({
+                "status": "running",
+                "threadId": "app-thread-running",
+                "turnId": "turn-running",
+                "deepLink": "codex://threads/app-thread-running",
+                "cwd": str(self.repo.resolve()),
+            })
+        server.ACTIVE_APP_TURNS[task_id] = ("app-thread-running", "turn-running")
+
+        with mock.patch.object(server, "get_app_server_client") as get_client:
+            task = server.ensure_task_app_thread(task_id)
+
+        get_client.assert_not_called()
+        self.assertEqual(task["app"]["status"], "running")
+        self.assertEqual(task["app"]["turnId"], "turn-running")
+        self.assertEqual(task["app"]["cwd"], str(self.repo.resolve()))
 
     def test_app_server_initialization_is_shared_by_concurrent_first_requests(self) -> None:
         client = server.AppServerClient("/mock/codex")
@@ -1637,6 +1714,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["sessions"]["app"], "legacy-app-thread")
         self.assertEqual(task["app"]["status"], "ready")
         self.assertEqual(task["app"]["deepLink"], "codex://threads/legacy-app-thread")
+        self.assertEqual(task["app"]["cwd"], "")
 
     def test_health_advertises_codex_app_and_quick_mode(self) -> None:
         with mock.patch.object(server, "CODEX_BIN", ""):

@@ -224,9 +224,10 @@ My Project Project Flow: http://127.0.0.1:4318/
 task.sessions.app
 task.app.threadId
 task.app.deepLink
+task.app.cwd
 ```
 
-再次点击只会打开或恢复同一个 Thread，不会重复创建。Worktree 准备完成后，后续 Turn 以该 Worktree 为工作目录；控制台继续负责流程状态、验收证据和 Git 门禁，Codex App 用于交互式查看与补充指令。
+每次点击“打开 Codex App”都会先通过本地控制服务恢复同一个 Thread，并同步当前项目目录，然后才跳转到 App，不会重复创建 Thread。Worktree 已准备完成且目录有效时连接该 Worktree；否则连接 Project Profile 的 `repoRoot`。因此即使 Thread 在 Worktree 创建前已经绑定，之后再次打开也会自动切换到对应 Worktree。控制台继续负责流程状态、验收证据和 Git 门禁，Codex App 用于交互式查看与补充指令。
 
 | 模式 | 执行方式 | 独立 Review | 适合场景 |
 |---|---|---|---|
