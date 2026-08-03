@@ -1171,24 +1171,35 @@ def shutdown_app_server() -> None:
         client.close()
 
 
-def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, Any]:
+def unsubscribe_app_thread(client: AppServerClient, thread_id: str) -> str:
+    try:
+        client.request("thread/unsubscribe", {"threadId": thread_id}, timeout=10)
+        return ""
+    except WorkflowError as exc:
+        return safe_log(exc, 1200)
+
+
+def _ensure_task_app_thread(task_id: str, *, allow_active: bool, force_new: bool = False) -> dict[str, Any]:
     task = get_task_copy(task_id)
-    if task.get("activeJob") and not allow_active:
-        raise WorkflowError("任务正在执行，请等待完成后再连接 Codex App。")
+    if task.get("activeJob") and (not allow_active or force_new):
+        raise WorkflowError("任务正在执行，请等待完成后再切换 Codex App 聊天。")
     cwd = task_app_cwd(task)
     previous_cwd = str(task.get("app", {}).get("cwd") or "")
     existing = task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId")
     with LOCK:
         active_app_turn = ACTIVE_APP_TURNS.get(task_id)
+    if force_new and active_app_turn:
+        raise WorkflowError("当前 Codex App Thread 正在执行，完成或停止后才能新建聊天。")
     if (
-        existing
+        not force_new
+        and existing
         and active_app_turn
         and active_app_turn[0] == str(existing)
         and previous_cwd == str(cwd)
     ):
         return task
     client = get_app_server_client()
-    thread_id: str | None = str(existing) if existing else None
+    thread_id: str | None = None if force_new else (str(existing) if existing else None)
     if thread_id:
         try:
             response = client.request("thread/resume", {"threadId": thread_id, "cwd": str(cwd)}, timeout=20)
@@ -1211,13 +1222,17 @@ def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, An
     if not thread_id:
         raise WorkflowError("Codex App Server 未返回 Thread ID。")
     try:
+        suffix = f" · 新聊天 {datetime.now().strftime('%m-%d %H:%M')}" if force_new else ""
         client.request(
             "thread/name/set",
-            {"threadId": thread_id, "name": f"Project Flow · {safe_log(task.get('title'), 80)}"},
+            {"threadId": thread_id, "name": f"Project Flow · {safe_log(task.get('title'), 60)}{suffix}"},
             timeout=10,
         )
-    except AppServerRPCError:
+    except WorkflowError:
         pass
+    unsubscribe_error = ""
+    if force_new and existing and str(existing) != thread_id:
+        unsubscribe_error = unsubscribe_app_thread(client, str(existing))
     deep_link = codex_app_deep_link(thread_id)
     thread_changed = str(existing or "") != thread_id
     cwd_changed = previous_cwd != str(cwd)
@@ -1232,15 +1247,56 @@ def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, An
             "error": "",
         })
         live["app"].setdefault("logs", [])
-        if thread_changed:
+        if force_new:
+            add_event(live, f"已新建并绑定 Codex App 聊天；项目目录：{cwd}；旧聊天仍保留。", "ok")
+        elif thread_changed:
             add_event(live, f"已绑定持久 Codex App Thread；项目目录：{cwd}；任务阶段未改变。", "ok")
         elif cwd_changed:
             add_event(live, f"Codex App Thread 已切换到当前项目目录：{cwd}。", "ok")
+        if unsubscribe_error:
+            add_event(live, f"新聊天已绑定，但旧聊天取消订阅未确认：{unsubscribe_error}", "warning")
     return get_task_copy(task_id)
 
 
 def ensure_task_app_thread(task_id: str) -> dict[str, Any]:
     return _ensure_task_app_thread(task_id, allow_active=True)
+
+
+def start_new_task_app_thread(task_id: str) -> dict[str, Any]:
+    return _ensure_task_app_thread(task_id, allow_active=False, force_new=True)
+
+
+def disconnect_task_app_thread(task_id: str) -> dict[str, Any]:
+    task = get_task_copy(task_id)
+    if task.get("activeJob"):
+        raise WorkflowError("任务正在执行，完成或停止后才能断开 Codex App 聊天。")
+    with LOCK:
+        if ACTIVE_APP_TURNS.get(task_id):
+            raise WorkflowError("当前 Codex App Thread 正在执行，完成或停止后才能断开。")
+        client = APP_SERVER_CLIENT if APP_SERVER_CLIENT and APP_SERVER_CLIENT.running else None
+    existing = str(task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId") or "")
+    cwd = task_app_cwd(task)
+    with mutate_task(task_id) as live:
+        if live.get("activeJob"):
+            raise WorkflowError("任务正在执行，完成或停止后才能断开 Codex App 聊天。")
+        live.setdefault("sessions", {})["app"] = None
+        live.setdefault("app", {}).update({
+            "status": "idle",
+            "threadId": None,
+            "turnId": None,
+            "deepLink": "",
+            "cwd": str(cwd),
+            "error": "",
+        })
+        live["app"].setdefault("logs", [])
+        if existing:
+            add_event(live, "已断开当前需求与 Codex App 聊天的绑定；旧聊天未删除。", "warning")
+    if existing and client:
+        unsubscribe_error = unsubscribe_app_thread(client, existing)
+        if unsubscribe_error:
+            with mutate_task(task_id) as live:
+                add_event(live, f"本地绑定已解除，但 App Server 取消订阅未确认：{unsubscribe_error}", "warning")
+    return get_task_copy(task_id)
 
 
 def cancel_task(task_id: str) -> dict[str, Any]:
@@ -3362,7 +3418,7 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                     delete_task(task_id)
                     self.send_json({"ok": True, "deletedId": task_id})
                 return
-            match = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/(discussion|plan|plan/approve|worktree|execute|cancel|verification|commit/confirm-manual|commit|bugfix|ask|app/open)", path)
+            match = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/(discussion|plan|plan/approve|worktree|execute|cancel|verification|commit/confirm-manual|commit|bugfix|ask|app/open|app/disconnect|app/new)", path)
             if not match:
                 self.send_error_json("未知 API。", HTTPStatus.NOT_FOUND)
                 return
@@ -3372,6 +3428,12 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 raise WorkflowError("任务已归档，请先恢复后再继续执行。")
             if action == "app/open":
                 self.send_json({"ok": True, "task": ensure_task_app_thread(task_id)})
+                return
+            if action == "app/disconnect":
+                self.send_json({"ok": True, "task": disconnect_task_app_thread(task_id)})
+                return
+            if action == "app/new":
+                self.send_json({"ok": True, "task": start_new_task_app_thread(task_id)})
                 return
             if action == "ask":
                 message_id = prepare_ask_request(task_id, str(payload.get("question") or ""))

@@ -36,7 +36,7 @@
 - 先运行只读 discussion / ask-first，再生成执行 Plan。
 - 同时输出 Markdown Plan 和自包含的逻辑验收 HTML。
 - 创建 Worktree 前先展示真实 dry-run；也可以接入已有 Worktree。
-- 每个需求可绑定一个持久 Codex App Thread，并通过 `codex://threads/<thread-id>` 直接打开。
+- 每个需求可绑定一个持久 Codex App Thread，通过 `codex://threads/<thread-id>` 打开，并可断开连接或切换到新聊天。
 - 快速修改复用同一个 App Thread，一轮完成实现和自检；标准流程保留独立 Code Review。
 - 在任务绑定的 Worktree 中执行 Codex 和项目 Skills。
 - 将实施与 Code Review 分开，Review 不通过时进入定向修复。
@@ -228,6 +228,13 @@ task.app.cwd
 ```
 
 每次点击“打开 Codex App”都会先通过本地控制服务恢复同一个 Thread，并同步当前项目目录，然后才跳转到 App，不会重复创建 Thread。Worktree 已准备完成且目录有效时连接该 Worktree；否则连接 Project Profile 的 `repoRoot`。因此即使 Thread 在 Worktree 创建前已经绑定，之后再次打开也会自动切换到对应 Worktree。控制台继续负责流程状态、验收证据和 Git 门禁，Codex App 用于交互式查看与补充指令。
+
+已连接后还可以选择：
+
+- **新建聊天**：在同一项目目录创建并绑定新的持久 Thread，随后打开 Codex App；旧聊天保留在 App 中。
+- **断开连接**：解除当前需求与 Thread 的绑定，并取消本地 App Server 对旧 Thread 的订阅；不会归档或删除旧聊天。
+
+任务或 App Thread 正在执行时，这两个操作会被禁用，避免切换会话影响当前执行。断开后如果再次选择快速模式，控制台会按需创建一个新的持久聊天。
 
 | 模式 | 执行方式 | 独立 Review | 适合场景 |
 |---|---|---|---|

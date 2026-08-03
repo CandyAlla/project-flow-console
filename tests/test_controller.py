@@ -1518,6 +1518,88 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["app"]["turnId"], "turn-running")
         self.assertEqual(task["app"]["cwd"], str(self.repo.resolve()))
 
+    def test_disconnect_app_thread_unsubscribes_without_deleting_chat_or_changing_stage(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000058")
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["app"] = "app-thread-old"
+            task["app"].update({
+                "status": "ready",
+                "threadId": "app-thread-old",
+                "deepLink": "codex://threads/app-thread-old",
+                "cwd": str(self.repo.resolve()),
+            })
+        client = mock.Mock()
+        client.running = True
+        client.request.return_value = {"status": "unsubscribed"}
+
+        with mock.patch.object(server, "APP_SERVER_CLIENT", client):
+            task = server.disconnect_task_app_thread(task_id)
+
+        client.request.assert_called_once_with("thread/unsubscribe", {"threadId": "app-thread-old"}, timeout=10)
+        self.assertEqual(task["stage"], "execute")
+        self.assertIsNone(task["sessions"]["app"])
+        self.assertEqual(task["app"]["status"], "idle")
+        self.assertIsNone(task["app"]["threadId"])
+        self.assertEqual(task["app"]["deepLink"], "")
+        self.assertEqual(task["app"]["cwd"], str(self.repo.resolve()))
+        self.assertTrue(any("旧聊天未删除" in item["message"] for item in task["events"]))
+
+    def test_new_app_chat_replaces_binding_and_keeps_old_chat(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000059")
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["app"] = "app-thread-old"
+            task["app"].update({
+                "status": "ready",
+                "threadId": "app-thread-old",
+                "deepLink": "codex://threads/app-thread-old",
+                "cwd": str(self.repo.resolve()),
+            })
+        calls: list[tuple[str, dict[str, object]]] = []
+        client = mock.Mock()
+
+        def request(method, params, timeout=30):
+            calls.append((method, params))
+            if method == "thread/start":
+                return {"thread": {"id": "app-thread-new"}}
+            if method == "thread/unsubscribe":
+                return {"status": "unsubscribed"}
+            return {}
+
+        client.request.side_effect = request
+        with mock.patch.object(server, "get_app_server_client", return_value=client):
+            task = server.start_new_task_app_thread(task_id)
+
+        methods = [method for method, _ in calls]
+        self.assertEqual(methods.count("thread/start"), 1)
+        self.assertEqual(methods.count("thread/unsubscribe"), 1)
+        self.assertNotIn("thread/resume", methods)
+        unsubscribe_params = next(params for method, params in calls if method == "thread/unsubscribe")
+        self.assertEqual(unsubscribe_params["threadId"], "app-thread-old")
+        self.assertEqual(task["sessions"]["app"], "app-thread-new")
+        self.assertEqual(task["app"]["threadId"], "app-thread-new")
+        self.assertEqual(task["app"]["deepLink"], "codex://threads/app-thread-new")
+        self.assertTrue(any("旧聊天仍保留" in item["message"] for item in task["events"]))
+
+    def test_app_chat_switching_is_blocked_while_task_runs(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000060")
+        server.TASKS[task_id]["activeJob"] = "execution"
+        server.TASKS[task_id]["jobState"] = "running"
+
+        with mock.patch.object(server, "get_app_server_client") as get_client:
+            with self.assertRaisesRegex(server.WorkflowError, "切换 Codex App 聊天"):
+                server.start_new_task_app_thread(task_id)
+            with self.assertRaisesRegex(server.WorkflowError, "断开 Codex App 聊天"):
+                server.disconnect_task_app_thread(task_id)
+
+        get_client.assert_not_called()
+
+    def test_codex_app_panel_exposes_disconnect_and_new_chat_actions(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="newCodexAppChat"', app_js)
+        self.assertIn('id="disconnectCodexApp"', app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/app/new`, {})', app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/app/disconnect`, {})', app_js)
+
     def test_app_server_initialization_is_shared_by_concurrent_first_requests(self) -> None:
         client = server.AppServerClient("/mock/codex")
         initialize_entered = threading.Event()

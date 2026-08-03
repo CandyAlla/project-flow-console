@@ -707,18 +707,20 @@
       error: "连接需要处理",
       interrupted: "服务重启后可恢复"
     })[app.status] || (linked ? "已连接" : "尚未连接");
+    const switchLocked = busy || Boolean(task.activeJob) || app.status === "running";
+    const switchTitle = switchLocked ? "当前任务正在执行，完成或停止后才能切换聊天" : "";
     const action = task.archivedAt
       ? '<span class="app-link-button disabled">任务已归档</span>'
       : linked
-        ? `<button class="app-link-button primary" id="openCodexApp" type="button">打开 Codex App</button>`
-        : `<button class="primary" id="openCodexApp" type="button" ${busy ? "disabled" : ""}>连接并在 Codex App 打开</button>`;
+        ? `<div class="app-thread-actions"><button class="app-link-button primary" id="openCodexApp" type="button" ${busy ? "disabled" : ""}>打开 Codex App</button><div class="app-thread-tools"><button id="newCodexAppChat" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">新建聊天</button><button class="danger" id="disconnectCodexApp" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">断开连接</button></div></div>`
+        : `<button class="primary" id="openCodexApp" type="button" ${busy ? "disabled" : ""}>新建聊天并在 Codex App 打开</button>`;
     const workspace = app.cwd || (task.worktree?.status === "ready" ? task.worktree.path : health?.paths?.repo);
     return `<section class="codex-app-panel ${linked ? "linked" : ""}">
       <div class="codex-app-copy"><div class="codex-app-title"><span class="app-status-dot" aria-hidden="true"></span><div><p class="section-kicker">Codex App 联动</p><h3>${escapeHTML(status)}</h3></div></div>
       <p>${linked ? "这个需求已经绑定持久 Thread。控制台负责流程和验收，Codex App 负责交互式查看与随时补充指令。" : "为这个需求创建一个持久 Codex App Thread；后续快速修改会复用它，不必反复恢复上下文。"}</p>
       <div class="codex-app-meta"><span>${linked ? "当前连接目录" : "项目目录"} <code>${escapeHTML(workspace || "尚未绑定")}</code></span>${threadId ? `<span>Thread <code>${escapeHTML(`${threadId.slice(0, 12)}…`)}</code></span>` : ""}</div>
       ${app.error ? `<p class="app-error">${escapeHTML(app.error)}</p>` : ""}</div>
-      <div class="codex-app-action">${action}<small>${linked ? "打开前同步当前项目目录，Thread 保持不变" : "只建立连接，不会执行 Plan"}</small></div>
+      <div class="codex-app-action">${action}<small>${linked ? "可继续当前聊天，或保留旧聊天后新建一个" : "只建立连接，不会执行 Plan"}</small></div>
     </section>`;
   }
 
@@ -1193,6 +1195,8 @@
     on("approvePlan", "click", approvePlan);
     on("createWorktree", "click", createWorktree);
     on("openCodexApp", "click", openCodexApp);
+    on("newCodexAppChat", "click", newCodexAppChat);
+    on("disconnectCodexApp", "click", disconnectCodexApp);
     on("executePlan", "click", () => executePlan(""));
     on("cancelExecution", "click", cancelExecution);
     on("resetExecutionSession", "click", () => executePlan("", true));
@@ -1354,6 +1358,31 @@
       if (!deepLink) throw new Error("服务已建立 App Thread，但没有返回可打开的链接。");
       showToast("已同步当前项目目录并打开 Codex App。" );
       window.location.href = deepLink;
+    });
+  }
+
+  async function newCodexAppChat() {
+    if (task?.activeJob || task?.app?.status === "running") return showToast("当前任务正在执行，完成或停止后才能新建聊天。", true);
+    const confirmed = window.confirm("为当前需求新建一个 Codex App 聊天？\n\n旧聊天不会删除，但控制台后续会改为复用新聊天。");
+    if (!confirmed) return;
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/app/new`, {});
+      const deepLink = result.task?.app?.deepLink;
+      setTask(result.task, false);
+      if (!deepLink) throw new Error("新聊天已创建，但没有返回可打开的链接。");
+      showToast("已在当前项目目录新建 Codex App 聊天。" );
+      window.location.href = deepLink;
+    });
+  }
+
+  async function disconnectCodexApp() {
+    if (task?.activeJob || task?.app?.status === "running") return showToast("当前任务正在执行，完成或停止后才能断开连接。", true);
+    const confirmed = window.confirm("断开当前需求与 Codex App 聊天的连接？\n\n旧聊天不会删除；快速模式下次需要时会自动建立新聊天。");
+    if (!confirmed) return;
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/app/disconnect`, {});
+      setTask(result.task, false);
+      showToast("已断开 Codex App 聊天；旧聊天仍保留。" );
     });
   }
 
