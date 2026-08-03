@@ -56,6 +56,8 @@
   let taskSummaries = [];
   let scheduler = { maxConcurrentJobs: 2, runningJobs: 0, queuedJobs: 0 };
   let health = null;
+  let projectBranches = [];
+  let branchLoadError = "";
   let token = "";
   let selectedFile = null;
   const feedbackImages = new Map();
@@ -488,10 +490,33 @@
     return result;
   }
 
+  async function refreshProjectBranches() {
+    try {
+      const result = await api("/api/branches");
+      projectBranches = Array.isArray(result.branches) ? result.branches : [];
+      branchLoadError = "";
+      const names = new Set(projectBranches.map((item) => item.name));
+      if (!ui.taskId && !names.has(ui.baseBranch)) {
+        const preferred = projectBranches.find((item) => item.default)
+          || projectBranches.find((item) => item.current)
+          || projectBranches.find((item) => item.kind === "local")
+          || projectBranches[0];
+        if (preferred?.name) ui.baseBranch = preferred.name;
+      }
+      return result;
+    } catch (error) {
+      projectBranches = [];
+      branchLoadError = error.message || "无法读取主仓库分支。";
+      throw error;
+    }
+  }
+
   async function boot() {
     try {
       const response = await fetch("/api/health", { cache: "no-store" });
       applyHealth(await response.json());
+      try { await refreshProjectBranches(); }
+      catch (_) { /* 输入页保留 Profile 默认分支，并展示读取错误。 */ }
       await refreshTaskSummaries();
       if (ui.taskId) {
         try {
@@ -834,7 +859,22 @@
       { id: "existing_requirement", label: "已有需求文档" },
       { id: "existing_plan", label: "已有执行 Plan" }
     ];
-    const newFields = `<div class="field"><label for="baseBranch">Worktree 基准</label><input id="baseBranch" class="mono" type="text" value="${escapeHTML(ui.baseBranch)}"><span class="hint">默认使用本地 ${escapeHTML(health?.project?.defaultBaseBranch || "main")}，不自动 Fetch；创建前会执行真实 dry-run。</span></div>
+    const selectedBranch = ui.baseBranch || health?.project?.defaultBaseBranch || "main";
+    const knownBranches = new Set(projectBranches.map((item) => item.name));
+    const branchOption = (item) => {
+      const markers = [item.current ? "主仓库当前" : "", item.default ? "Profile 默认" : ""].filter(Boolean);
+      return `<option value="${escapeHTML(item.name)}" ${item.name === selectedBranch ? "selected" : ""}>${escapeHTML(item.name)}${markers.length ? `（${escapeHTML(markers.join(" / "))}）` : ""}</option>`;
+    };
+    const localBranches = projectBranches.filter((item) => item.kind === "local");
+    const remoteBranches = projectBranches.filter((item) => item.kind === "remote");
+    const savedBranchOption = selectedBranch && !knownBranches.has(selectedBranch)
+      ? `<option value="${escapeHTML(selectedBranch)}" selected>${escapeHTML(selectedBranch)}（当前保存值）</option>`
+      : "";
+    const branchOptions = `${savedBranchOption}${localBranches.length ? `<optgroup label="本地分支">${localBranches.map(branchOption).join("")}</optgroup>` : ""}${remoteBranches.length ? `<optgroup label="远端跟踪分支（未 Fetch）">${remoteBranches.map(branchOption).join("")}</optgroup>` : ""}`;
+    const branchHint = branchLoadError
+      ? `读取主仓库分支失败：${escapeHTML(branchLoadError)} 当前保留 Profile 默认值；可点击刷新重试。`
+      : `来自主仓库 ${escapeHTML(health?.paths?.repo || "repoRoot")}：${localBranches.length} 个本地分支、${remoteBranches.length} 个远端跟踪分支；不自动 Fetch，创建前会执行真实 dry-run。`;
+    const newFields = `<div class="field"><div class="field-label-row"><label for="baseBranch">Worktree 基准</label><button class="small" id="refreshBranches" type="button" ${busy ? "disabled" : ""}>刷新分支</button></div><select id="baseBranch" class="mono">${branchOptions}</select><span class="hint">${branchHint}</span></div>
       <div class="field"><span>需求来源</span><div class="source-tabs" role="group" aria-label="选择需求来源">${["link", "file", "paste"].map((id) => `<button type="button" class="${ui.sourceType === id ? "active" : ""}" data-source-type="${id}">${({ link: "粘贴链接", file: "上传文档", paste: "粘贴内容" })[id]}</button>`).join("")}</div><div class="source-panel">${panels[ui.sourceType]}</div></div>`;
     const isPlan = ui.intakeMode === "existing_plan";
     const existingFields = `${callout(isPlan
@@ -1239,7 +1279,15 @@
     on("backToPlan", "click", () => { ui.viewStage = "plan"; render(); });
     on("backToVerify", "click", () => { ui.viewStage = "verify"; render(); });
     on("goCurrentStage", "click", () => { ui.viewStage = task.stage; render(); });
-    ["taskTitle", "sourceUrl", "sourceText", "baseBranch", "existingDocumentPath", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage", "askQuestion"].forEach((id) => on(id, "input", captureVisibleFields));
+    ["taskTitle", "sourceUrl", "sourceText", "existingDocumentPath", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage", "askQuestion"].forEach((id) => on(id, "input", captureVisibleFields));
+    on("baseBranch", "change", captureVisibleFields);
+    on("refreshBranches", "click", () => {
+      captureVisibleFields();
+      withAction(async () => {
+        await refreshProjectBranches();
+        showToast(`已从主仓库刷新 ${projectBranches.length} 个分支。`);
+      });
+    });
     attachFeedbackImageHandlers("verification", "verificationNote");
     attachFeedbackImageHandlers("bugfix", "bugfixDescription");
   }

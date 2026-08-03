@@ -33,6 +33,7 @@
 ## 主要能力
 
 - 输入网页链接、上传文档或直接粘贴需求内容。
+- 新需求的 Worktree 基准从 Profile 主仓库实时读取，以分组下拉框展示本地分支和已有远端跟踪分支；不会自动 Fetch。
 - 先运行只读 discussion / ask-first，再生成执行 Plan。
 - 同时输出 Markdown Plan 和自包含的逻辑验收 HTML。
 - 创建 Worktree 前先展示真实 dry-run；也可以接入已有 Worktree。

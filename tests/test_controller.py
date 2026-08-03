@@ -432,6 +432,35 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(server.safe_name("../../ bad/name", "fallback"), "bad-name")
         self.assertNotIn("/", server.safe_display_name("需求/../../危险", "fallback"))
 
+    def test_project_branches_lists_local_and_remote_refs_without_fetching(self) -> None:
+        run(["git", "branch", "develop"], self.repo)
+        run(["git", "branch", "feature/dropdown"], self.repo)
+        run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], self.repo)
+        run(["git", "update-ref", "refs/remotes/origin/release", "HEAD"], self.repo)
+        run(["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], self.repo)
+
+        with mock.patch.object(server, "REPO_ROOT", self.repo), mock.patch.object(server, "DEFAULT_BASE_BRANCH", "develop"):
+            payload = server.project_branches_payload()
+
+        by_name = {item["name"]: item for item in payload["branches"]}
+        self.assertEqual(payload["repo"], str(self.repo))
+        self.assertFalse(payload["fetched"])
+        self.assertEqual(by_name["main"]["kind"], "local")
+        self.assertTrue(by_name["main"]["current"])
+        self.assertTrue(by_name["develop"]["default"])
+        self.assertEqual(by_name["feature/dropdown"]["kind"], "local")
+        self.assertEqual(by_name["origin/release"]["kind"], "remote")
+        self.assertNotIn("origin/HEAD", by_name)
+        self.assertNotIn("origin", by_name)
+
+    def test_worktree_base_branch_uses_read_only_dropdown_data(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('api("/api/branches")', app_js)
+        self.assertIn('<select id="baseBranch"', app_js)
+        self.assertIn('optgroup label="本地分支"', app_js)
+        self.assertIn('optgroup label="远端跟踪分支（未 Fetch）"', app_js)
+        self.assertNotIn('<input id="baseBranch"', app_js)
+
     def test_worktree_snapshot_detects_changes_to_already_dirty_files(self) -> None:
         readme = self.repo / "README.md"
         readme.write_text("dirty before repair\n", encoding="utf-8")

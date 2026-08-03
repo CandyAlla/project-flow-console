@@ -39,7 +39,7 @@
       line-height: 1.6;
     }
 
-    button, input, textarea { font: inherit; }
+    button, input, select, textarea { font: inherit; }
 
     button {
       min-height: 42px;
@@ -70,6 +70,7 @@
     button:focus-visible,
     .app-link-button:focus-visible,
     input:focus-visible,
+    select:focus-visible,
     textarea:focus-visible,
     .image-drop-zone:focus-visible,
     summary:focus-visible {
@@ -79,6 +80,7 @@
 
     input[type="text"],
     input[type="url"],
+    select,
     textarea {
       width: 100%;
       border: 1px solid var(--line-strong);
@@ -87,7 +89,7 @@
       color: var(--ink);
     }
 
-    input[type="text"], input[type="url"] { min-height: 44px; padding: 9px 12px; }
+    input[type="text"], input[type="url"], select { min-height: 44px; padding: 9px 12px; }
     textarea { min-height: 116px; padding: 11px 12px; resize: vertical; }
     input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
@@ -406,6 +408,7 @@
     .field { display: grid; gap: 7px; }
     .field + .field { margin-top: 18px; }
     .field label, .field > span { font-weight: 700; }
+    .field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .hint { color: var(--muted); font-size: .86rem; }
 
     .feedback-images { display: grid; gap: 10px; margin-top: 4px; }

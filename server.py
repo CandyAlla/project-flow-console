@@ -1329,6 +1329,56 @@ def run_command(command: list[str], cwd: Path, timeout: int = 30) -> subprocess.
     return subprocess.run(command, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False)
 
 
+def project_branches_payload() -> dict[str, Any]:
+    result = run_command(
+        [
+            "git", "-C", str(REPO_ROOT), "for-each-ref",
+            "--format=%(refname)%09%(refname:short)%09%(HEAD)%09%(symref)",
+            "refs/heads", "refs/remotes",
+        ],
+        REPO_ROOT,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise WorkflowError(safe_log(result.stderr or result.stdout or "无法读取主仓库分支。", 2000))
+    branches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in result.stdout.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) != 4:
+            continue
+        refname, name, head_marker, symbolic_target = (part.strip() for part in parts)
+        if not name or name in seen or symbolic_target:
+            continue
+        if refname.startswith("refs/heads/"):
+            kind = "local"
+        elif refname.startswith("refs/remotes/"):
+            kind = "remote"
+        else:
+            continue
+        seen.add(name)
+        branches.append({
+            "name": name,
+            "kind": kind,
+            "current": head_marker == "*",
+            "default": name == DEFAULT_BASE_BRANCH,
+        })
+    branches.sort(key=lambda item: (
+        0 if item["kind"] == "local" else 1,
+        0 if item["current"] else 1,
+        0 if item["default"] else 1,
+        str(item["name"]).casefold(),
+    ))
+    if not branches:
+        raise WorkflowError("主仓库没有可用的本地或远端跟踪分支。")
+    return {
+        "branches": branches,
+        "default": DEFAULT_BASE_BRANCH,
+        "repo": str(REPO_ROOT),
+        "fetched": False,
+    }
+
+
 def command_ok(command: list[str], cwd: Path, timeout: int = 30) -> str:
     result = run_command(command, cwd, timeout)
     if result.returncode != 0:
@@ -3362,6 +3412,9 @@ class WorkflowHandler(BaseHTTPRequestHandler):
             self.send_error_json("控制令牌无效，请从本地控制台页面操作。", HTTPStatus.FORBIDDEN)
             return
         try:
+            if path == "/api/branches":
+                self.send_json({"ok": True, **project_branches_payload()})
+                return
             if path == "/api/tasks":
                 self.send_json({"ok": True, "tasks": list_task_summaries(), "scheduler": scheduler_payload()})
                 return
