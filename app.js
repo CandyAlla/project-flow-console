@@ -549,9 +549,19 @@
         const selectedId = task?.id;
         await refreshTaskSummaries();
         const selectedSummary = taskSummaries.find((item) => item.id === selectedId);
-        if (selectedId && selectedSummary && selectedSummary.updatedAt !== task.updatedAt) {
+        const selectedTaskChanged = selectedSummary && (
+          selectedSummary.updatedAt !== task.updatedAt
+          || selectedSummary.stage !== task.stage
+          || selectedSummary.maxStageIndex !== task.maxStageIndex
+          || selectedSummary.activeJob !== task.activeJob
+          || selectedSummary.jobState !== (task.jobState || "idle")
+        );
+        if (selectedId && selectedTaskChanged) {
+          const previousStage = task.stage;
+          const wasViewingCurrentStage = ui.module === "flow" && ui.viewStage === previousStage;
           const result = await api(`/api/tasks/${selectedId}`);
           task = result.task;
+          if (wasViewingCurrentStage && task.stage !== previousStage) ui.viewStage = task.stage;
           workspaceRefreshPending = true;
           if (wasActive && !task.activeJob) {
             const section = task[wasActive];
@@ -900,6 +910,9 @@
 
   function renderDiscuss() {
     const section = task.discussion;
+    if (task.activeJob === "plan" || ["queued", "running"].includes(task.plan?.status)) {
+      return renderProgress(task.plan, "正在生成 Plan 与逻辑验收 HTML");
+    }
     if (["queued", "running"].includes(section.status)) {
       const title = task.source?.reader === "chrome_mcp"
         ? "Chrome MCP 正在只读获取飞书需求并扫描项目事实"
@@ -1378,6 +1391,10 @@
       const result = await post(`/api/tasks/${task.id}/${generatePlan ? "plan" : "discussion"}`, { answers, note: ui.discussionNote.trim() });
       ui.discussionNote = "";
       if (!generatePlan) { ui.answers = {}; ui.customAnswers = {}; }
+      if (generatePlan && result.task?.activeJob === "plan") {
+        result.task.stage = "plan";
+        result.task.maxStageIndex = Math.max(Number(result.task.maxStageIndex) || 0, stages.findIndex((item) => item.id === "plan"));
+      }
       setTask(result.task, true);
     });
   }

@@ -461,6 +461,18 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('optgroup label="远端跟踪分支（未 Fetch）"', app_js)
         self.assertNotIn('<input id="baseBranch"', app_js)
 
+    def test_poll_refreshes_when_runtime_state_changes_within_same_second(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn("selectedSummary.stage !== task.stage", app_js)
+        self.assertIn("selectedSummary.maxStageIndex !== task.maxStageIndex", app_js)
+        self.assertIn("selectedSummary.activeJob !== task.activeJob", app_js)
+        self.assertIn('selectedSummary.jobState !== (task.jobState || "idle")', app_js)
+        self.assertIn('const wasViewingCurrentStage = ui.module === "flow" && ui.viewStage === previousStage', app_js)
+        self.assertIn("if (wasViewingCurrentStage && task.stage !== previousStage) ui.viewStage = task.stage", app_js)
+        self.assertIn('task.activeJob === "plan"', app_js)
+        self.assertIn('renderProgress(task.plan, "正在生成 Plan 与逻辑验收 HTML")', app_js)
+        self.assertIn('generatePlan && result.task?.activeJob === "plan"', app_js)
+
     def test_worktree_snapshot_detects_changes_to_already_dirty_files(self) -> None:
         readme = self.repo / "README.md"
         readme.write_text("dirty before repair\n", encoding="utf-8")
