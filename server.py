@@ -796,8 +796,65 @@ def validate_worktree_slug(value: Any) -> str:
     return slug
 
 
+def apply_semantic_document_paths(task_id: str, value: Any) -> bool:
+    """Name new Plan/HTML outputs from the confirmed requirement, never from task IDs."""
+    slug = validate_worktree_slug(value)
+    with mutate_task(task_id) as task:
+        plan = task.get("plan") or {}
+        if task.get("intake", {}).get("mode") == "existing_plan":
+            return False
+        if plan.get("status", "idle") != "idle" or plan.get("markdown") or plan.get("draftPath") or plan.get("htmlPath"):
+            return False
+
+        created_date = str(task.get("createdAt") or "")[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", created_date):
+            created_date = datetime.now().strftime("%Y-%m-%d")
+        display_name = safe_display_name(str(task.get("title") or ""), "需求")
+        plan_root = Path(task.get("worktree", {}).get("path") or REPO_ROOT) if task.get("worktree", {}).get("imported") else REPO_ROOT
+
+        for index in range(1, 1000):
+            suffix = "" if index == 1 else f"-{index}"
+            plan_name = f"{created_date}-{slug}{suffix}.md"
+            html_name = f"{created_date}-{display_name}{suffix}-逻辑流程图.html"
+            plan_relative = str(Path(PLAN_RELATIVE_DIR) / plan_name)
+            html_absolute = HTML_TASK_ROOT / html_name
+
+            reserved = any(
+                other_id != task_id
+                and (
+                    other.get("naming", {}).get("documentSlug")
+                    or other.get("plan", {}).get("status", "idle") != "idle"
+                    or other.get("plan", {}).get("markdown")
+                )
+                and (
+                    str(other.get("paths", {}).get("planRelative") or "") == plan_relative
+                    or str(other.get("paths", {}).get("htmlAbsolute") or "") == str(html_absolute)
+                )
+                for other_id, other in TASKS.items()
+            )
+            if reserved or (plan_root / plan_relative).exists() or html_absolute.exists():
+                continue
+
+            task["paths"].update({
+                "planRelative": plan_relative,
+                "htmlRelative": str(html_absolute),
+                "htmlAbsolute": str(html_absolute),
+                "htmlUrl": f"/task-html/{quote(html_name)}",
+            })
+            task.setdefault("naming", {}).update({
+                "documentSlug": slug,
+                "documentDisplayName": display_name,
+                "documentSequence": index,
+            })
+            add_event(task, f"已生成可读文档名称：{plan_name} / {html_name}", "ok")
+            return True
+
+        raise WorkflowError("无法为新文档分配不冲突的语义化名称，请调整需求名称后重试。")
+
+
 def apply_semantic_worktree_slug(task_id: str, value: Any) -> bool:
     """Apply a Codex-generated slug only before an automatic worktree is created."""
+    slug = validate_worktree_slug(value)
     with LOCK:
         task = TASKS.get(task_id)
         if not task:
@@ -809,7 +866,6 @@ def apply_semantic_worktree_slug(task_id: str, value: Any) -> bool:
         if current_path.exists():
             return False
 
-    slug = validate_worktree_slug(value)
     short_id = task_id.split("-")[0]
     worktree_name = f"{WORKTREE_NAME_PREFIX}_{slug}_{short_id}"
     worktree_path = WORKTREES_ROOT / worktree_name
@@ -2059,6 +2115,7 @@ def initial_discussion_job(task_id: str) -> None:
 如果输入不足以读取，问题中要明确告诉用户需要补什么。只按给定 JSON Schema 输出。
 
 同时输出 worktree_slug，作为稍后自动创建 Worktree 的英文任务名：
+- 这个名称也会用于新生成的 Markdown 文件名，因此必须让人只看文件名就知道需求是什么；
 - 根据需求的真实业务内容生成 3–6 段英文词，使用小写 kebab-case，可保留必要版本号；
 - 名称必须能单独看出任务含义，至少包含两个描述业务的词；
 - 禁止只用 v2、task、feature、update、change、request 等泛化词凑名称；
@@ -2072,7 +2129,9 @@ def initial_discussion_job(task_id: str) -> None:
         command.extend(["--add-dir", str(Path(task["source"]["filePath"]).parent)])
     command.extend(["--output-schema", str(SCHEMA_ROOT / "discussion.schema.json"), "-o", str(output), prompt])
     payload, thread_id = run_codex_structured(task_id, "discussion", command, REPO_ROOT, output, "discussion")
-    apply_semantic_worktree_slug(task_id, payload.get("worktree_slug"))
+    semantic_slug = validate_worktree_slug(payload.get("worktree_slug"))
+    apply_semantic_worktree_slug(task_id, semantic_slug)
+    apply_semantic_document_paths(task_id, semantic_slug)
     with mutate_task(task_id) as live:
         live["discussion"].update({"status": "ready", "result": payload, "threadId": thread_id, "error": ""})
         live["stage"] = "discuss"
@@ -2127,7 +2186,7 @@ def plan_job(task_id: str, answers: dict[str, str], note: str) -> None:
 
 Markdown 最终目标：{paths['planRelative']}
 Companion HTML：{paths['htmlRelative']}
-Markdown front matter 使用 status: proposed，并包含 companion_html。HTML 要响应式、320px 可读、打印友好；只展示主流程、分支、范围、风险和验收，不机械复制整份 Markdown。HTML 不依赖远程资源。
+Markdown 标题与正文必须使用明确的需求名称，不得出现 UUID、任务短 ID、task-xxxx 或无业务含义的占位标题。Markdown front matter 使用 status: proposed，并包含 companion_html。HTML 要响应式、320px 可读、打印友好；只展示主流程、分支、范围、风险和验收，不机械复制整份 Markdown。HTML 不依赖远程资源。
 只按给定 JSON Schema 返回 markdown 与完整 html，以及页面摘要所需字段。
 """.strip()
     output = structured_output_path(task_id, "plan")
@@ -3061,10 +3120,11 @@ def create_task(payload: dict[str, Any]) -> dict[str, Any]:
     task_id = str(uuid.uuid4())
     short_id = task_id.split("-")[0]
     date = datetime.now().strftime("%Y-%m-%d")
-    ascii_slug = safe_name(title.lower(), f"task-{short_id}")
-    display = safe_display_name(title, f"任务-{short_id}")
-    plan_name = f"{date}-{ascii_slug}.md"
-    html_name = f"{date}-{display}-{short_id}-逻辑流程图.html"
+    display = safe_display_name(title, "")
+    if not display:
+        raise WorkflowError("需求名称必须包含可用于文档命名的明确文字或数字。")
+    plan_name = f"{date}-{display}.md"
+    html_name = f"{date}-{display}-逻辑流程图.html"
     worktree_name = f"{WORKTREE_NAME_PREFIX}_pending_{short_id}"
     source: dict[str, Any] = {"type": source_type}
     if source_type == "link":
@@ -3153,10 +3213,11 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
     task_id = str(uuid.uuid4())
     short_id = task_id.split("-")[0]
     date = datetime.now().strftime("%Y-%m-%d")
-    ascii_slug = safe_name(title.lower(), f"task-{short_id}")
-    display = safe_display_name(title, f"任务-{short_id}")
-    plan_name = f"{date}-{ascii_slug}.md"
-    html_name = f"{date}-{display}-{short_id}-逻辑流程图.html"
+    display = safe_display_name(title, "")
+    if not display:
+        raise WorkflowError("需求名称必须包含可用于文档命名的明确文字或数字。")
+    plan_name = f"{date}-{display}.md"
+    html_name = f"{date}-{display}-逻辑流程图.html"
     html_absolute = HTML_TASK_ROOT / html_name
     imported_plan = mode == "existing_plan"
 

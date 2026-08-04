@@ -497,7 +497,11 @@ class ControllerTests(unittest.TestCase):
 
     def test_semantic_worktree_slug_replaces_temporary_name_before_creation(self) -> None:
         worktrees_root = self.root / "worktrees"
-        with mock.patch.object(server, "WORKTREES_ROOT", worktrees_root), mock.patch.object(server, "launch_job"):
+        html_root = self.root / "html"
+        with mock.patch.object(server, "WORKTREES_ROOT", worktrees_root), \
+                mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "HTML_TASK_ROOT", html_root), \
+                mock.patch.object(server, "launch_job"):
             task = server.create_task({
                 "title": "线性关卡 V2",
                 "sourceType": "paste",
@@ -507,14 +511,45 @@ class ControllerTests(unittest.TestCase):
 
             self.assertEqual(task["worktree"]["name"], f"{server.WORKTREE_NAME_PREFIX}_pending_{task['id'][:8]}")
             changed = server.apply_semantic_worktree_slug(task["id"], "linear-level-v2")
+            documents_changed = server.apply_semantic_document_paths(task["id"], "linear-level-v2")
 
         updated = server.get_task_copy(task["id"])
         expected_name = f"{server.WORKTREE_NAME_PREFIX}_linear-level-v2_{task['id'][:8]}"
+        created_date = task["createdAt"][:10]
         self.assertTrue(changed)
+        self.assertTrue(documents_changed)
         self.assertEqual(updated["worktree"]["slug"], "linear-level-v2")
         self.assertEqual(updated["worktree"]["name"], expected_name)
         self.assertEqual(updated["worktree"]["branch"], f"worktree/{expected_name}")
         self.assertEqual(Path(updated["worktree"]["path"]), worktrees_root / expected_name)
+        self.assertEqual(updated["paths"]["planRelative"], f"{server.PLAN_RELATIVE_DIR}/{created_date}-linear-level-v2.md")
+        self.assertEqual(Path(updated["paths"]["htmlAbsolute"]), html_root / f"{created_date}-线性关卡-V2-逻辑流程图.html")
+        self.assertNotIn(task["id"][:8], updated["paths"]["planRelative"])
+        self.assertNotIn(task["id"][:8], updated["paths"]["htmlAbsolute"])
+
+    def test_semantic_document_paths_use_readable_sequence_for_name_collisions(self) -> None:
+        html_root = self.root / "html"
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "HTML_TASK_ROOT", html_root), \
+                mock.patch.object(server, "launch_job"):
+            first = server.create_task({
+                "title": "复活提示动画",
+                "sourceType": "paste",
+                "sourceText": "增加复活提示动画。",
+            })
+            second = server.create_task({
+                "title": "复活提示动画",
+                "sourceType": "paste",
+                "sourceText": "增加复活提示动画。",
+            })
+            server.apply_semantic_document_paths(first["id"], "revive-hint-animation")
+            server.apply_semantic_document_paths(second["id"], "revive-hint-animation")
+
+        date = first["createdAt"][:10]
+        second_paths = server.get_task_copy(second["id"])["paths"]
+        self.assertEqual(second_paths["planRelative"], f"{server.PLAN_RELATIVE_DIR}/{date}-revive-hint-animation-2.md")
+        self.assertEqual(Path(second_paths["htmlAbsolute"]), html_root / f"{date}-复活提示动画-2-逻辑流程图.html")
+        self.assertNotIn("task-", second_paths["planRelative"])
 
     def test_semantic_worktree_slug_rejects_generic_names(self) -> None:
         for slug in ("v2", "feature-v2", "task-feature-v2"):
@@ -679,6 +714,9 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["worktree"]["status"], "ready")
         self.assertTrue(task["worktree"]["imported"])
         self.assertEqual(task["intake"]["mode"], "existing_plan")
+        self.assertEqual(task["paths"]["planRelative"], str(plan.relative_to(worktree)))
+        self.assertFalse(server.apply_semantic_document_paths(task["id"], "existing-plan-intake"))
+        self.assertEqual(server.get_task_copy(task["id"])["paths"]["planRelative"], str(plan.relative_to(worktree)))
         self.assertIn("已有执行 Plan 接入", task["agentMemory"]["completedSteps"])
 
     def test_import_existing_requirement_starts_discussion_and_reuses_worktree(self) -> None:
@@ -706,6 +744,11 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["worktree"]["status"], "validated")
         self.assertEqual(task["worktree"]["branch"], "worktree/existing-task")
         self.assertEqual(task["intake"]["mode"], "existing_requirement")
+        updated = server.get_task_copy(task["id"])
+        expected_plan = f"{server.PLAN_RELATIVE_DIR}/{task['createdAt'][:10]}-existing-requirement-intake.md"
+        self.assertEqual(updated["paths"]["planRelative"], expected_plan)
+        self.assertEqual(updated["worktree"]["name"], worktree.name)
+        self.assertNotIn(task["id"][:8], updated["paths"]["htmlAbsolute"])
         command = run_codex.call_args.args[2]
         self.assertIn("--add-dir", command)
         self.assertIn(str(requirement.resolve().parent), command)
