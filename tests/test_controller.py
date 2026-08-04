@@ -473,6 +473,17 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('renderProgress(task.plan, "正在生成 Plan 与逻辑验收 HTML")', app_js)
         self.assertIn('generatePlan && result.task?.activeJob === "plan"', app_js)
 
+    def test_running_state_has_motion_cues_and_reduced_motion_fallback(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
+        self.assertIn('class="activity-state ${queued ? "queued" : ""}"', app_js)
+        self.assertIn('class="progress-track ${queued ? "queued" : ""}"', app_js)
+        self.assertIn('statusTextEl?.classList.toggle("is-running"', app_js)
+        self.assertIn('.task-card[data-state="running"]', index_html)
+        self.assertIn('@keyframes progress-travel', index_html)
+        self.assertIn('@keyframes activity-spin', index_html)
+        self.assertIn('@media (prefers-reduced-motion: reduce)', index_html)
+
     def test_worktree_snapshot_detects_changes_to_already_dirty_files(self) -> None:
         readme = self.repo / "README.md"
         readme.write_text("dirty before repair\n", encoding="utf-8")

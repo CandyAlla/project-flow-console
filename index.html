@@ -209,6 +209,7 @@
     .task-empty { margin: 0; padding: 22px 12px; color: var(--muted); font-size: .84rem; text-align: center; }
 
     .task-card {
+      position: relative;
       display: grid;
       width: 100%;
       min-height: 0;
@@ -242,6 +243,19 @@
     .task-card[data-state="error"] .task-card-state strong { color: var(--danger); }
     .task-card[data-state="done"] .task-card-state strong { color: var(--ok); }
     .task-card[data-state="archived"] .task-card-state strong { color: #6c5c87; }
+    .task-card[data-state="running"] { animation: task-card-breathe 2.4s ease-in-out infinite; }
+    .task-card[data-state="running"] .task-card-state strong::before,
+    .task-card[data-state="queued"] .task-card-state strong::before {
+      content: "";
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      margin-right: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      vertical-align: 1px;
+    }
+    .task-card[data-state="running"] .task-card-state strong::before { animation: activity-pulse 1.35s ease-out infinite; }
     .task-card-actions { display: flex; justify-content: flex-end; gap: 4px; padding: 0 8px 8px; }
     .task-card-action { min-height: 28px; padding-inline: 8px; border-color: transparent; background: transparent; color: var(--muted); font-size: .73rem; }
     .task-card-action:hover:not(:disabled) { background: var(--surface); color: var(--ink); }
@@ -335,6 +349,8 @@
 
     .status-text { display: flex; align-items: center; gap: 9px; }
     .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+    .status-text.is-running .status-dot { animation: activity-pulse 1.35s ease-out infinite; }
+    .status-text.is-queued .status-dot { background: #c27818; animation: queued-pulse 2s ease-in-out infinite; }
 
     .workspace {
       overflow: hidden;
@@ -656,9 +672,34 @@
     .run-list { display: grid; gap: 1px; overflow: hidden; border: 1px solid var(--line); background: var(--line); }
     .run-step { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 11px; align-items: center; padding: 14px; background: var(--surface); }
     .run-mark { display: inline-flex; align-items: center; justify-content: center; width: 25px; height: 25px; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font-size: .75rem; font-weight: 750; }
-    .run-step.running .run-mark { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+    .run-step.running { position: relative; background: linear-gradient(90deg, #f7faff, var(--surface) 38%); }
+    .run-step.running::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--accent); animation: running-edge 1.4s ease-in-out infinite; }
+    .run-step.running .run-mark { position: relative; border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-size: 0; }
+    .run-step.running .run-mark::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .run-step.running .run-mark::after { content: ""; position: absolute; inset: -3px; border: 2px solid transparent; border-top-color: currentColor; border-right-color: currentColor; border-radius: 50%; animation: activity-spin .9s linear infinite; }
     .run-step.done .run-mark { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
     .run-step small { color: var(--muted); }
+
+    .progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+    .progress-heading h3 { margin: 0; }
+    .activity-state { display: inline-flex; align-items: center; gap: 9px; color: var(--accent); font-size: .8rem; font-weight: 750; white-space: nowrap; }
+    .activity-state.queued { color: var(--warning); }
+    .activity-dots { display: inline-flex; align-items: center; gap: 3px; height: 12px; }
+    .activity-dots i { display: block; width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: activity-dot 1.05s ease-in-out infinite; }
+    .activity-dots i:nth-child(2) { animation-delay: .14s; }
+    .activity-dots i:nth-child(3) { animation-delay: .28s; }
+    .activity-state.queued .activity-dots i { animation-duration: 1.7s; }
+    .progress-track { position: relative; height: 4px; margin: 0 0 14px; overflow: hidden; border-radius: 999px; background: #e4eaf2; }
+    .progress-track span { position: absolute; inset: 0 auto 0 -34%; width: 34%; border-radius: inherit; background: linear-gradient(90deg, transparent, #4f83cb 35%, var(--accent) 70%, transparent); animation: progress-travel 1.7s ease-in-out infinite; }
+    .progress-track.queued span { background: linear-gradient(90deg, transparent, #e2a34c 45%, transparent); animation-duration: 2.5s; }
+
+    @keyframes activity-spin { to { transform: rotate(1turn); } }
+    @keyframes activity-dot { 0%, 70%, 100% { opacity: .3; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-4px); } }
+    @keyframes activity-pulse { 0% { box-shadow: 0 0 0 0 rgba(39, 93, 173, .38); } 70%, 100% { box-shadow: 0 0 0 7px rgba(39, 93, 173, 0); } }
+    @keyframes queued-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+    @keyframes running-edge { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+    @keyframes progress-travel { from { transform: translateX(0); } to { transform: translateX(395%); } }
+    @keyframes task-card-breathe { 0%, 100% { box-shadow: inset 3px 0 0 rgba(39, 93, 173, .32); } 50% { box-shadow: inset 3px 0 0 var(--accent), 0 0 0 1px rgba(39, 93, 173, .12); } }
 
     .diff-table { width: 100%; border-collapse: collapse; border: 1px solid var(--line); }
     .diff-table th, .diff-table td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }

@@ -637,6 +637,9 @@
     renderTaskConsole();
     renderSteps();
     globalStatusEl.textContent = statusText();
+    const statusTextEl = globalStatusEl.closest(".status-text");
+    statusTextEl?.classList.toggle("is-running", Boolean(task?.activeJob) && task?.jobState !== "queued");
+    statusTextEl?.classList.toggle("is-queued", Boolean(task?.activeJob) && task?.jobState === "queued");
     saveUi();
   }
 
@@ -852,7 +855,8 @@
     const rows = logs.length
       ? logs.slice(-12).map((item, index) => `<div class="run-step ${index === logs.length - 1 ? "running" : "done"}"><span class="run-mark">${index === logs.length - 1 ? "…" : "✓"}</span><div><strong>${escapeHTML(item.message)}</strong><div class="hint">${escapeHTML(formatTime(item.time))}</div></div><small>${index === logs.length - 1 ? "进行中" : "完成"}</small></div>`).join("")
       : `<div class="run-step running"><span class="run-mark">…</span><div><strong>${escapeHTML(title)}</strong><div class="hint">${queued ? "等待空闲并发槽位" : "等待 Codex 返回第一条事件"}</div></div><small>${queued ? "排队" : "进行中"}</small></div>`;
-    return `<section class="section">${callout(`<strong>${escapeHTML(title)}</strong> ${queued ? "任务已进入后台队列。" : "本地服务正在运行受控操作。"} 你可以切换查看其他需求；刷新后仍可恢复状态。`, "warning")}</section><section class="section"><h3>实时进度</h3><div class="run-list">${rows}</div></section>${eventLogDetails()}`;
+    const activity = `<span class="activity-state ${queued ? "queued" : ""}"><span class="activity-dots" aria-hidden="true"><i></i><i></i><i></i></span>${queued ? "排队等待" : "持续执行中"}</span>`;
+    return `<section class="section">${callout(`<strong>${escapeHTML(title)}</strong> ${queued ? "任务已进入后台队列。" : "本地服务正在运行受控操作。"} 你可以切换查看其他需求；刷新后仍可恢复状态。`, "warning")}</section><section class="section progress-section" aria-live="polite"><div class="progress-heading"><h3>实时进度</h3>${activity}</div><div class="progress-track ${queued ? "queued" : ""}" aria-hidden="true"><span></span></div><div class="run-list">${rows}</div></section>${eventLogDetails()}`;
   }
 
   function renderInput() {
