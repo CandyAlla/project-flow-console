@@ -1436,7 +1436,7 @@
         result.task.stage = "plan";
         result.task.maxStageIndex = Math.max(Number(result.task.maxStageIndex) || 0, stages.findIndex((item) => item.id === "plan"));
       }
-      setTask(result.task, true);
+      setTask(result.task, generatePlan);
     });
   }
 

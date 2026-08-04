@@ -490,6 +490,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('<button id="sendDiscussionNote" type="button">${discussionActionLabel}</button>', app_js)
         self.assertIn('if (!generatePlan && !questions.length && !ui.discussionNote.trim())', app_js)
         self.assertIn('showToast("请先填写要继续讨论的补充说明。", true)', app_js)
+        self.assertIn('setTask(result.task, generatePlan)', app_js)
         self.assertNotIn("${questions.length ? '<button id=\"sendDiscussionNote\"", app_js)
 
     def test_worktree_snapshot_detects_changes_to_already_dirty_files(self) -> None:
