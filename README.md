@@ -62,6 +62,7 @@
 
 - Node.js：只在执行 `app.js` 语法检查时需要。
 - Chrome MCP / `$chrome:control-chrome`：读取需要登录态的飞书或 Lark 文档时需要。
+- 官方 [Lark CLI](https://github.com/larksuite/cli) 与 `lark-shared`、`lark-wiki`、`lark-doc` Skills：通过飞书开放平台接口读取 Wiki / 文档时需要。
 - 项目 Skills：Profile 中引用的 Skill 必须已能被 Codex 发现。
 
 服务端只使用 Python 标准库，不需要执行 `pip install`。
@@ -366,9 +367,24 @@ python3 server.py
 
 ## 飞书 / Lark 文档
 
-当输入 `feishu.cn`、`larksuite.com` 或 `larkoffice.com` 链接时，讨论 Prompt 会强制要求使用 `$chrome:control-chrome`，复用用户当前 Chrome 登录态只读打开页面。
+当输入 `feishu.cn`、`larksuite.com` 或 `larkoffice.com` 链接时，输入区会显示两种可选读取方式：
 
-它不会编辑、评论、分享或上传内容。如果 Chrome 未连接、未登录或没有权限，任务会返回明确阻塞；此时可以改用上传文档或粘贴正文。
+- `Chrome MCP`（默认）：通过 `$chrome:control-chrome` 复用当前 Chrome 登录态只读打开页面，无需配置飞书应用。
+- `官方 Lark CLI`：通过 `$lark-shared`、`$lark-wiki`、`$lark-doc` 和飞书开放平台接口读取。页面结构变化不会影响接口读取，但首次需要安装、配置应用并完成用户授权。
+
+Lark CLI、三个只读 Skills 或授权任一未就绪时，该读取器会在界面中禁用，不影响 Chrome MCP 和其他需求来源。按官方 AI Agent 快速开始完成一次配置：
+
+```bash
+npx @larksuite/cli@latest install
+npx skills add larksuite/cli -y -g
+lark-cli config init --new
+lark-cli auth login --recommend
+lark-cli auth status
+```
+
+也可以通过 `PROJECT_FLOW_LARK_CLI_BIN` 指定 `lark-cli` 的绝对路径。授权链接必须由用户本人打开确认，不要把 `appSecret`、access token 或 refresh token 填入控制台。
+
+两种读取方式都被限制为需求读取：不会编辑、评论、分享、移动或上传内容，也不会在 discussion 中自动扩大授权。如果读取器未连接、未登录、缺少只读权限或无法访问文档，任务会返回明确阻塞；此时可以切换另一种读取方式，或改用上传文档、粘贴正文。
 
 ## Git 安全边界
 

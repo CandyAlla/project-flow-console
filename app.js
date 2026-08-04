@@ -32,6 +32,7 @@
     sourceType: "link",
     title: "",
     sourceUrl: "",
+    larkReader: "chrome_mcp",
     sourceText: "",
     sourceFileName: "",
     baseBranch: "main",
@@ -121,7 +122,7 @@
   });
 
   const taskViewKeys = [
-    "module", "viewStage", "intakeMode", "sourceType", "title", "sourceUrl", "sourceText", "sourceFileName", "baseBranch",
+    "module", "viewStage", "intakeMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
     "existingDocumentPath", "existingWorktreePath",
     "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
   ];
@@ -181,6 +182,15 @@
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#039;");
+  }
+
+  function isLarkLink(value) {
+    try {
+      const hostname = new URL(String(value || "")).hostname.toLowerCase().replace(/\.$/, "");
+      return ["feishu.cn", "larksuite.com", "larkoffice.com"].some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+    } catch (_) {
+      return false;
+    }
   }
 
   function formatTime(value) {
@@ -863,8 +873,17 @@
     const warning = !health?.ok
       ? callout(`<strong>本地服务不可用。</strong> ${(health?.warnings || []).map(escapeHTML).join(" ")}`, "danger")
       : (health.warnings || []).map((item) => callout(escapeHTML(item), "warning")).join("");
+    const larkCli = health?.readers?.larkCli || { installed: false, authenticated: false, ready: false, version: "未安装", message: "需要先完成安装与授权。" };
+    const larkCliReady = Boolean(larkCli.ready);
+    const selectedLarkReader = ui.larkReader === "lark_cli" && larkCliReady ? "lark_cli" : "chrome_mcp";
+    ui.larkReader = selectedLarkReader;
+    const larkReaderOptions = `<div id="larkReaderOptions" class="reader-mode-section" ${isLarkLink(ui.sourceUrl) ? "" : "hidden"}><div class="field-label-row"><span>飞书读取方式</span><span class="hint">仅对飞书 / Lark 链接生效</span></div>
+      <div class="execution-mode-grid reader-mode-grid" role="radiogroup" aria-label="选择飞书读取方式">
+        <label class="execution-mode-card ${selectedLarkReader === "chrome_mcp" ? "selected" : ""}"><input type="radio" name="larkReader" value="chrome_mcp" data-lark-reader="chrome_mcp" ${selectedLarkReader === "chrome_mcp" ? "checked" : ""}><span class="mode-card-head"><strong>Chrome MCP</strong><em>默认</em></span><span>复用当前 Chrome 登录态打开网页，只读提取需求内容。</span><small>无需配置飞书应用；页面结构变化时可能受影响</small></label>
+        <label class="execution-mode-card ${selectedLarkReader === "lark_cli" ? "selected" : ""} ${larkCliReady ? "" : "disabled"}"><input type="radio" name="larkReader" value="lark_cli" data-lark-reader="lark_cli" ${selectedLarkReader === "lark_cli" ? "checked" : ""} ${larkCliReady ? "" : "disabled"}><span class="mode-card-head"><strong>官方 Lark CLI</strong><em>${larkCliReady ? "稳定读取" : "待配置"}</em></span><span>通过飞书官方接口和只读 Agent Skills 读取 Wiki / 文档正文。</span><small>${escapeHTML(larkCli.message)}${larkCliReady ? ` · ${escapeHTML(larkCli.version)}` : ""}</small></label>
+      </div><span class="hint">Lark CLI 只用于读取需求；不会在 discussion 中创建、覆盖、移动或分享飞书内容，也不会自动扩大授权。</span></div>`;
     const panels = {
-      link: `<div class="field"><label for="sourceUrl">策划文档链接</label><input id="sourceUrl" type="url" placeholder="https://docs.example.com/..." value="${escapeHTML(ui.sourceUrl)}"><span class="hint">飞书 / Lark 链接强制通过 Chrome MCP 复用当前登录态只读获取；其他公开链接由 Codex 尝试读取。</span></div>`,
+      link: `<div class="field"><label for="sourceUrl">策划文档链接</label><input id="sourceUrl" type="url" placeholder="https://docs.example.com/..." value="${escapeHTML(ui.sourceUrl)}"><span class="hint">飞书 / Lark 链接可选择 Chrome MCP 或已配置的官方 Lark CLI；其他公开链接由 Codex 尝试读取。</span>${larkReaderOptions}</div>`,
       file: `<div class="field"><label for="sourceFile">选择策划文档</label><input id="sourceFile" type="file" accept=".md,.txt,.pdf,.doc,.docx,.html"><span class="hint">${selectedFile ? `已选择：${escapeHTML(selectedFile.name)}` : ui.sourceFileName ? `刷新后需重新选择：${escapeHTML(ui.sourceFileName)}` : "文件保存在本地任务运行目录，最大 8 MB。"}</span></div>`,
       paste: `<div class="field"><label for="sourceText">粘贴策划内容</label><textarea id="sourceText" placeholder="粘贴需求目标、规则、流程或已有草稿……">${escapeHTML(ui.sourceText)}</textarea><span class="hint">材料会作为不可信需求输入交给只读 Codex 会话，不会被当作控制指令。</span></div>`
     };
@@ -918,9 +937,11 @@
       return renderProgress(task.plan, "正在生成 Plan 与逻辑验收 HTML");
     }
     if (["queued", "running"].includes(section.status)) {
-      const title = task.source?.reader === "chrome_mcp"
-        ? "Chrome MCP 正在只读获取飞书需求并扫描项目事实"
-        : "discussion-only / ask-first 正在读取项目事实";
+      const readerTitles = {
+        chrome_mcp: "Chrome MCP 正在只读获取飞书需求并扫描项目事实",
+        lark_cli: "官方 Lark CLI 正在只读获取飞书需求并扫描项目事实"
+      };
+      const title = readerTitles[task.source?.reader] || "discussion-only / ask-first 正在读取项目事实";
       return renderProgress(section, title);
     }
     if (["error", "interrupted"].includes(section.status)) {
@@ -1210,6 +1231,11 @@
       saveUi();
       render();
     }));
+    document.querySelectorAll("[data-lark-reader]").forEach((input) => input.addEventListener("change", () => {
+      ui.larkReader = input.value === "lark_cli" ? "lark_cli" : "chrome_mcp";
+      saveUi();
+      render();
+    }));
     document.querySelectorAll("[data-question-id]").forEach((input) => input.addEventListener("change", () => {
       ui.answers[input.dataset.questionId] = input.value;
       const wrap = document.querySelector(`[data-custom-wrap="${CSS.escape(input.dataset.questionId)}"]`);
@@ -1296,7 +1322,12 @@
     on("backToPlan", "click", () => { ui.viewStage = "plan"; render(); });
     on("backToVerify", "click", () => { ui.viewStage = "verify"; render(); });
     on("goCurrentStage", "click", () => { ui.viewStage = task.stage; render(); });
-    ["taskTitle", "sourceUrl", "sourceText", "existingDocumentPath", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage", "askQuestion"].forEach((id) => on(id, "input", captureVisibleFields));
+    ["taskTitle", "sourceText", "existingDocumentPath", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage", "askQuestion"].forEach((id) => on(id, "input", captureVisibleFields));
+    on("sourceUrl", "input", (event) => {
+      captureVisibleFields();
+      const options = document.querySelector("#larkReaderOptions");
+      if (options) options.hidden = !isLarkLink(event.target.value);
+    });
     on("baseBranch", "change", captureVisibleFields);
     on("refreshBranches", "click", () => {
       captureVisibleFields();
@@ -1373,7 +1404,7 @@
     if (ui.sourceType === "paste" && !ui.sourceText.trim()) return showToast("请粘贴需求内容。", true);
     if (ui.sourceType === "file" && !selectedFile) return showToast("请重新选择要上传的策划文档。", true);
     await withAction(async () => {
-      const body = { title: ui.title.trim(), sourceType: ui.sourceType, sourceUrl: ui.sourceUrl.trim(), sourceText: ui.sourceText, baseBranch: ui.baseBranch.trim() || health?.project?.defaultBaseBranch || "main" };
+      const body = { title: ui.title.trim(), sourceType: ui.sourceType, sourceUrl: ui.sourceUrl.trim(), larkReader: ui.larkReader, sourceText: ui.sourceText, baseBranch: ui.baseBranch.trim() || health?.project?.defaultBaseBranch || "main" };
       if (selectedFile) {
         if (selectedFile.size > 8 * 1024 * 1024) throw new Error("上传文件不能超过 8 MB。");
         body.fileName = selectedFile.name;
@@ -1385,6 +1416,7 @@
       ui.discussionNote = "";
       setTask(result.task, true);
       if (result.task.source?.reader === "chrome_mcp") showToast("已交给 Chrome MCP 读取飞书需求；只读，不会编辑网页。" );
+      if (result.task.source?.reader === "lark_cli") showToast("已交给官方 Lark CLI 读取飞书需求；只读，不会修改飞书内容。" );
     });
   }
 

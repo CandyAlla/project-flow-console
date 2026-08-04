@@ -738,12 +738,16 @@
 
     .execution-mode-card:hover { border-color: #8f9baa; }
     .execution-mode-card.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: #f7faff; }
+    .execution-mode-card.disabled { opacity: .62; cursor: not-allowed; }
+    .execution-mode-card.disabled:hover { border-color: var(--line); }
     .execution-mode-card input { position: absolute; top: 20px; left: 15px; }
     .execution-mode-card > span:not(.mode-card-head) { font-size: .88rem; }
     .execution-mode-card > small { color: var(--muted); font-size: .76rem; }
     .mode-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--ink); }
     .mode-card-head em { padding: 2px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: .7rem; font-style: normal; font-weight: 800; }
     .execution-mode-card:nth-child(2) .mode-card-head em { background: var(--warning-soft); color: var(--warning); }
+    .reader-mode-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .reader-mode-grid { margin: 10px 0; }
     .review-gaps { margin: 12px 0 0; padding-left: 1.2rem; color: var(--warning); font-size: .85rem; }
 
     details {

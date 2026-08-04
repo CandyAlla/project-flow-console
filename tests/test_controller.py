@@ -668,7 +668,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(result["acceptance_logs"][0]["expected"], "新日志")
         self.assertEqual(result["docs_backfill"], ["fix.md", "old.md"])
 
-    def test_lark_links_require_chrome_mcp_without_accepting_spoofed_hosts(self) -> None:
+    def test_lark_links_default_to_chrome_mcp_without_accepting_spoofed_hosts(self) -> None:
         self.assertTrue(server.is_lark_url("https://example.feishu.cn/docx/abc"))
         self.assertTrue(server.is_lark_url("https://example.larksuite.com/wiki/abc"))
         self.assertFalse(server.is_lark_url("https://feishu.cn.example.com/docx/abc"))
@@ -690,6 +690,72 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("$chrome:control-chrome", prompt)
         self.assertIn("不要改用 curl、Web Search、其他浏览器", prompt)
         self.assertIn("名称必须能单独看出任务含义", prompt)
+
+    def test_lark_links_can_use_ready_official_cli_in_read_only_mode(self) -> None:
+        ready = {
+            "installed": True,
+            "authenticated": True,
+            "ready": True,
+            "version": "lark-cli 1.0.82",
+            "message": "已安装且授权状态有效。",
+        }
+        with mock.patch.object(server, "lark_cli_status", return_value=ready), \
+                mock.patch.object(server, "launch_job"):
+            task = server.create_task({
+                "title": "飞书官方接口读取",
+                "sourceType": "link",
+                "sourceUrl": "https://example.feishu.cn/wiki/abc",
+                "larkReader": "lark_cli",
+                "baseBranch": "main",
+            })
+
+        prompt = server.source_prompt(task)
+        self.assertEqual(task["source"]["reader"], "lark_cli")
+        self.assertIn("$lark-shared、$lark-wiki 与 $lark-doc", prompt)
+        self.assertIn("禁止创建、更新、覆盖、移动、分享、评论、发送消息", prompt)
+        self.assertIn("不要改用 Chrome MCP", prompt)
+
+    def test_lark_cli_reader_rejects_unready_or_unknown_selection(self) -> None:
+        unavailable = {
+            "installed": False,
+            "authenticated": False,
+            "ready": False,
+            "version": "未安装",
+            "message": "未找到官方 lark-cli；需要先完成一次安装、应用配置和用户授权。",
+        }
+        payload = {
+            "title": "飞书读取",
+            "sourceType": "link",
+            "sourceUrl": "https://example.feishu.cn/wiki/abc",
+            "baseBranch": "main",
+        }
+        with mock.patch.object(server, "lark_cli_status", return_value=unavailable), \
+                self.assertRaisesRegex(server.WorkflowError, "Lark CLI 暂不可用"):
+            server.create_task({**payload, "larkReader": "lark_cli"})
+        with self.assertRaisesRegex(server.WorkflowError, "飞书读取方式"):
+            server.create_task({**payload, "larkReader": "unknown_reader"})
+
+    def test_lark_cli_status_requires_reader_skills_as_well_as_auth(self) -> None:
+        command_result = subprocess.CompletedProcess(["lark-cli"], 0, "lark-cli 1.0.82", "")
+        with mock.patch.object(server, "resolve_lark_cli_bin", return_value="/opt/homebrew/bin/lark-cli"), \
+                mock.patch.object(server, "LARK_READER_SKILLS", ("definitely-missing-lark-skill",)), \
+                mock.patch.object(server, "run_command", return_value=command_result):
+            status = server.lark_cli_status()
+
+        self.assertTrue(status["installed"])
+        self.assertTrue(status["authenticated"])
+        self.assertFalse(status["skillsInstalled"])
+        self.assertFalse(status["ready"])
+        self.assertIn("definitely-missing-lark-skill", status["missingSkills"])
+
+    def test_lark_reader_selector_is_optional_and_preserves_typing(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('larkReader: "chrome_mcp"', app_js)
+        self.assertIn('data-lark-reader="chrome_mcp"', app_js)
+        self.assertIn('data-lark-reader="lark_cli"', app_js)
+        self.assertIn('options.hidden = !isLarkLink(event.target.value)', app_js)
+        self.assertIn('larkReader: ui.larkReader', app_js)
+        self.assertIn("官方 Lark CLI 正在只读获取飞书需求", app_js)
 
     def test_import_existing_plan_enters_execute_without_codex_job(self) -> None:
         worktree = self.create_linked_worktree()
@@ -1042,6 +1108,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_health_does_not_spawn_empty_codex_command(self) -> None:
         with mock.patch.object(server, "CODEX_BIN", ""), \
+                mock.patch.object(server, "lark_cli_status", return_value={"ready": False}), \
                 mock.patch.object(server, "run_command") as run_command:
             health = server.health_payload()
 
@@ -1894,12 +1961,19 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["app"]["cwd"], "")
 
     def test_health_advertises_codex_app_and_quick_mode(self) -> None:
-        with mock.patch.object(server, "CODEX_BIN", ""):
+        lark_reader = {
+            "installed": True, "authenticated": True, "ready": True,
+            "version": "lark-cli 1.0.82", "message": "已安装且授权状态有效。",
+        }
+        with mock.patch.object(server, "CODEX_BIN", ""), \
+                mock.patch.object(server, "lark_cli_status", return_value=lark_reader):
             health = server.health_payload()
 
         self.assertTrue(health["features"]["codexAppLink"])
         self.assertTrue(health["features"]["appServer"])
         self.assertTrue(health["features"]["quickMode"])
+        self.assertTrue(health["features"]["larkCliReader"])
+        self.assertTrue(health["readers"]["larkCli"]["ready"])
         self.assertGreaterEqual(health["limits"]["quickExecutionSeconds"], 120)
 
 
