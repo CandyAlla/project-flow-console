@@ -950,11 +950,12 @@
     const result = section.result || {};
     const questions = result.questions || [];
     const messages = (section.messages || []).map((message) => `<div class="message user"><span class="message-role">你</span>${escapeHTML(message.note || Object.values(message.answers || {}).join("；") || "已提交回答")}</div>`).join("");
+    const discussionActionLabel = questions.length ? "提交回答，继续讨论" : "发送补充，继续讨论";
     return `<section class="section"><div class="summary-grid"><div class="summary-item"><span>Codex 结论</span><strong>${escapeHTML(result.summary || "已完成事实扫描")}</strong></div><div class="summary-item"><span>Plan 就绪度</span><strong>${result.ready_for_plan ? "可以形成 Solution Plan" : "仍有高返工点待确认"}</strong></div></div></section>
       ${result.confirmed_facts?.length ? `<section class="section"><h3>已确认事实</h3><div class="checklist">${result.confirmed_facts.map((item) => staticCheck(item, "来自项目事实或当前需求材料")).join("")}</div></section>` : ""}
       <section class="section"><h3>Ask-first：${questions.length ? `确认 ${questions.length} 个高返工问题` : "当前没有新的阻塞问题"}</h3><div class="question-list">${questions.map(questionFieldset).join("")}</div></section>
       <section class="section"><h3>继续补充和讨论</h3><div class="conversation">${messages || '<div class="message"><span class="message-role">Codex · discussion-only</span>已读取需求和项目事实，等待你的回答。</div>'}</div><div class="field"><label for="discussionNote">补充说明</label><textarea id="discussionNote" placeholder="补充特殊口径，或在这里继续讨论……">${escapeHTML(ui.discussionNote)}</textarea></div></section>
-      <div class="actions"><div class="actions-secondary"><button id="backToInput" type="button">新建另一条需求</button>${questions.length ? '<button id="sendDiscussionNote" type="button">提交回答，继续讨论</button>' : ""}</div><div class="actions-primary"><button class="primary" id="generatePlan" type="button">确认口径并生成 Plan</button></div></div>${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><button id="backToInput" type="button">新建另一条需求</button><button id="sendDiscussionNote" type="button">${discussionActionLabel}</button></div><div class="actions-primary"><button class="primary" id="generatePlan" type="button">确认口径并生成 Plan</button></div></div>${eventLogDetails()}`;
   }
 
   function questionFieldset(question, index) {
@@ -1422,6 +1423,10 @@
 
   async function submitDiscussion(generatePlan) {
     captureVisibleFields();
+    const questions = task?.discussion?.result?.questions || [];
+    if (!generatePlan && !questions.length && !ui.discussionNote.trim()) {
+      return showToast("请先填写要继续讨论的补充说明。", true);
+    }
     await withAction(async () => {
       const answers = collectAnswers();
       const result = await post(`/api/tasks/${task.id}/${generatePlan ? "plan" : "discussion"}`, { answers, note: ui.discussionNote.trim() });

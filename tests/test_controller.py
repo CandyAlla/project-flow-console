@@ -484,6 +484,14 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('@keyframes activity-spin', index_html)
         self.assertIn('@media (prefers-reduced-motion: reduce)', index_html)
 
+    def test_discussion_note_can_be_sent_after_ask_first_questions_are_complete(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('const discussionActionLabel = questions.length ? "提交回答，继续讨论" : "发送补充，继续讨论"', app_js)
+        self.assertIn('<button id="sendDiscussionNote" type="button">${discussionActionLabel}</button>', app_js)
+        self.assertIn('if (!generatePlan && !questions.length && !ui.discussionNote.trim())', app_js)
+        self.assertIn('showToast("请先填写要继续讨论的补充说明。", true)', app_js)
+        self.assertNotIn("${questions.length ? '<button id=\"sendDiscussionNote\"", app_js)
+
     def test_worktree_snapshot_detects_changes_to_already_dirty_files(self) -> None:
         readme = self.repo / "README.md"
         readme.write_text("dirty before repair\n", encoding="utf-8")
