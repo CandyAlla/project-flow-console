@@ -859,14 +859,46 @@
       <div class="actions"><div class="actions-secondary">${running ? '<button class="danger" id="cancelAsk">停止 Ask</button>' : '<span class="hint">当前任务有其他后台操作时，Ask 会暂时禁用。</span>'}</div><div class="actions-primary"><button class="primary" id="submitAsk" ${blocked || !ui.askQuestion.trim() ? "disabled" : ""}>发送问题</button></div></div>${running ? "" : eventLogDetails()}`;
   }
 
+  function estimateProgress(section) {
+    if (section?.status === "queued") return { value: 5, label: "等待执行槽位" };
+    const messages = (section?.logs || []).map((item) => String(item.message || ""));
+    let value = messages.length ? 10 : 8;
+    let label = "正在启动";
+    if (messages.some((message) => message.includes("启动 ") && message.includes("阶段"))) {
+      value = Math.max(value, 12);
+      label = "启动执行环境";
+    }
+    if (messages.some((message) => message.includes("会话已启动"))) {
+      value = Math.max(value, 20);
+      label = "建立 Codex 会话";
+    }
+    if (messages.some((message) => message.includes("正在读取事实"))) {
+      value = Math.max(value, 30);
+      label = "读取项目与任务上下文";
+    }
+    const activityMessages = messages.filter((message) => ["执行检查", "检查结束", "已应用文件改动", "已返回本阶段结果"].some((marker) => message.includes(marker)));
+    if (activityMessages.length) {
+      value = Math.max(value, Math.min(78, 40 + activityMessages.length * 5));
+      label = messages.some((message) => message.includes("已应用文件改动")) ? "落地修改与自检" : messages.some((message) => message.includes("执行检查") || message.includes("检查结束")) ? "执行检查与验证" : "处理当前阶段结果";
+    }
+    if (section?.phase === "review") {
+      value = Math.max(value, 88);
+      label = "Code Review 与结果复核";
+    } else if (section?.phase === "stopping") {
+      label = "正在安全停止";
+    }
+    return { value, label };
+  }
+
   function renderProgress(section, title) {
     const queued = section?.status === "queued";
     const logs = section?.logs || [];
+    const estimate = estimateProgress(section);
     const rows = logs.length
       ? logs.slice(-12).map((item, index) => `<div class="run-step ${index === logs.length - 1 ? "running" : "done"}"><span class="run-mark">${index === logs.length - 1 ? "…" : "✓"}</span><div><strong>${escapeHTML(item.message)}</strong><div class="hint">${escapeHTML(formatTime(item.time))}</div></div><small>${index === logs.length - 1 ? "进行中" : "完成"}</small></div>`).join("")
       : `<div class="run-step running"><span class="run-mark">…</span><div><strong>${escapeHTML(title)}</strong><div class="hint">${queued ? "等待空闲并发槽位" : "等待 Codex 返回第一条事件"}</div></div><small>${queued ? "排队" : "进行中"}</small></div>`;
     const activity = `<span class="activity-state ${queued ? "queued" : ""}"><span class="activity-dots" aria-hidden="true"><i></i><i></i><i></i></span>${queued ? "排队等待" : "持续执行中"}</span>`;
-    return `<section class="section">${callout(`<strong>${escapeHTML(title)}</strong> ${queued ? "任务已进入后台队列。" : "本地服务正在运行受控操作。"} 你可以切换查看其他需求；刷新后仍可恢复状态。`, "warning")}</section><section class="section progress-section" aria-live="polite"><div class="progress-heading"><h3>实时进度</h3>${activity}</div><div class="progress-track ${queued ? "queued" : ""}" aria-hidden="true"><span></span></div><div class="run-list">${rows}</div></section>${eventLogDetails()}`;
+    return `<section class="section">${callout(`<strong>${escapeHTML(title)}</strong> ${queued ? "任务已进入后台队列。" : "本地服务正在运行受控操作。"} 你可以切换查看其他需求；刷新后仍可恢复状态。`, "warning")}</section><section class="section progress-section" aria-live="polite"><div class="progress-heading"><h3>实时进度</h3>${activity}</div><div class="progress-estimate"><span>${escapeHTML(estimate.label)}</span><strong>${estimate.value}%</strong></div><div class="progress-track ${queued ? "queued" : ""}" role="progressbar" aria-label="预计执行进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${estimate.value}" aria-valuetext="${escapeHTML(estimate.label)}，预计 ${estimate.value}%"><span style="--progress-value:${estimate.value}%"></span></div><p class="progress-caption">按实时日志里程碑估算，仅表示当前执行阶段，不代表精确剩余时间。</p><div class="run-list">${rows}</div></section>${eventLogDetails()}`;
   }
 
   function renderInput() {

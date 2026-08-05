@@ -689,16 +689,22 @@
     .activity-dots i:nth-child(2) { animation-delay: .14s; }
     .activity-dots i:nth-child(3) { animation-delay: .28s; }
     .activity-state.queued .activity-dots i { animation-duration: 1.7s; }
-    .progress-track { position: relative; height: 4px; margin: 0 0 14px; overflow: hidden; border-radius: 999px; background: #e4eaf2; }
-    .progress-track span { position: absolute; inset: 0 auto 0 -34%; width: 34%; border-radius: inherit; background: linear-gradient(90deg, transparent, #4f83cb 35%, var(--accent) 70%, transparent); animation: progress-travel 1.7s ease-in-out infinite; }
-    .progress-track.queued span { background: linear-gradient(90deg, transparent, #e2a34c 45%, transparent); animation-duration: 2.5s; }
+    .progress-estimate { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 8px; }
+    .progress-estimate span { color: #465363; font-size: .84rem; font-weight: 700; }
+    .progress-estimate strong { color: var(--accent); font-size: 1rem; font-variant-numeric: tabular-nums; }
+    .progress-track { position: relative; height: 10px; margin: 0 0 7px; overflow: hidden; border-radius: 999px; background: #e4eaf2; }
+    .progress-track > span { position: absolute; inset: 0 auto 0 0; width: var(--progress-value, 0%); min-width: 2px; overflow: hidden; border-radius: inherit; background: linear-gradient(90deg, #4f83cb, var(--accent)); transition: width .35s ease; }
+    .progress-track > span::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent 0 25%, rgba(255,255,255,.58) 50%, transparent 75% 100%); animation: progress-travel 1.7s ease-in-out infinite; }
+    .progress-track.queued > span { background: linear-gradient(90deg, #d59b48, #e2a34c); }
+    .progress-track.queued > span::after { animation-duration: 2.5s; }
+    .progress-caption { margin: 0 0 14px; color: var(--muted); font-size: .76rem; }
 
     @keyframes activity-spin { to { transform: rotate(1turn); } }
     @keyframes activity-dot { 0%, 70%, 100% { opacity: .3; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-4px); } }
     @keyframes activity-pulse { 0% { box-shadow: 0 0 0 0 rgba(39, 93, 173, .38); } 70%, 100% { box-shadow: 0 0 0 7px rgba(39, 93, 173, 0); } }
     @keyframes queued-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
     @keyframes running-edge { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
-    @keyframes progress-travel { from { transform: translateX(0); } to { transform: translateX(395%); } }
+    @keyframes progress-travel { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
     @keyframes task-card-breathe { 0%, 100% { box-shadow: inset 3px 0 0 rgba(39, 93, 173, .32); } 50% { box-shadow: inset 3px 0 0 var(--accent), 0 0 0 1px rgba(39, 93, 173, .12); } }
 
     .diff-table { width: 100%; border-collapse: collapse; border: 1px solid var(--line); }
