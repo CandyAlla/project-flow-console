@@ -491,6 +491,23 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('@keyframes activity-spin', index_html)
         self.assertIn('@media (prefers-reduced-motion: reduce)', index_html)
 
+    def test_manual_verification_has_sticky_case_navigation(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
+        self.assertIn('function renderManualCaseNavigation(cases, requiredIndexes)', app_js)
+        self.assertIn('id="manual-case-${index}"', app_js)
+        self.assertIn('data-manual-case-jump="${index}"', app_js)
+        self.assertIn('class="verification-case-layout"', app_js)
+        self.assertIn('classList.toggle("verification-layout-active"', app_js)
+        self.assertIn('target.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" })', app_js)
+        self.assertIn('navItem.classList.toggle("is-complete", input.checked)', app_js)
+        self.assertIn('.manual-case-nav {', index_html)
+        self.assertIn('position: sticky;', index_html)
+        self.assertIn('.verification-layout-active .workspace { overflow: visible; }', index_html)
+        self.assertIn('.manual-case-nav-item.is-complete', index_html)
+        self.assertIn('@media (max-width: 1320px)', index_html)
+        self.assertIn('@media (max-width: 1120px)', index_html)
+
     def test_discussion_note_can_be_sent_after_ask_first_questions_are_complete(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         self.assertIn('const discussionActionLabel = questions.length ? "提交回答，继续讨论" : "发送补充，继续讨论"', app_js)

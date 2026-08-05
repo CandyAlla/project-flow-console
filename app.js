@@ -641,6 +641,7 @@
       ? callout(`<strong>该任务已归档。</strong> 当前仅供回看；请从左侧归档列表恢复后再继续执行。`, "warning")
       : "";
     stageContentEl.innerHTML = `${archiveNotice}${renderCodexAppPanel()}${renderAgentMemory()}${askActive ? renderAsk() : renderers[stageId]()}`;
+    document.querySelector(".app-shell")?.classList.toggle("verification-layout-active", Boolean(stageContentEl.querySelector(".verification-case-layout")));
     attachHandlers(askActive ? "ask" : stageId);
     if (task?.archivedAt) {
       stageContentEl.querySelectorAll("button, input, textarea, select").forEach((control) => { control.disabled = true; });
@@ -1137,7 +1138,7 @@
     const filters = textItems(item.log_filters);
     const expectedLogs = textItems(item.expected_logs);
     const failureSignals = textItems(item.failure_signals);
-    return `<article class="test-case ${required ? "required" : "optional"}">
+    return `<article class="test-case ${required ? "required" : "optional"}" id="manual-case-${index}" data-manual-case-index="${index}" tabindex="-1">
       <div class="test-case-head"><label class="test-case-check"><input type="checkbox" data-check-index="${index}" ${ui.checks[index] ? "checked" : ""}><span><strong>${escapeHTML(item.title)}</strong><small>${required ? "Commit 必测" : "补充回归"}</small></span></label><span class="priority priority-${escapeHTML(priority.toLowerCase())}">${escapeHTML(priority)}</span></div>
       <div class="test-case-body"><p class="precondition"><b>前置条件</b>${escapeHTML(item.precondition || "无特殊前置条件")}</p>
         <div class="test-case-grid"><div><h4>操作步骤</h4><ol>${steps.map((step) => `<li>${escapeHTML(step)}</li>`).join("")}</ol></div><div><h4>通过标准</h4><p>${escapeHTML(item.expected)}</p></div></div>
@@ -1147,6 +1148,25 @@
         </div>
       </div>
     </article>`;
+  }
+
+  function renderManualCaseNavigation(cases, requiredIndexes) {
+    const completedRequired = requiredIndexes.filter((index) => ui.checks[index]).length;
+    const completedAll = cases.filter((_, index) => ui.checks[index]).length;
+    return `<aside class="manual-case-nav" aria-label="人工验收用例导航">
+      <div class="manual-case-nav-head"><div><p class="section-kicker">固定清单</p><h3>验收用例</h3></div><strong class="manual-case-nav-progress">必测 ${completedRequired} / ${requiredIndexes.length}</strong></div>
+      <p class="manual-case-nav-summary">全部完成 <span data-manual-case-completed>${completedAll}</span> / ${cases.length} · 点击可跳转</p>
+      <div class="manual-case-nav-list">${cases.map((item, index) => {
+        const required = isRequiredManualCase(item);
+        const priority = item.priority || "P0";
+        const complete = Boolean(ui.checks[index]);
+        return `<button class="manual-case-nav-item ${complete ? "is-complete" : ""}" type="button" data-manual-case-jump="${index}">
+          <span class="manual-case-nav-index" aria-hidden="true">${complete ? "✓" : index + 1}</span>
+          <span class="manual-case-nav-copy"><strong>${escapeHTML(item.title)}</strong><small><b>${escapeHTML(priority)}</b>${required ? "必测" : "补充回归"}</small></span>
+          <span class="manual-case-nav-state">${complete ? "已完成" : "待验证"}</span>
+        </button>`;
+      }).join("")}</div>
+    </aside>`;
   }
 
   function renderAcceptanceLogs(logs) {
@@ -1172,7 +1192,7 @@
     return `<section class="section"><div class="summary-grid"><div class="summary-item"><span>${inBugfix ? "Bug 修改结果" : "执行结果"}</span><strong>${escapeHTML(result.summary || "实现已完成")}</strong></div><div class="summary-item"><span>检查方式</span><strong>${escapeHTML(reviewLabel)}</strong></div></div></section>
       ${renderMinimumVerification(result.minimum_manual_verification)}
       <section class="section"><h3>自动/逻辑验证</h3><div class="checklist">${(result.verification || []).map((item) => `<div class="check-row"><span>${item.status === "passed" ? "✓" : item.status === "failed" ? "!" : "–"}</span><div><strong>${escapeHTML(item.check)}</strong><span>${escapeHTML(item.result)} · ${escapeHTML(item.status)}</span></div></div>`).join("") || '<span class="hint">Codex 未返回自动验证条目。</span>'}</div></section>
-      <section class="section"><div class="section-heading"><div><p class="section-kicker">逐条勾选</p><h3>详细测试用例</h3></div><strong class="gate-progress">P0 / 必测 ${completedRequired} / ${requiredIndexes.length}</strong></div><p class="section-copy">只有标记为“Commit 必测”的用例会阻塞提交；P1/P2 补充回归可按本次发布风险选择执行，并在备注中记录。</p><div class="test-case-list">${cases.map(renderManualCase).join("")}</div></section>
+      <div class="verification-case-layout"><section class="section verification-case-content"><div class="section-heading"><div><p class="section-kicker">逐条勾选</p><h3>详细测试用例</h3></div><strong class="gate-progress">P0 / 必测 ${completedRequired} / ${requiredIndexes.length}</strong></div><p class="section-copy">只有标记为“Commit 必测”的用例会阻塞提交；P1/P2 补充回归可按本次发布风险选择执行，并在备注中记录。</p><div class="test-case-list">${cases.map(renderManualCase).join("")}</div></section>${renderManualCaseNavigation(cases, requiredIndexes)}</div>
       ${renderAcceptanceLogs(result.acceptance_logs)}
       ${renderExecutionModeSelector("acceptance")}
       <section class="section"><div class="field"><label for="verificationNote">验收备注或发现的问题</label><textarea id="verificationNote" placeholder="记录设备、操作证据，或描述需要定向返修的问题……">${escapeHTML(ui.verificationNote)}</textarea>${renderFeedbackImageInput("verification")}<span class="hint">文字和图片可以单独或一起提交。退回后只处理这条人工反馈，不会重新执行整份 Plan；上一轮未受影响的测试用例会保留。</span></div></section>
@@ -1295,13 +1315,40 @@
     document.querySelectorAll("[data-check-index]").forEach((input) => input.addEventListener("change", () => {
       ui.checks[Number(input.dataset.checkIndex)] = input.checked;
       saveUi();
-      const cases = task?.execution?.result?.manual_cases || [];
+      const cases = task?.execution?.result?.manual_cases?.length ? task.execution.result.manual_cases : [{ title: "主流程", steps: "按 Plan 执行一次完整主流程。", expected: "结果与验收口径一致。" }];
       const requiredIndexes = requiredManualIndexes(cases);
       const completedRequired = requiredIndexes.filter((index) => ui.checks[index]).length;
+      const completedAll = cases.filter((_, index) => ui.checks[index]).length;
       const approve = document.querySelector("#approveVerification");
       if (approve) approve.disabled = !requiredIndexes.length || completedRequired !== requiredIndexes.length;
       const progress = document.querySelector(".gate-progress");
       if (progress) progress.textContent = `P0 / 必测 ${completedRequired} / ${requiredIndexes.length}`;
+      const navProgress = document.querySelector(".manual-case-nav-progress");
+      if (navProgress) navProgress.textContent = `必测 ${completedRequired} / ${requiredIndexes.length}`;
+      const navCompleted = document.querySelector("[data-manual-case-completed]");
+      if (navCompleted) navCompleted.textContent = String(completedAll);
+      const index = Number(input.dataset.checkIndex);
+      const navItem = document.querySelector(`[data-manual-case-jump="${index}"]`);
+      if (navItem) {
+        navItem.classList.toggle("is-complete", input.checked);
+        const navIndex = navItem.querySelector(".manual-case-nav-index");
+        const navState = navItem.querySelector(".manual-case-nav-state");
+        if (navIndex) navIndex.textContent = input.checked ? "✓" : String(index + 1);
+        if (navState) navState.textContent = input.checked ? "已完成" : "待验证";
+      }
+    }));
+    document.querySelectorAll("[data-manual-case-jump]").forEach((button) => button.addEventListener("click", () => {
+      const index = Number(button.dataset.manualCaseJump);
+      const target = document.getElementById(`manual-case-${index}`);
+      if (!target) return;
+      document.querySelectorAll("[data-manual-case-jump]").forEach((item) => {
+        item.classList.toggle("is-active", item === button);
+        if (item === button) item.setAttribute("aria-current", "true");
+        else item.removeAttribute("aria-current");
+      });
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+      target.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+      target.focus({ preventScroll: true });
     }));
     document.querySelectorAll("[data-copy-log]").forEach((button) => button.addEventListener("click", async () => {
       try {
