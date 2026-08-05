@@ -1070,6 +1070,7 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "maxStageIndex": task.get("maxStageIndex", 0),
         "activeJob": task.get("activeJob"),
         "jobState": task.get("jobState", "idle"),
+        "executionPhase": (task.get("execution") or {}).get("phase", ""),
         "state": task_state(task),
         "archivedAt": task.get("archivedAt", ""),
         "worktree": {

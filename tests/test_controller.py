@@ -467,6 +467,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("selectedSummary.maxStageIndex !== task.maxStageIndex", app_js)
         self.assertIn("selectedSummary.activeJob !== task.activeJob", app_js)
         self.assertIn('selectedSummary.jobState !== (task.jobState || "idle")', app_js)
+        self.assertIn('selectedExecutionPhase !== (task.execution?.phase || "")', app_js)
         self.assertIn('const wasViewingCurrentStage = ui.module === "flow" && ui.viewStage === previousStage', app_js)
         self.assertIn("if (wasViewingCurrentStage && task.stage !== previousStage) ui.viewStage = task.stage", app_js)
         self.assertIn('task.activeJob === "plan"', app_js)
@@ -884,13 +885,22 @@ class ControllerTests(unittest.TestCase):
             "id": "00000000-0000-0000-0000-000000000011", "title": "运行需求", "createdAt": "2026-07-28T09:00:00+08:00",
             "updatedAt": "2026-07-28T10:00:00+08:00", "stage": "plan", "maxStageIndex": 2,
             "activeJob": "plan", "jobState": "queued", "discussion": {"status": "ready"}, "plan": {"status": "queued"},
-            "worktree": {"name": "Project_running", "status": "idle"}, "execution": {}, "git": {"committed": False},
+            "worktree": {"name": "Project_running", "status": "idle"}, "execution": {"phase": "review"}, "git": {"committed": False},
         }
         server.TASKS.update({older["id"]: older, newer["id"]: newer})
         summaries = server.list_task_summaries()
         self.assertEqual([item["id"] for item in summaries], [newer["id"], older["id"]])
         self.assertEqual(summaries[0]["state"], "queued")
+        self.assertEqual(summaries[0]["executionPhase"], "review")
         self.assertNotIn("source", summaries[0])
+
+    def test_bugfix_running_labels_distinguish_implementation_from_review(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('executionPhase: value.execution?.phase || ""', app_js)
+        self.assertIn('"Bug 修改已完成 · Code Review 中"', app_js)
+        self.assertIn('executionPhase === "review" ? "Bug Review 中" : "Bug 修改中"', app_js)
+        self.assertIn('const progressTitle = reviewing ? "Bug 修改已完成 · 正在 Code Review"', app_js)
+        self.assertIn('${reviewing ? "停止 Code Review" : "停止当前修改"}', app_js)
 
     def test_archive_and_restore_task_without_touching_execution_assets(self) -> None:
         task_id = self.seed_task()

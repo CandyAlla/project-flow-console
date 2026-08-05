@@ -472,6 +472,7 @@
       maxStageIndex: value.maxStageIndex,
       activeJob: value.activeJob,
       jobState: value.jobState || "idle",
+      executionPhase: value.execution?.phase || "",
       state,
       archivedAt: value.archivedAt || "",
       worktree: value.worktree,
@@ -559,12 +560,14 @@
         const selectedId = task?.id;
         await refreshTaskSummaries();
         const selectedSummary = taskSummaries.find((item) => item.id === selectedId);
+        const selectedExecutionPhase = selectedSummary?.executionPhase ?? (selectedId === task?.id ? task.execution?.phase || "" : "");
         const selectedTaskChanged = selectedSummary && (
           selectedSummary.updatedAt !== task.updatedAt
           || selectedSummary.stage !== task.stage
           || selectedSummary.maxStageIndex !== task.maxStageIndex
           || selectedSummary.activeJob !== task.activeJob
           || selectedSummary.jobState !== (task.jobState || "idle")
+          || selectedExecutionPhase !== (task.execution?.phase || "")
         );
         if (selectedId && selectedTaskChanged) {
           const previousStage = task.stage;
@@ -600,9 +603,11 @@
     if (task.archivedAt) return "任务已归档 · 恢复后可继续";
     if (task.git?.committed) return `Commit 完成 · ${task.git.commitId.slice(0, 12)}${task.stage === "bugfix" ? " · 可继续修 Bug" : ""}`;
     if (task.activeJob) {
-      const label = task.activeJob === "execution" && task.stage === "bugfix"
-        ? "Bug 定向修改"
-        : task.activeJob === "execution" && task.execution?.mode === "acceptance_fix"
+      if (task.activeJob === "execution" && task.stage === "bugfix") {
+        if (task.jobState === "queued") return "Bug 任务排队中";
+        return task.execution?.phase === "review" ? "Bug 修改已完成 · Code Review 中" : "Bug 定向修改正在运行";
+      }
+      const label = task.activeJob === "execution" && task.execution?.mode === "acceptance_fix"
           ? "人工验收定向返修"
           : jobLabel(task.activeJob);
       return `${label}${task.jobState === "queued" ? "排队中" : "正在运行"}`;
@@ -664,8 +669,13 @@
 
   function taskStateLabel(item) {
     if (item.archivedAt) return "已归档";
+    const bugfixExecution = item.activeJob === "execution" && item.stage === "bugfix";
+    const executionPhase = item.executionPhase || (item.id === task?.id ? task.execution?.phase || "" : "");
     if (item.state === "queued") return "排队中";
-    if (item.state === "running") return `${item.activeJob === "execution" && item.stage === "bugfix" ? "Bug 修改" : jobLabel(item.activeJob)}中`;
+    if (item.state === "running") {
+      if (bugfixExecution) return executionPhase === "review" ? "Bug Review 中" : "Bug 修改中";
+      return `${jobLabel(item.activeJob)}中`;
+    }
     if (item.state === "done") return "已完成";
     if (item.state === "error") return "需要处理";
     return "等待操作";
@@ -1201,7 +1211,10 @@
       const section = task.execution || {};
       if (["queued", "running"].includes(section.status)) {
         const targeted = section.mode === "acceptance_fix" ? "Bug 人工反馈定向返修" : section.flowMode === "fast" ? "Bug 快速修改" : "Bug 标准修改";
-        return `<section class="section">${cycle.description ? callout(`<strong>本轮 Bug：</strong>${escapeHTML(cycle.description)}`, "warning") : ""}</section>${renderProgress(section, `${targeted} · ${section.phase || "implementation"}`)}<div class="actions"><div class="actions-secondary"><span class="hint">只修改本 Bug 及 Review findings，不重新执行 Plan。</span></div><div class="actions-primary"><button class="danger" id="cancelExecution">停止当前修改</button></div></div>`;
+        const reviewing = section.phase === "review";
+        const progressTitle = reviewing ? "Bug 修改已完成 · 正在 Code Review" : `${targeted} · ${section.phase || "implementation"}`;
+        const progressHint = reviewing ? "Bug 修改结果已经保留；当前只复核本轮改动，不会重新执行 Plan。" : "只修改本 Bug 及 Review findings，不重新执行 Plan。";
+        return `<section class="section">${cycle.description ? callout(`<strong>本轮 Bug：</strong>${escapeHTML(cycle.description)}`, "warning") : ""}</section>${renderProgress(section, progressTitle)}<div class="actions"><div class="actions-secondary"><span class="hint">${progressHint}</span></div><div class="actions-primary"><button class="danger" id="cancelExecution">${reviewing ? "停止 Code Review" : "停止当前修改"}</button></div></div>`;
       }
       const interrupted = ["error", "interrupted"].includes(section.status);
       const needsReviewFix = section.status === "needs_attention" || cycle.status === "review";
