@@ -1,5 +1,7 @@
 # Project Flow Console
 
+> [本机部署指南与推荐目录结构](docs/local-deployment.md)
+
 一个运行在本机的、多项目需求交付控制台。
 
 它通过 Project Profile 适配不同 Git 项目，把下面这些原本散落在对话、终端和文档里的步骤，收拢成一条可恢复、可人工审批的工作流：
