@@ -62,6 +62,10 @@ class ProjectProfileTests(unittest.TestCase):
             "port": 4320,
         }
 
+    def profile_from_output(self, result: subprocess.CompletedProcess[str]) -> dict[str, object]:
+        profile, _ = json.JSONDecoder().raw_decode(result.stdout)
+        return profile
+
     def test_profile_rejects_missing_fields_and_relative_paths(self) -> None:
         with self.assertRaisesRegex(server.WorkflowError, "schemaVersion"):
             server.validate_project_profile({})
@@ -85,14 +89,22 @@ class ProjectProfileTests(unittest.TestCase):
 
     def test_setup_dry_run_does_not_write_then_formal_run_generates_profile(self) -> None:
         profiles = self.root / "profiles"
+        managed = self.root / "managed"
         command = [
             "python3", str(SETUP_SCRIPT), str(self.repo), "--profiles-dir", str(profiles),
-            "--id", "sample-project", "--port", "4321",
+            "--id", "sample-project", "--port", "4321", "--managed-root", str(managed),
         ]
         preview = run([*command, "--dry-run"])
         self.assertEqual(preview.returncode, 0, preview.stderr)
         self.assertIn("Dry run: no directories or files were created.", preview.stdout)
         self.assertFalse(profiles.exists())
+        self.assertFalse(managed.exists())
+        preview_profile = self.profile_from_output(preview)
+        managed_project = managed.resolve() / "sample-project"
+        self.assertEqual(preview_profile["docsRoot"], str(managed_project / "docs"))
+        self.assertEqual(preview_profile["worktreesRoot"], str(managed_project / "worktrees"))
+        self.assertEqual(preview_profile["htmlTaskRoot"], str(managed_project / "docs" / "tasks" / "active"))
+        self.assertIn("using managed fallback", preview.stderr)
 
         generated = run(command)
         self.assertEqual(generated.returncode, 0, generated.stderr)
@@ -101,6 +113,29 @@ class ProjectProfileTests(unittest.TestCase):
         profile = server.load_project_profile(profile_path)
         self.assertEqual(profile["repoRoot"], str(self.repo.resolve()))
         self.assertEqual(profile["port"], 4321)
+        self.assertFalse(managed.exists())
+
+    def test_setup_reuses_existing_project_directory_conventions(self) -> None:
+        docs = self.root / f"{self.repo.name}Docs"
+        html = docs / "Tasks" / "进行中"
+        html.mkdir(parents=True)
+        worktrees = self.root / "worktrees"
+        worktrees.mkdir()
+        (self.repo / "Docs").mkdir()
+        managed = self.root / "managed"
+        preview = run([
+            "python3", str(SETUP_SCRIPT), str(self.repo), "--profiles-dir", str(self.root / "profiles"),
+            "--id", "sample-project", "--managed-root", str(managed), "--dry-run",
+        ])
+
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        profile = self.profile_from_output(preview)
+        self.assertEqual(profile["docsRoot"], str(docs.resolve()))
+        self.assertEqual(profile["htmlTaskRoot"], str(html.resolve()))
+        self.assertEqual(profile["worktreesRoot"], str(worktrees.resolve()))
+        self.assertEqual(profile["planRelativeDir"], "Docs/plans/active")
+        self.assertNotIn("using managed fallback", preview.stderr)
+        self.assertFalse(managed.exists())
 
     def test_setup_rejects_non_git_and_detached_head(self) -> None:
         plain = self.root / "plain"

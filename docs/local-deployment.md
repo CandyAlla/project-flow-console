@@ -10,72 +10,91 @@
 
 1. `project-flow-console`：可通过 Git 更新的公共工具代码。
 2. 主项目仓库：实际开发项目的主 Git checkout。
-3. `worktrees`：控制台为需求创建的隔离 Git Worktree。
+3. `worktrees`：控制台为需求创建的隔离执行目录，底层使用 Git Worktree，但不要求使用者手工管理。
 4. `docs` 与 `.runtime`：需求文档、验收 HTML，以及只属于当前电脑的任务状态。
 
 控制台只监听 `127.0.0.1`，其他电脑无法直接访问。页面中的 Codex、Worktree 和 Commit 操作都发生在当前使用者自己的电脑上。
 
-## 二、推荐目录结构
+## 二、目录选择策略
 
-### 新项目或可以整理目录时
+不要要求所有同事采用同一套项目目录。`project-flow-setup` 的选择顺序是：
 
-推荐把公共工具与项目工作区分开：
+| 优先级 | 场景 | 处理方式 |
+|---|---|---|
+| 1 | 用户显式填写目录 | 使用填写的绝对路径，并执行安全校验 |
+| 2 | 项目已有文档或外部 Worktree 目录 | 保留项目原位并复用已有规范 |
+| 3 | 没有可识别的项目规范 | 使用本机 `~/ProjectFlowData/<project-id>` 托管目录 |
+
+Skill 只在发现多个可信候选目录、且选择会改变行为时询问。Dry-run 不移动项目、不创建 Worktree，也不创建托管目录。
+
+### 普通同事：保持项目原位
+
+这是没有 Git Worktree 使用习惯时的默认方案：
 
 ```text
-/Users/alice/Developer/
-├── tools/
-│   └── project-flow-console/          # 公共控制台代码
-└── workspaces/
-    └── my-game/                       # workspaceRoot
-        ├── repo/                      # repoRoot，主 Git 仓库
-        ├── docs/                      # docsRoot，仓库外的需求文档
-        │   └── tasks/
-        │       ├── active/            # htmlTaskRoot
-        │       └── archive/
-        └── worktrees/                 # worktreesRoot，必须在 repo 外
-            ├── MyGame-add-login-a1b2/
-            └── MyGame-fix-payment-c3d4/
-```
+/Users/alice/Projects/
+└── my-game/                            # repoRoot，原项目保持不动
 
-示例中的 `repo` 可以换成真实仓库名；关键是它与 `docs`、`worktrees` 保持同级，而不是把 Worktree 目录放进 Git 仓库。
+/Users/alice/ProjectFlowData/
+└── my-game/
+    ├── docs/                           # docsRoot
+    │   └── tasks/active/               # htmlTaskRoot
+    └── worktrees/                      # worktreesRoot，由控制台管理
+        ├── MyGame-add-login-a1b2/
+        └── MyGame-fix-payment-c3d4/
+
+/Users/alice/Developer/tools/
+└── project-flow-console/               # 公共控制台代码
+```
 
 对应的 Profile 路径如下：
 
 | Profile 字段 | 示例 |
 |---|---|
-| `workspaceRoot` | `/Users/alice/Developer/workspaces/my-game` |
-| `repoRoot` | `/Users/alice/Developer/workspaces/my-game/repo` |
-| `docsRoot` | `/Users/alice/Developer/workspaces/my-game/docs` |
-| `htmlTaskRoot` | `/Users/alice/Developer/workspaces/my-game/docs/tasks/active` |
-| `worktreesRoot` | `/Users/alice/Developer/workspaces/my-game/worktrees` |
+| `workspaceRoot` | `/Users/alice/Projects` |
+| `repoRoot` | `/Users/alice/Projects/my-game` |
+| `docsRoot` | `/Users/alice/ProjectFlowData/my-game/docs` |
+| `htmlTaskRoot` | `/Users/alice/ProjectFlowData/my-game/docs/tasks/active` |
+| `worktreesRoot` | `/Users/alice/ProjectFlowData/my-game/worktrees` |
 
-项目内的执行 Plan 仍使用仓库相对路径，例如：
+同事只需要在页面点击“创建隔离执行目录”。控制台负责创建、绑定和校验 Git Worktree；原项目分支不会被自动切换。
+
+### 已有团队目录：直接复用
+
+如果项目已有类似结构，Skill 应优先识别并复用：
+
+```text
+/Users/alice/CompanyWorkspace/
+├── Client/                             # repoRoot
+├── ClientDocs/                         # 已有 docsRoot
+└── worktrees/                          # 已有 worktreesRoot
+```
+
+不需要为了匹配文档示例移动 `Client`，也不需要另建 `ProjectFlowData`。Dry-run 会展示检测结果，由使用者确认后写入 Profile。
+
+### 新项目：可选的整理结构
+
+只有新项目或团队本来就希望整理目录时，才建议使用同级结构：
+
+```text
+/Users/alice/Developer/
+├── tools/project-flow-console/
+└── workspaces/my-game/                 # workspaceRoot
+    ├── repo/                           # repoRoot
+    ├── docs/                           # docsRoot
+    │   └── tasks/active/               # htmlTaskRoot
+    └── worktrees/                      # worktreesRoot
+```
+
+关键约束只有一个：`worktrees` 必须在 `repo` 外；目录名称和现有项目位置不需要统一。
+
+项目内的执行 Plan 使用仓库相对路径，例如：
 
 ```json
 "planRelativeDir": "Docs/plans/active"
 ```
 
 创建 Worktree 后，正式 Plan 会放到该 Worktree 的 `Docs/plans/active` 中；逻辑验收 HTML 和控制台文档仍保存在外部 `docsRoot`。
-
-### 已有项目不方便搬家时
-
-不需要为了使用控制台移动现有仓库。可以保留原位置，只把控制台数据和 Worktree 放到独立目录：
-
-```text
-/Users/alice/Projects/
-└── my-game/                            # repoRoot，保持原位置
-
-/Users/alice/ProjectFlowData/
-└── my-game/
-    ├── docs/                           # docsRoot
-    │   └── tasks/active/               # htmlTaskRoot
-    └── worktrees/                      # worktreesRoot
-
-/Users/alice/Developer/tools/
-└── project-flow-console/               # 控制台代码
-```
-
-这时 `workspaceRoot` 可以设为 `/Users/alice/Projects`，已有需求文档也可以从单独配置的 `docsRoot` 接入。
 
 ## 三、路径规则
 
@@ -89,6 +108,7 @@
 - `htmlTaskRoot` 必须位于 `docsRoot` 内。
 - `planRelativeDir`、`projectFacts` 和 `planTemplate` 是仓库内相对路径，不能包含 `..`。
 - `worktreeNamePrefix` 只能使用字母、数字、点、下划线和连字符，建议使用 `MyGame` 这类短名称。
+- 没有 Worktree 使用习惯时，不需要手工执行 Git 命令；把 `worktreesRoot` 视为控制台管理的隔离执行目录即可。
 - 根目录建议使用 ASCII、小写且不包含空格，例如 `project-flow-console`、`my-game`；这不是强制要求，但能减少外部脚本和终端引用路径时的转义问题。
 - 每个人都应重新生成自己的 Profile，不要直接复制包含其他人用户名和绝对路径的 Profile。
 
@@ -167,6 +187,7 @@ Skill 会先执行只读 dry-run，展示：
 - 各阶段使用的 Skills
 - 日志与人工验证来源
 - 路径冲突和缺失项
+- 哪些目录复用了项目现有规范，哪些目录使用了本机托管 fallback
 
 确认 dry-run 后才生成：
 
@@ -185,6 +206,22 @@ python3 skills/project-flow-setup/scripts/configure_project.py \
 
 python3 skills/project-flow-setup/scripts/configure_project.py \
   /absolute/path/to/your-project
+```
+
+没有现有目录规范时，脚本默认推荐：
+
+```text
+~/ProjectFlowData/<project-id>/docs
+~/ProjectFlowData/<project-id>/worktrees
+```
+
+如果公司要求把托管数据统一放到其他磁盘，可以只覆盖 fallback 根目录：
+
+```bash
+python3 skills/project-flow-setup/scripts/configure_project.py \
+  /absolute/path/to/your-project \
+  --managed-root /Volumes/Development/ProjectFlowData \
+  --dry-run
 ```
 
 只有在 dry-run 自动识别的路径不符合预期时，才显式传入目录参数：

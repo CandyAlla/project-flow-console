@@ -17,11 +17,16 @@ Configure a project without modifying its code, creating a Worktree, starting im
    - Plan directory and project fact entrypoints;
    - discussion, plan, execution, acceptance-fix, and review Skills;
    - verification/log sources and whether Submodules are required.
-4. Ask only for missing choices that materially change behavior. Do not ask for facts the scan can establish.
-5. Read [references/profile-schema.md](references/profile-schema.md) when changing fields or validating a nonstandard layout.
-6. Run `scripts/configure_project.py` with `--dry-run` first. Report its resolved paths, branch, Skill chains, warnings, and target Profile path.
-7. After user confirmation, rerun without `--dry-run`. Use `--force` only after explicit approval to replace an existing Profile.
-8. Run the console's profile tests or at minimum load the generated JSON through `server.py --profile <path> --help` and report the launch command.
+4. Select directories without asking the user to reorganize the repository:
+   - keep the primary repository at its existing Git root;
+   - reuse an explicit or already-existing sibling/project docs root and external Worktree root;
+   - when no project convention exists, use the per-user managed fallback `~/ProjectFlowData/<project-id>/docs` and `~/ProjectFlowData/<project-id>/worktrees`;
+   - treat Worktrees as console-managed isolated execution directories; the user does not need to manage Git Worktree commands manually.
+5. Ask only for missing choices that materially change behavior, such as multiple credible existing roots. Do not ask for facts the scan can establish.
+6. Read [references/profile-schema.md](references/profile-schema.md) when changing fields or validating a nonstandard layout.
+7. Run `scripts/configure_project.py` with `--dry-run` first. Report which existing roots were reused, which managed fallbacks were selected, the branch, Skill chains, warnings, and target Profile path.
+8. After user confirmation, rerun without `--dry-run`. Use `--force` only after explicit approval to replace an existing Profile.
+9. Run the console's profile tests or at minimum load the generated JSON through `server.py --profile <path> --help` and report the launch command.
 
 ## Command Pattern
 
@@ -37,6 +42,7 @@ Add explicit options only when discovery is wrong or the user selected a differe
 - Require an absolute input path and a real, non-detached Git root.
 - Stop on unfinished Merge, Rebase, Cherry-pick, or Revert state.
 - Require the Worktree root to remain outside the primary repository.
+- Do not move the primary repository or require the user to adopt manual Git Worktree habits.
 - Treat Profile values as data. Never place shell snippets or arbitrary commands in a Profile.
 - Keep `projectFacts`, `planTemplate`, and `planRelativeDir` repository-relative and free of `..`.
 - A dry-run must not create directories or files.

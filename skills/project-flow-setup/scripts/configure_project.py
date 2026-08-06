@@ -110,12 +110,47 @@ def validate_base(repo: Path, value: str) -> str:
     return base
 
 
-def detect_docs(repo: Path) -> Path:
+def detect_docs(repo: Path) -> Path | None:
     sibling = repo.parent / f"{repo.name}Docs"
     for candidate in (sibling, repo / "Docs", repo / "Doc"):
         if candidate.is_dir():
             return candidate.resolve()
-    return sibling.resolve(strict=False)
+    return None
+
+
+def detect_worktrees(repo: Path) -> Path | None:
+    candidates = (
+        repo.parent / "worktrees",
+        repo.parent / "Worktrees",
+        repo.parent / f"{repo.name}Worktrees",
+    )
+    for candidate in candidates:
+        if candidate.is_dir() and not inside(candidate.resolve(), repo):
+            return candidate.resolve()
+    return None
+
+
+def detect_html_task_root(docs: Path) -> Path:
+    candidates = (
+        docs / "Tasks" / "进行中",
+        docs / "tasks" / "active",
+        docs / "Tasks" / "active",
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    return (docs / "tasks" / "active").resolve(strict=False)
+
+
+def detect_plan_dir(repo: Path) -> str:
+    for candidate in ("Docs/plans/active", "Doc/plans/active"):
+        if (repo / candidate).is_dir():
+            return candidate
+    if (repo / "Docs").is_dir():
+        return "Docs/plans/active"
+    if (repo / "Doc").is_dir():
+        return "Doc/plans/active"
+    return "Docs/plans/active"
 
 
 def detect_facts(repo: Path) -> list[str]:
@@ -168,10 +203,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace-root", help="Absolute workspace root")
     parser.add_argument("--docs-root", help="Absolute docs root")
     parser.add_argument("--worktrees-root", help="Absolute Worktree parent outside the primary repo")
+    parser.add_argument(
+        "--managed-root",
+        help="Absolute fallback data root; defaults to ~/ProjectFlowData and is only used when no existing or explicit docs/Worktree root is found",
+    )
     parser.add_argument("--html-task-root", help="Absolute HTML task root inside docsRoot")
     parser.add_argument("--base", help="Existing local base branch/ref; defaults to current branch")
     parser.add_argument("--worktree-prefix", help="Safe Worktree directory prefix")
-    parser.add_argument("--plan-dir", default="Doc/plans/active", help="Plan destination relative to Worktree")
+    parser.add_argument("--plan-dir", help="Plan destination relative to Worktree; defaults from existing Docs/Doc layout")
     parser.add_argument("--fact", action="append", help="Repository-relative fact entrypoint; repeatable")
     parser.add_argument("--plan-template", help="Optional repository-relative planning template")
     parser.add_argument("--discussion-skill", action="append")
@@ -208,15 +247,19 @@ def configure(args: argparse.Namespace) -> tuple[dict[str, Any], Path, list[str]
         raise SetupError("Worktree prefix contains unsafe characters.")
 
     workspace = require_absolute(args.workspace_root, "workspaceRoot") if args.workspace_root else repo.parent.resolve()
-    docs = require_absolute(args.docs_root, "docsRoot") if args.docs_root else detect_docs(repo)
-    worktrees = require_absolute(args.worktrees_root, "worktreesRoot") if args.worktrees_root else workspace / "worktrees"
-    html_root = require_absolute(args.html_task_root, "htmlTaskRoot") if args.html_task_root else docs / "Tasks" / "进行中"
+    managed_parent = require_absolute(args.managed_root, "managedRoot") if args.managed_root else (Path.home() / "ProjectFlowData").resolve()
+    managed_project = managed_parent / project_id
+    detected_docs = detect_docs(repo) if not args.docs_root else None
+    detected_worktrees = detect_worktrees(repo) if not args.worktrees_root else None
+    docs = require_absolute(args.docs_root, "docsRoot") if args.docs_root else detected_docs or managed_project / "docs"
+    worktrees = require_absolute(args.worktrees_root, "worktreesRoot") if args.worktrees_root else detected_worktrees or managed_project / "worktrees"
+    html_root = require_absolute(args.html_task_root, "htmlTaskRoot") if args.html_task_root else detect_html_task_root(docs)
     if worktrees == repo or inside(worktrees, repo):
         raise SetupError("worktreesRoot must remain outside the primary repository.")
     if not inside(html_root, docs):
         raise SetupError("htmlTaskRoot must be inside docsRoot.")
     base = validate_base(repo, args.base or current_branch)
-    plan_dir = safe_relative(args.plan_dir, "planRelativeDir")
+    plan_dir = safe_relative(args.plan_dir or detect_plan_dir(repo), "planRelativeDir")
     facts = [safe_relative(item, "projectFacts[]") for item in (args.fact if args.fact is not None else detect_facts(repo))]
     plan_template = safe_relative(
         args.plan_template if args.plan_template is not None else detect_plan_template(repo),
@@ -245,8 +288,12 @@ def configure(args: argparse.Namespace) -> tuple[dict[str, Any], Path, list[str]
     missing_skills = [name for names in skills.values() for name in names if not skill_exists(repo, name)]
     if missing_skills:
         warnings.append("Configured Skills are not currently discoverable: " + ", ".join(dict.fromkeys(missing_skills)))
-    if not docs.exists():
+    if not args.docs_root and detected_docs is None:
+        warnings.append(f"No existing docs root detected; using managed fallback: {docs}")
+    elif not docs.exists():
         warnings.append(f"docsRoot does not exist yet; the console will create it on startup: {docs}")
+    if not args.worktrees_root and detected_worktrees is None:
+        warnings.append(f"No existing Worktree root detected; using managed fallback: {worktrees}")
     profile = {
         "schemaVersion": 1,
         "id": project_id,

@@ -1,6 +1,6 @@
 # Project Flow Console
 
-> [本机部署指南与推荐目录结构](docs/local-deployment.md)
+> [本机部署指南与目录选择策略](docs/local-deployment.md)
 
 一个运行在本机的、多项目需求交付控制台。
 
@@ -97,7 +97,7 @@ ProjectFlowConsole/
 
 ## 5 分钟快速开始
 
-如果要把工具安装到另一台电脑，或需要规划主仓库、文档和 Worktree 的安全目录，请先阅读 [本机部署与推荐目录结构](docs/local-deployment.md)。
+如果要把工具安装到另一台电脑，或需要规划主仓库、文档和隔离执行目录，请先阅读 [本机部署与目录选择策略](docs/local-deployment.md)。现有项目无需移动；没有现成规范时才使用本机托管目录。
 
 ### 1. 获取代码
 
@@ -137,6 +137,7 @@ Skill 会先只读扫描：
 - `AGENTS.md`、工程手册与项目事实入口
 - `Doc/Skills`、`Docs/Skills`、`.codex/skills` 等 Skill 目录
 - 文档、Worktree、Plan 和 HTML 的建议路径
+- 已有目录规范与 `~/ProjectFlowData/<project-id>` 托管 fallback
 - 是否存在 `.gitmodules`
 
 它会先执行 dry-run。确认路径、分支和 Skill 链正确后，再生成：
