@@ -467,6 +467,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("selectedSummary.maxStageIndex !== task.maxStageIndex", app_js)
         self.assertIn("selectedSummary.activeJob !== task.activeJob", app_js)
         self.assertIn('selectedSummary.jobState !== (task.jobState || "idle")', app_js)
+        self.assertIn('selectedId === task?.id ? task?.execution?.phase || "" : ""', app_js)
         self.assertIn('selectedExecutionPhase !== (task.execution?.phase || "")', app_js)
         self.assertIn('const wasViewingCurrentStage = ui.module === "flow" && ui.viewStage === previousStage', app_js)
         self.assertIn("if (wasViewingCurrentStage && task.stage !== previousStage) ui.viewStage = task.stage", app_js)

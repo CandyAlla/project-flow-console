@@ -560,7 +560,7 @@
         const selectedId = task?.id;
         await refreshTaskSummaries();
         const selectedSummary = taskSummaries.find((item) => item.id === selectedId);
-        const selectedExecutionPhase = selectedSummary?.executionPhase ?? (selectedId === task?.id ? task.execution?.phase || "" : "");
+        const selectedExecutionPhase = selectedSummary?.executionPhase ?? (selectedId === task?.id ? task?.execution?.phase || "" : "");
         const selectedTaskChanged = selectedSummary && (
           selectedSummary.updatedAt !== task.updatedAt
           || selectedSummary.stage !== task.stage
