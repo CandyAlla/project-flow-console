@@ -95,6 +95,8 @@ ProjectFlowConsole/
 
 ## 5 分钟快速开始
 
+如果要把工具安装到另一台电脑，或需要规划主仓库、文档和 Worktree 的安全目录，请先阅读 [本机部署与推荐目录结构](docs/local-deployment.md)。
+
 ### 1. 获取代码
 
 ```bash
