@@ -1057,6 +1057,59 @@ def task_state(task: dict[str, Any]) -> str:
     return "attention"
 
 
+def ensure_flow_action_allowed(task: dict[str, Any], action: str, *, acceptance_fix: bool = False) -> None:
+    """Reject writes submitted from a completed flow stage.
+
+    The browser exposes completed stages for inspection, so every mutating flow
+    endpoint must also validate the persisted current stage. This keeps stale
+    tabs and repeated clicks from replaying an already completed operation.
+    """
+    stage = str(task.get("stage") or "input")
+    plan = task.get("plan") or {}
+    bugfix = task.get("bugfix") or {}
+    committed = bool((task.get("git") or {}).get("committed"))
+    allowed = False
+
+    if action == "discussion":
+        allowed = stage == "discuss"
+    elif action == "plan":
+        allowed = stage == "discuss" or (
+            stage == "plan" and plan.get("status") in {"error", "interrupted"}
+        )
+    elif action == "plan/approve":
+        allowed = stage == "plan" and not plan.get("approved")
+    elif action == "worktree":
+        allowed = stage == "worktree"
+    elif action == "execute":
+        bugfix_continue = bool(
+            stage == "bugfix"
+            and not committed
+            and bugfix.get("status") in {"running", "review"}
+        )
+        allowed = stage == "execute" or acceptance_fix or bugfix_continue
+    elif action == "verification":
+        allowed = stage == "verify" or (
+            stage == "bugfix" and not committed and bugfix.get("status") == "verify"
+        )
+    elif action in {"commit", "commit/confirm-manual"}:
+        allowed = (stage == "commit" and not committed) or (
+            stage == "bugfix" and not committed and bugfix.get("status") == "commit"
+        )
+    elif action == "bugfix":
+        # Older persisted tasks may have a stale pre-commit stage even though
+        # the confirmed commit is authoritative. Starting a Bug cycle repairs
+        # the stage to bugfix in prepare_bugfix_request.
+        allowed = committed
+
+    if allowed:
+        return
+    current_label = {
+        "input": "需求输入", "discuss": "讨论澄清", "plan": "Plan 验收", "worktree": "Worktree",
+        "execute": "执行", "verify": "人工验收", "commit": "Commit", "bugfix": "Bug 修复",
+    }.get(stage, stage)
+    raise WorkflowError(f"该流程阶段已完成，仅可回看；当前阶段是“{current_label}”，已拒绝重复操作。")
+
+
 def task_summary(task: dict[str, Any]) -> dict[str, Any]:
     worktree = task.get("worktree", {})
     memory = task.get("agentMemory") or build_agent_memory(task)
@@ -3117,6 +3170,7 @@ def commit_task(task_id: str, message: str, expected_digest: str) -> str:
 
 def _commit_task(task_id: str, message: str, expected_digest: str) -> str:
     task = get_task_copy(task_id)
+    ensure_flow_action_allowed(task, "commit")
     if not task.get("verification", {}).get("approved"):
         raise WorkflowError("人工验收尚未确认通过。")
     worktree = Path(task["worktree"]["path"])
@@ -3166,6 +3220,7 @@ def confirm_manual_commit(task_id: str, expected_digest: str) -> str:
     """Record an existing user-created commit without writing to Git."""
     with GIT_WRITE_LOCK:
         task = get_task_copy(task_id)
+        ensure_flow_action_allowed(task, "commit/confirm-manual")
         if not task.get("verification", {}).get("approved"):
             raise WorkflowError("人工验收尚未确认通过。")
         if task.get("activeJob"):
@@ -3663,6 +3718,7 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "task": get_task_copy(task_id)}, HTTPStatus.ACCEPTED)
                 return
             if action == "discussion":
+                ensure_flow_action_allowed(task, action)
                 answers = payload.get("answers") or {}
                 note = str(payload.get("note") or "").strip()
                 if not isinstance(answers, dict):
@@ -3671,6 +3727,7 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "task": get_task_copy(task_id)}, HTTPStatus.ACCEPTED)
                 return
             if action == "plan":
+                ensure_flow_action_allowed(task, action)
                 answers = payload.get("answers") or {}
                 note = str(payload.get("note") or "").strip()
                 if not isinstance(answers, dict):
@@ -3679,10 +3736,14 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "task": get_task_copy(task_id)}, HTTPStatus.ACCEPTED)
                 return
             if action == "plan/approve":
+                ensure_flow_action_allowed(task, action)
                 if task["plan"].get("status") != "ready":
                     raise WorkflowError("Plan 尚未生成完成。")
                 preview = worktree_preview(task)
                 with mutate_task(task_id) as live:
+                    ensure_flow_action_allowed(live, action)
+                    if live["plan"].get("status") != "ready":
+                        raise WorkflowError("Plan 尚未生成完成。")
                     live["plan"]["approved"] = True
                     live["worktree"]["preview"] = safe_block(preview, 12000)
                     live["stage"] = "worktree"
@@ -3691,6 +3752,7 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "task": get_task_copy(task_id)})
                 return
             if action == "worktree":
+                ensure_flow_action_allowed(task, action)
                 if not task["plan"].get("approved"):
                     raise WorkflowError("Plan 尚未通过验收。")
                 launch_job(task_id, "worktree", lambda: worktree_job(task_id))
@@ -3707,6 +3769,7 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 reset_session = payload.get("resetSession") is True
                 retry_review_only = flow_mode == "standard" and should_retry_review_only(task, feedback, reset_session)
                 acceptance_fix = should_run_acceptance_fix(task, feedback, reset_session, bool(images))
+                ensure_flow_action_allowed(task, action, acceptance_fix=acceptance_fix)
                 if images and not acceptance_fix:
                     raise WorkflowError("图片附件只能用于人工验收后的定向返修。")
                 attachments = persist_feedback_images(task_id, images, "acceptance-fix") if acceptance_fix else []
@@ -3724,6 +3787,7 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "task": get_task_copy(task_id)}, HTTPStatus.ACCEPTED)
                 return
             if action == "bugfix":
+                ensure_flow_action_allowed(task, action)
                 flow_mode = str(payload.get("mode") or "standard")
                 if flow_mode not in {"fast", "standard"}:
                     raise WorkflowError("Bug 修复模式必须是 fast 或 standard。")
@@ -3746,16 +3810,19 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "task": cancel_task(task_id)}, HTTPStatus.ACCEPTED)
                 return
             if action == "verification":
+                ensure_flow_action_allowed(task, action)
                 checks = payload.get("checks")
                 note = str(payload.get("note") or "").strip()[:8000]
                 approve_manual_verification(task_id, checks, note)
                 self.send_json({"ok": True, "task": get_task_copy(task_id)})
                 return
             if action == "commit":
+                ensure_flow_action_allowed(task, action)
                 commit_id = commit_task(task_id, str(payload.get("message") or ""), str(payload.get("digest") or ""))
                 self.send_json({"ok": True, "commitId": commit_id, "task": get_task_copy(task_id)})
                 return
             if action == "commit/confirm-manual":
+                ensure_flow_action_allowed(task, action)
                 commit_id = confirm_manual_commit(task_id, str(payload.get("digest") or ""))
                 self.send_json({"ok": True, "commitId": commit_id, "task": get_task_copy(task_id)})
                 return

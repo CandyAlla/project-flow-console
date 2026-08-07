@@ -920,6 +920,69 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('const progressTitle = reviewing ? "Bug 修改已完成 · 正在 Code Review"', app_js)
         self.assertIn('${reviewing ? "停止 Code Review" : "停止当前修改"}', app_js)
 
+    def test_completed_flow_stage_ui_is_read_only(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("function isCompletedStageView", app_js)
+        self.assertIn("function activeFlowStageId", app_js)
+        self.assertIn("function lockCompletedStageView", app_js)
+        self.assertIn('ui.module === "flow" && isCompletedStage(stageId)', app_js)
+        self.assertIn('class="flow-stage-view ${completedStageView ? "completed-stage-view" : ""}"', app_js)
+        self.assertIn('if (completedStageView) lockCompletedStageView(stageContentEl)', app_js)
+        self.assertIn("已完成阶段，只读回看", app_js)
+        self.assertIn(".completed-stage-view .actions { display: none; }", index_html)
+        self.assertIn("已完成阶段仅可只读回看", index_html)
+
+    def test_flow_writes_are_rejected_outside_the_current_stage(self) -> None:
+        completed_task = {
+            "stage": "commit",
+            "plan": {"status": "ready", "approved": True},
+            "worktree": {"status": "ready"},
+            "execution": {"status": "complete"},
+            "verification": {"approved": True},
+            "git": {"committed": False},
+            "bugfix": {"status": "idle"},
+        }
+        for action in ("discussion", "plan", "plan/approve", "worktree", "execute", "bugfix"):
+            with self.subTest(action=action), self.assertRaisesRegex(server.WorkflowError, "仅可回看"):
+                server.ensure_flow_action_allowed(completed_task, action)
+
+        server.ensure_flow_action_allowed(completed_task, "commit")
+
+        delivered_task = {
+            **completed_task,
+            "stage": "bugfix",
+            "git": {"committed": True},
+            "bugfix": {"status": "complete"},
+        }
+        server.ensure_flow_action_allowed(delivered_task, "bugfix")
+        with self.assertRaisesRegex(server.WorkflowError, "拒绝重复操作"):
+            server.ensure_flow_action_allowed(delivered_task, "execute")
+        with self.assertRaisesRegex(server.WorkflowError, "拒绝重复操作"):
+            server.ensure_flow_action_allowed(delivered_task, "commit")
+
+    def test_flow_stage_guard_preserves_retries_and_acceptance_fixes(self) -> None:
+        plan_retry = {
+            "stage": "plan", "plan": {"status": "error", "approved": False},
+            "git": {"committed": False}, "bugfix": {"status": "idle"},
+        }
+        server.ensure_flow_action_allowed(plan_retry, "plan")
+
+        verification = {
+            "stage": "verify", "plan": {"status": "ready", "approved": True},
+            "git": {"committed": False}, "bugfix": {"status": "idle"},
+        }
+        with self.assertRaisesRegex(server.WorkflowError, "仅可回看"):
+            server.ensure_flow_action_allowed(verification, "execute")
+        server.ensure_flow_action_allowed(verification, "execute", acceptance_fix=True)
+
+        bugfix_review = {
+            "stage": "bugfix", "plan": {"status": "ready", "approved": True},
+            "git": {"committed": False}, "bugfix": {"status": "review"},
+        }
+        server.ensure_flow_action_allowed(bugfix_review, "execute")
+
     def test_archive_and_restore_task_without_touching_execution_assets(self) -> None:
         task_id = self.seed_task()
         external_plan = self.root / "plan.md"

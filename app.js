@@ -597,6 +597,41 @@
     return stages[Math.min(requested, max)]?.id || task.stage;
   }
 
+  function activeFlowStageId() {
+    if (!task) return "input";
+    return task.git?.committed ? "bugfix" : task.stage;
+  }
+
+  function isCompletedStage(stageId) {
+    if (!task) return false;
+    const index = stages.findIndex((item) => item.id === stageId);
+    const furthest = Math.max(0, Number(task.maxStageIndex) || 0);
+    return index >= 0 && (index < furthest || (stageId === "commit" && Boolean(task.git?.committed)));
+  }
+
+  function isCompletedStageView(stageId = currentStageId()) {
+    return Boolean(task && ui.module === "flow" && isCompletedStage(stageId));
+  }
+
+  function lockCompletedStageView(container) {
+    if (!container) return;
+    container.querySelectorAll("input, textarea, select").forEach((control) => {
+      control.disabled = true;
+      control.setAttribute("aria-disabled", "true");
+    });
+    container.querySelectorAll("button").forEach((button) => {
+      const viewOnly = button.matches("[data-readonly-view], [data-plan-view], [data-copy-log], [data-manual-case-jump]");
+      if (!viewOnly) {
+        button.disabled = true;
+        button.setAttribute("aria-disabled", "true");
+      }
+    });
+    container.querySelectorAll("[contenteditable='true']").forEach((control) => {
+      control.setAttribute("contenteditable", "false");
+      control.setAttribute("aria-readonly", "true");
+    });
+  }
+
   function statusText() {
     if (!health?.ok) return "等待启动本地服务";
     if (!task) return "等待输入需求";
@@ -633,16 +668,28 @@
     renderShell();
     const stageId = currentStageId();
     const askActive = Boolean(task && ui.module === "ask");
+    const completedStageView = !askActive && isCompletedStageView(stageId);
     const meta = askActive ? askModule : stages.find((item) => item.id === stageId) || stages[0];
-    stageTitleEl.textContent = askActive ? meta.title : task?.git?.committed && stageId === "commit" ? "Commit 已完成" : meta.title;
-    stageDescriptionEl.textContent = meta.description;
+    stageTitleEl.textContent = completedStageView
+      ? `${meta.title} · 只读回看`
+      : askActive ? meta.title : task?.git?.committed && stageId === "commit" ? "Commit 已完成" : meta.title;
+    stageDescriptionEl.textContent = completedStageView
+      ? "该阶段已经完成，仅展示当时结果；所有会改变流程或重复执行的操作均已锁定。"
+      : meta.description;
     const renderers = { input: renderInput, discuss: renderDiscuss, plan: renderPlan, worktree: renderWorktree, execute: renderExecute, verify: renderVerify, commit: renderCommit, bugfix: renderBugfix };
     const archiveNotice = task?.archivedAt
       ? callout(`<strong>该任务已归档。</strong> 当前仅供回看；请从左侧归档列表恢复后再继续执行。`, "warning")
       : "";
-    stageContentEl.innerHTML = `${archiveNotice}${renderCodexAppPanel()}${renderAgentMemory()}${askActive ? renderAsk() : renderers[stageId]()}`;
+    const activeStageId = activeFlowStageId();
+    const currentMeta = stages.find((item) => item.id === activeStageId);
+    const completedNotice = completedStageView
+      ? `<section class="completed-stage-notice">${callout(`<strong>已完成阶段，只读回看。</strong> 为避免误判进度或重复执行，本阶段的输入和执行入口已锁定。当前进度：${escapeHTML(currentMeta?.label || activeStageId)}。`, "ok")}<button class="primary" id="goActiveStage" data-readonly-view type="button">返回当前阶段</button></section>`
+      : "";
+    const stageView = askActive ? renderAsk() : `<div class="flow-stage-view ${completedStageView ? "completed-stage-view" : ""}">${renderers[stageId]()}</div>`;
+    stageContentEl.innerHTML = `${archiveNotice}${renderCodexAppPanel()}${renderAgentMemory()}${completedNotice}${stageView}`;
     document.querySelector(".app-shell")?.classList.toggle("verification-layout-active", Boolean(stageContentEl.querySelector(".verification-case-layout")));
     attachHandlers(askActive ? "ask" : stageId);
+    if (completedStageView) lockCompletedStageView(stageContentEl);
     if (task?.archivedAt) {
       stageContentEl.querySelectorAll("button, input, textarea, select").forEach((control) => { control.disabled = true; });
     }
@@ -740,10 +787,11 @@
     const furthest = task ? Math.max(0, Number(task.maxStageIndex) || 0) : 0;
     const flowSteps = stages.map((item, index) => {
       const reached = index <= furthest;
-      const completed = task ? index < furthest || (item.id === "commit" && task.git?.committed) : false;
+      const completed = isCompletedStage(item.id);
       const active = ui.module !== "ask" && index === current;
       const cls = `${completed ? "completed" : ""} ${active ? "current" : ""}`.trim();
-      return `<button type="button" class="step ${cls}" data-stage-jump="${item.id}" ${reached ? "" : "disabled"} ${active ? 'aria-current="step"' : ""}><span class="step-number">${completed ? "✓" : index + 1}</span><span class="step-label">${item.label}</span></button>`;
+      const title = completed ? "已完成，仅供只读回看" : active ? "当前阶段" : reached ? "已到达" : "尚未到达";
+      return `<button type="button" class="step ${cls}" data-stage-jump="${item.id}" ${reached ? "" : "disabled"} ${active ? 'aria-current="step"' : ""} title="${title}"><span class="step-number">${completed ? "✓" : index + 1}</span><span class="step-label">${item.label}</span>${completed ? '<span class="step-state">只读</span>' : ""}</button>`;
     }).join("");
     const askStep = `<div class="ask-module-nav"><button type="button" class="step ask-step ${ui.module === "ask" ? "current" : ""}" data-module-jump="ask" ${task ? "" : "disabled"} ${ui.module === "ask" ? 'aria-current="page"' : ""}><span class="step-number">?</span><span class="step-label">Ask · 只读问答</span></button><small>不改变流程阶段</small></div>`;
     stepsEl.innerHTML = `${flowSteps}${askStep}`;
@@ -1184,6 +1232,9 @@
     const reviewVerdict = task.execution.review?.verdict;
     const reviewLabel = reviewVerdict === "pass" ? "独立 Review 通过" : reviewVerdict === "skipped" ? "快速自检完成（未独立 Review）" : "请查看执行阶段";
     const cases = result.manual_cases?.length ? result.manual_cases : [{ title: "主流程", steps: "按 Plan 执行一次完整主流程。", expected: "结果与验收口径一致。" }];
+    if (!inBugfix && isCompletedStageView("verify") && task.verification?.approved && Array.isArray(task.verification.checks)) {
+      ui.checks = task.verification.checks.map(Boolean);
+    }
     while (ui.checks.length < cases.length) ui.checks.push(false);
     ui.checks = ui.checks.slice(0, cases.length);
     const requiredIndexes = requiredManualIndexes(cases);
@@ -1414,7 +1465,9 @@
     on("returnToDiscuss", "click", () => { ui.viewStage = "discuss"; render(); });
     on("backToPlan", "click", () => { ui.viewStage = "plan"; render(); });
     on("backToVerify", "click", () => { ui.viewStage = "verify"; render(); });
-    on("goCurrentStage", "click", () => { ui.viewStage = task.stage; render(); });
+    const goToActiveStage = () => { ui.viewStage = activeFlowStageId(); render(); };
+    on("goActiveStage", "click", goToActiveStage);
+    on("goCurrentStage", "click", goToActiveStage);
     ["taskTitle", "sourceText", "existingDocumentPath", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage", "askQuestion"].forEach((id) => on(id, "input", captureVisibleFields));
     on("sourceUrl", "input", (event) => {
       captureVisibleFields();

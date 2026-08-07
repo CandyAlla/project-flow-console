@@ -322,6 +322,17 @@
     }
 
     .step-label { position: relative; z-index: 1; min-width: 0; }
+    .step-state {
+      position: relative;
+      z-index: 1;
+      margin-left: auto;
+      padding: 2px 6px;
+      border: 1px solid #a9d3bd;
+      border-radius: 999px;
+      color: #327353;
+      font-size: .67rem;
+      font-weight: 700;
+    }
     .step.completed { color: var(--ok); }
     .step.completed .step-number { border-color: var(--ok); background: var(--ok-soft); }
     .step.completed:not(:last-child)::after { background: #8fc8ae; }
@@ -356,6 +367,24 @@
       overflow: hidden;
       border: 1px solid var(--line);
       background: var(--surface);
+    }
+
+    .completed-stage-notice {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+    .completed-stage-notice .callout { flex: 1; margin: 0; }
+    .completed-stage-notice > button { flex: 0 0 auto; }
+    .completed-stage-view .actions { display: none; }
+    .completed-stage-view :is(input, textarea, select):disabled {
+      cursor: not-allowed;
+      opacity: .72;
+    }
+    @media (max-width: 720px) {
+      .completed-stage-notice { align-items: stretch; flex-direction: column; }
     }
 
     .workspace-header {
@@ -1023,7 +1052,7 @@
     <aside class="workflow-sidebar" aria-label="需求流程导航">
       <div class="sidebar-head">
         <strong>需求流程</strong>
-        <span>点击已到达阶段回看</span>
+        <span>已完成阶段仅可只读回看</span>
       </div>
       <nav aria-label="需求流程进度">
         <div class="steps" id="steps"></div>
