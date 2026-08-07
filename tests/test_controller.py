@@ -585,6 +585,84 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(Path(second_paths["htmlAbsolute"]), html_root / f"{date}-复活提示动画-2-逻辑流程图.html")
         self.assertNotIn("task-", second_paths["planRelative"])
 
+    def test_quick_change_skips_discussion_and_full_plan_agent(self) -> None:
+        worktrees_root = self.root / "worktrees"
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", worktrees_root), \
+                mock.patch.object(server, "launch_job") as launch_job, \
+                mock.patch.object(server, "worktree_preview", return_value="dry-run ok") as preview:
+            task = server.create_task({
+                "title": "弹幕时间调整",
+                "workflowMode": "quick",
+                "sourceType": "paste",
+                "sourceText": "把弹幕中间停留时间从 2 秒改为 1 秒，不调整移动路径。",
+                "baseBranch": "main",
+            })
+
+        launch_job.assert_not_called()
+        preview.assert_called_once()
+        self.assertEqual(task["intake"]["mode"], "quick_change")
+        self.assertEqual(task["stage"], "worktree")
+        self.assertEqual(task["maxStageIndex"], server.STAGE_INDEX["worktree"])
+        self.assertEqual(task["discussion"]["status"], "skipped")
+        self.assertEqual(task["plan"]["status"], "ready")
+        self.assertTrue(task["plan"]["approved"])
+        self.assertEqual(task["worktree"]["status"], "validated")
+        self.assertEqual(task["worktree"]["preview"], "dry-run ok")
+        self.assertEqual(task["paths"]["htmlUrl"], "")
+        self.assertIn("弹幕中间停留时间", task["plan"]["markdown"])
+        self.assertTrue(Path(task["plan"]["draftPath"]).is_file())
+        self.assertIn("轻量执行单（跳过独立 Plan Agent）", task["agentMemory"]["completedSteps"])
+        self.assertIn("轻量执行单已由用户输入确认", task["agentMemory"]["completedSteps"])
+
+    def test_quick_change_rejects_indirect_or_oversized_sources(self) -> None:
+        with self.assertRaisesRegex(server.WorkflowError, "只支持明确的粘贴需求"):
+            server.create_task({
+                "title": "链接需求",
+                "workflowMode": "quick",
+                "sourceType": "link",
+                "sourceUrl": "https://example.com/requirement",
+            })
+
+        with self.assertRaisesRegex(server.WorkflowError, "不能超过 12000"):
+            server.create_task({
+                "title": "过长需求",
+                "workflowMode": "quick",
+                "sourceType": "paste",
+                "sourceText": "x" * (server.MAX_QUICK_SOURCE_TEXT + 1),
+            })
+
+    def test_quick_change_binds_local_execution_sheet_to_new_worktree(self) -> None:
+        worktrees_root = self.root / "quick-worktrees"
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", worktrees_root), \
+                mock.patch.object(server, "launch_job"):
+            task = server.create_task({
+                "title": "Local Timer Tweak",
+                "workflowMode": "quick",
+                "sourceType": "paste",
+                "sourceText": "Change the local timer from two seconds to one second.",
+                "baseBranch": "main",
+            })
+            server._worktree_job(task["id"])
+
+        updated = server.get_task_copy(task["id"])
+        plan_path = Path(updated["plan"]["finalPath"])
+        self.assertEqual(updated["stage"], "execute")
+        self.assertEqual(updated["worktree"]["status"], "ready")
+        self.assertTrue(plan_path.is_file())
+        self.assertTrue(plan_path.is_relative_to(Path(updated["worktree"]["path"])))
+        self.assertIn("Change the local timer", plan_path.read_text(encoding="utf-8"))
+
+    def test_standard_requirement_is_default_and_quick_change_remains_available(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('workflowMode: "standard"', app_js)
+        self.assertLess(app_js.index('data-workflow-mode="standard"'), app_js.index('data-workflow-mode="quick"'))
+        self.assertIn('data-workflow-mode="quick"', app_js)
+        self.assertIn('data-workflow-mode="standard"', app_js)
+        self.assertIn("跳过 discussion、完整 Plan Agent 和 HTML", app_js)
+        self.assertIn("workflowMode: ui.workflowMode", app_js)
+
     def test_semantic_worktree_slug_rejects_generic_names(self) -> None:
         for slug in ("v2", "feature-v2", "task-feature-v2"):
             with self.subTest(slug=slug), self.assertRaisesRegex(server.WorkflowError, "Worktree 英文名"):

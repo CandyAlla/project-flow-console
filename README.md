@@ -6,7 +6,7 @@
 
 它通过 Project Profile 适配不同 Git 项目，把下面这些原本散落在对话、终端和文档里的步骤，收拢成一条可恢复、可人工审批的工作流：
 
-> 需求输入 → 只读讨论 → Plan / HTML 验收 → Git Worktree → 快速修改或标准执行 → 人工验收 → Commit → Bug 返修
+> 需求输入 → 轻量执行单或完整讨论 / Plan → Git Worktree → 快速修改或标准执行 → 人工验收 → Commit → Bug 返修
 
 每条任务还提供独立的 **Ask · 只读问答** 模块，可以随时询问当前实现、状态来源、相关文件和修改影响；Ask 不属于流程阶段，不会修改文件或改变任务状态。
 
@@ -36,7 +36,8 @@
 
 - 输入网页链接、上传文档或直接粘贴需求内容。
 - 新需求的 Worktree 基准从 Profile 主仓库实时读取，以分组下拉框展示本地分支和已有远端跟踪分支；不会自动 Fetch。
-- 先运行只读 discussion / ask-first，再生成执行 Plan。
+- 明确的小改动可选“轻量直改”，本地生成最小执行单并跳过 discussion、完整 Plan Agent 和逻辑 HTML。
+- 模糊、跨模块或高风险需求保留只读 discussion / ask-first，再生成完整执行 Plan。
 - 同时输出 Markdown Plan 和自包含的逻辑验收 HTML。
 - 创建 Worktree 前先展示真实 dry-run；也可以接入已有 Worktree。
 - 每个需求可绑定一个持久 Codex App Thread，通过 `codex://threads/<thread-id>` 打开，并可断开连接或切换到新聊天。
@@ -212,8 +213,8 @@ My Project Project Flow: http://127.0.0.1:4318/
 | 阶段 | 发生什么 | 写入边界 |
 |---|---|---|
 | 需求输入 | 输入链接、文件、正文，或接入已有文档和 Worktree | 上传文件仅进入本地任务目录 |
-| 讨论澄清 | Codex 读取项目事实并提出 1–3 个高返工问题 | 严格只读 |
-| Plan 验收 | 生成 Markdown Plan 和逻辑验收 HTML | 服务落地草案，不实施代码 |
+| 讨论澄清 | 标准需求由 Codex 读取项目事实并提出 1–3 个高返工问题；轻量直改跳过 | 严格只读 |
+| Plan 验收 | 标准需求生成 Markdown Plan 和逻辑 HTML；轻量直改本地生成最小执行单 | 服务落地草案，不实施代码 |
 | Worktree | 先预览，再创建或绑定隔离 Worktree | 需要单独点击批准 |
 | 执行 | 在 Worktree 内执行 Plan 和项目 Skill 链 | 不自动 Commit、Push、Merge |
 | 人工验收 | 展示最小验证步骤、详细用例和验收日志；问题反馈可填写文字或附截图 | 用户逐项确认 P0 / 必测项；截图仅进入任务运行目录 |
@@ -222,6 +223,17 @@ My Project Project Flow: http://127.0.0.1:4318/
 | Ask | 基于当前任务、Plan、持久记忆和 Worktree 回答实现问题 | 严格只读，不修改文件，不改变流程阶段 |
 
 任务在后台运行时可以切换查看其他需求。服务重启后，进行中的操作会标记为中断，已有文档和 Worktree 改动会保留，可从对应阶段重试。
+
+## 轻量直改与标准需求
+
+新建任务时先选择需求处理方式：
+
+| 需求处理方式 | Codex 前置轮次 | 产物 | 适合场景 |
+|---|---:|---|---|
+| 标准需求（默认） | discussion + Plan | 完整 Plan Markdown 与逻辑验收 HTML | 链接/文档输入、方案有分支、跨模块或高风险需求 |
+| 轻量直改 | 0 | 根据粘贴内容本地生成最小 Markdown 执行单 | 参数、文案、局部 UI 和边界明确的小改动 |
+
+轻量直改只接受最多 12000 字符的粘贴内容。创建任务时不会启动 Codex，而是直接展示 Worktree dry-run；确认创建 Worktree 后，再用快速执行模式启动一次持久 App Thread 完成修改与自检。它仍保留 Worktree 隔离、人工验收、Commit 指纹校验和不自动 Push/Merge 的边界。
 
 ## Codex App 联动与两种执行模式
 
@@ -260,10 +272,10 @@ task.app.cwd
 
 已有 `.runtime`、任务、Worktree 以及 discussion / execution / review / ask session 会在加载时兼容迁移；不使用快速模式时，原有标准流程行为保持不变。
 
-快速 Turn 默认最长 360 秒，可在启动前调整为 120–900 秒：
+快速 Turn 默认最长 600 秒，可在启动前调整为 120–900 秒。这样可避免接近 6 分钟的有效修改被硬中断后整轮重试；页面仍可随时手动停止：
 
 ```bash
-PROJECT_FLOW_QUICK_TIMEOUT=480 \
+PROJECT_FLOW_QUICK_TIMEOUT=600 \
 PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" \
 python3 server.py
 ```
@@ -460,7 +472,7 @@ python3 -m py_compile \
 
 ### 快速模式为什么更快？
 
-它复用当前需求的持久 App Thread，并把实现和自检合并为一轮，不再等待第二个独立 Review。人工验收和 Commit 门禁仍然保留；共享逻辑或高风险改动建议切换到标准流程。
+平台现在有两层提速：新建时选择“轻量直改”，可省去 discussion 和完整 Plan/HTML 两个前置 Agent 轮次；执行时选择“快速修改”，会复用当前需求的持久 App Thread，把实现和自检合并为一轮，不再等待第二个独立 Review。人工验收和 Commit 门禁仍然保留；共享逻辑或高风险改动建议使用标准需求与标准执行。
 
 ### 不打开 Codex App 还能使用吗？
 

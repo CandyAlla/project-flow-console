@@ -29,6 +29,7 @@
     module: "flow",
     viewStage: "input",
     intakeMode: "new",
+    workflowMode: "standard",
     sourceType: "link",
     title: "",
     sourceUrl: "",
@@ -122,7 +123,7 @@
   });
 
   const taskViewKeys = [
-    "module", "viewStage", "intakeMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
+    "module", "viewStage", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
     "existingDocumentPath", "existingWorktreePath",
     "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
   ];
@@ -763,7 +764,7 @@
     const visible = ui.showArchived ? archivedTasks : groups[activeFilter];
     taskListEl.innerHTML = visible.length ? visible.map((item) => {
       const stage = stages.find((entry) => entry.id === item.stage)?.label || item.stage;
-      const intake = ({ existing_requirement: "已有文档", existing_plan: "已有 Plan" })[item.intakeMode];
+      const intake = ({ quick_change: "轻量直改", existing_requirement: "已有文档", existing_plan: "已有 Plan" })[item.intakeMode];
       const selected = item.id === task?.id;
       const action = item.archivedAt ? "restore" : "archive";
       const actionLabel = item.archivedAt ? "恢复" : "归档";
@@ -968,6 +969,9 @@
     const larkCliReady = Boolean(larkCli.ready);
     const selectedLarkReader = ui.larkReader === "lark_cli" && larkCliReady ? "lark_cli" : "chrome_mcp";
     ui.larkReader = selectedLarkReader;
+    const quickWorkflow = ui.workflowMode === "quick";
+    ui.workflowMode = quickWorkflow ? "quick" : "standard";
+    if (quickWorkflow) ui.sourceType = "paste";
     const larkReaderOptions = `<div id="larkReaderOptions" class="reader-mode-section" ${isLarkLink(ui.sourceUrl) ? "" : "hidden"}><div class="field-label-row"><span>飞书读取方式</span><span class="hint">仅对飞书 / Lark 链接生效</span></div>
       <div class="execution-mode-grid reader-mode-grid" role="radiogroup" aria-label="选择飞书读取方式">
         <label class="execution-mode-card ${selectedLarkReader === "chrome_mcp" ? "selected" : ""}"><input type="radio" name="larkReader" value="chrome_mcp" data-lark-reader="chrome_mcp" ${selectedLarkReader === "chrome_mcp" ? "checked" : ""}><span class="mode-card-head"><strong>Chrome MCP</strong><em>默认</em></span><span>复用当前 Chrome 登录态打开网页，只读提取需求内容。</span><small>无需配置飞书应用；页面结构变化时可能受影响</small></label>
@@ -998,8 +1002,14 @@
     const branchHint = branchLoadError
       ? `读取主仓库分支失败：${escapeHTML(branchLoadError)} 当前保留 Profile 默认值；可点击刷新重试。`
       : `来自主仓库 ${escapeHTML(health?.paths?.repo || "repoRoot")}：${localBranches.length} 个本地分支、${remoteBranches.length} 个远端跟踪分支；不自动 Fetch，创建前会执行真实 dry-run。`;
-    const newFields = `<div class="field"><div class="field-label-row"><label for="baseBranch">Worktree 基准</label><button class="small" id="refreshBranches" type="button" ${busy ? "disabled" : ""}>刷新分支</button></div><select id="baseBranch" class="mono">${branchOptions}</select><span class="hint">${branchHint}</span></div>
-      <div class="field"><span>需求来源</span><div class="source-tabs" role="group" aria-label="选择需求来源">${["link", "file", "paste"].map((id) => `<button type="button" class="${ui.sourceType === id ? "active" : ""}" data-source-type="${id}">${({ link: "粘贴链接", file: "上传文档", paste: "粘贴内容" })[id]}</button>`).join("")}</div><div class="source-panel">${panels[ui.sourceType]}</div></div>`;
+    const workflowSelector = `<div class="field"><div class="field-label-row"><span>处理方式</span><span class="hint">按需求风险选择</span></div><div class="execution-mode-grid" role="radiogroup" aria-label="选择需求处理方式">
+      <label class="execution-mode-card ${quickWorkflow ? "" : "selected"}"><input type="radio" name="workflowMode" value="standard" data-workflow-mode="standard" ${quickWorkflow ? "" : "checked"}><span class="mode-card-head"><strong>标准需求</strong><em>默认</em></span><span>保留需求澄清、Solution Plan、逻辑 HTML 和可选独立 Review。</span><small>适合链接/文档、规则不明确、跨模块或高风险改动</small></label>
+      <label class="execution-mode-card ${quickWorkflow ? "selected" : ""}"><input type="radio" name="workflowMode" value="quick" data-workflow-mode="quick" ${quickWorkflow ? "checked" : ""}><span class="mode-card-head"><strong>轻量直改</strong><em>可选</em></span><span>粘贴明确修改，跳过 discussion、完整 Plan Agent 和 HTML，直接准备 Worktree。</span><small>执行时复用持久 Thread，一轮完成修改与自检</small></label>
+    </div></div>`;
+    const quickSource = `<div class="field"><label for="sourceText">明确修改内容</label><textarea id="sourceText" maxlength="12000" placeholder="例如：把弹幕停留时间从 2 秒改为 1 秒；只改现有配置与直接相关测试，不调整动画路径。">${escapeHTML(ui.sourceText)}</textarea><span class="hint">最多 12000 字符。提交后本地生成最小执行单，不先调用 Codex；链接、长文档或存在方案分歧时请选标准需求。</span></div>`;
+    const standardSource = `<div class="field"><span>需求来源</span><div class="source-tabs" role="group" aria-label="选择需求来源">${["link", "file", "paste"].map((id) => `<button type="button" class="${ui.sourceType === id ? "active" : ""}" data-source-type="${id}">${({ link: "粘贴链接", file: "上传文档", paste: "粘贴内容" })[id]}</button>`).join("")}</div><div class="source-panel">${panels[ui.sourceType]}</div></div>`;
+    const newFields = `${workflowSelector}<div class="field"><div class="field-label-row"><label for="baseBranch">Worktree 基准</label><button class="small" id="refreshBranches" type="button" ${busy ? "disabled" : ""}>刷新分支</button></div><select id="baseBranch" class="mono">${branchOptions}</select><span class="hint">${branchHint}</span></div>
+      ${quickWorkflow ? quickSource : standardSource}`;
     const isPlan = ui.intakeMode === "existing_plan";
     const existingFields = `${callout(isPlan
       ? `<strong>直接进入执行。</strong> Plan 必须是 Worktree 内或配置的文档目录 <code>${escapeHTML(health?.paths?.docs || "docsRoot")}</code> 内的 UTF-8 Markdown；本步只校验，不运行 Codex。`
@@ -1007,14 +1017,18 @@
       <div class="field"><label for="existingDocumentPath">${isPlan ? "执行 Plan 绝对路径" : "需求文档绝对路径"}</label><input id="existingDocumentPath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.workspace || "/absolute/project/path")}/${isPlan ? "plan.md" : "requirement.md"}" value="${escapeHTML(ui.existingDocumentPath)}"><span class="hint">${isPlan ? "仅支持 .md，最大 240 KB。" : "支持 md、txt、pdf、doc、docx、html，文件需位于 Profile 允许的项目路径。"}</span></div>
       <div class="field"><label for="existingWorktreePath">已有 Worktree 绝对路径</label><input id="existingWorktreePath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.worktrees || "/absolute/worktrees")}/${escapeHTML(health?.project?.worktreeNamePrefix || "Project")}_feature" value="${escapeHTML(ui.existingWorktreePath)}"><span class="hint">必须是当前 Profile 主仓库的独立 linked worktree；会校验 Git 根目录、分支和未完成操作，不切换分支。</span></div>`;
     const intro = ui.intakeMode === "new"
-      ? "<strong>新需求流程。</strong> 下一步只启动只读讨论，不写文档、不改代码。"
+      ? quickWorkflow
+        ? "<strong>轻量直改。</strong> 提交后不运行 discussion 或完整 Plan Agent，只生成最小执行单并展示 Worktree dry-run。"
+        : "<strong>标准需求流程。</strong> 下一步只启动只读讨论，不写文档、不改代码。"
       : isPlan
         ? "<strong>接入已有执行资产。</strong> 校验通过后直接等待你点击“执行 Plan”。"
         : "<strong>接入已有需求资产。</strong> 校验通过后从只读讨论开始，并复用填写的 Worktree。";
-    const actionHint = ui.intakeMode === "new" || ui.intakeMode === "existing_requirement"
-      ? "需求讨论使用 read-only sandbox；接入已有路径前先做本地只读校验。"
+    const actionHint = ui.intakeMode === "new"
+      ? quickWorkflow ? "本步仅生成本地执行单并做只读 dry-run；下一步仍需单独确认创建 Worktree。" : "需求讨论使用 read-only sandbox。"
+      : ui.intakeMode === "existing_requirement"
+        ? "需求讨论使用 read-only sandbox；接入已有路径前先做本地只读校验。"
       : "这一步不运行 Codex、不写文件，只校验 Plan 与 Worktree。";
-    const actionLabel = ui.intakeMode === "new" ? "开始梳理需求" : isPlan ? "接入并进入执行" : "接入并开始梳理";
+    const actionLabel = ui.intakeMode === "new" ? quickWorkflow ? "创建轻量直改任务" : "开始梳理需求" : isPlan ? "接入并进入执行" : "接入并开始梳理";
     return `<section class="section">${warning || callout(intro, "ok")}</section>
       <section class="section"><div class="field"><span>任务接入方式</span><div class="source-tabs" role="group" aria-label="选择任务接入方式">${intakeOptions.map((item) => `<button type="button" class="${ui.intakeMode === item.id ? "active" : ""}" data-intake-mode="${item.id}">${item.label}</button>`).join("")}</div></div>
       <div class="field"><label for="taskTitle">需求名称</label><input id="taskTitle" type="text" placeholder="例如：新手免费提示引导" value="${escapeHTML(ui.title)}"></div>
@@ -1087,6 +1101,11 @@
         <section class="section"><div class="path-list"><div class="path-row"><span>Plan</span><strong class="mono">${escapeHTML(section.finalPath)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div><div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(task.worktree.branch)}</strong></div></div><div class="preview"><pre>${escapeHTML(section.markdown)}</pre></div></section>
         <div class="actions"><div class="actions-secondary"><span class="hint">已有 Plan 已标记为批准；不会在此页面修改文件。</span></div><div class="actions-primary"><button class="primary" id="goCurrentStage">返回执行阶段</button></div></div>${eventLogDetails()}`;
     }
+    if (task.intake?.mode === "quick_change") {
+      return `<section class="section">${callout("<strong>这是轻量执行单。</strong> 内容直接来自你粘贴的明确修改；没有运行 discussion、完整 Plan Agent 或逻辑 HTML 生成。", "warning")}</section>
+        <section class="section"><div class="summary-grid"><div class="summary-item"><span>执行摘要</span><strong>${escapeHTML(result.summary)}</strong></div><div class="summary-item"><span>风险边界</span><strong>跳过独立方案分析与 Review</strong></div></div><div class="preview"><pre>${escapeHTML(section.markdown)}</pre></div></section>
+        <div class="actions"><div class="actions-secondary"><span class="hint">如发现需求存在分支或影响范围不明确，请新建标准需求。</span></div><div class="actions-primary"><button class="primary" id="goCurrentStage">返回 Worktree 阶段</button></div></div>${eventLogDetails()}`;
+    }
     const logic = `<div class="callout ok"><p><strong>HTML 验收页已落地。</strong> <a href="${escapeHTML(section.htmlUrl)}" target="_blank" rel="noopener">在新窗口打开逻辑验收页</a></p></div><iframe title="逻辑验收 HTML" src="${escapeHTML(section.htmlUrl)}" style="width:100%;height:620px;margin-top:16px;border:1px solid var(--line);background:#fff"></iframe>`;
     const md = `<div class="preview"><pre>${escapeHTML(section.markdown)}</pre></div>`;
     const importedWorktree = task.intake?.mode === "existing_requirement";
@@ -1102,9 +1121,12 @@
     if (["queued", "running"].includes(section.status)) return renderProgress(section, imported ? "正在重新验证已有 Worktree 并绑定 Plan" : `git-worktree 正在创建${health?.capabilities?.initializeSubmodules ? "并初始化 Submodule" : ""}`);
     const retryHint = imported ? "未覆盖已有文件；请按错误信息处理后重试绑定。" : "如果目录已部分创建，再次点击会只接管本任务预期的路径和分支并重试 Submodule。";
     const error = ["error", "partial", "interrupted"].includes(section.status) ? callout(`<strong>Worktree 未完成：</strong>${escapeHTML(section.error)}<br>${retryHint}`, "danger") : "";
+    const quick = task.intake?.mode === "quick_change";
     const intro = imported
       ? "<strong>已有 Worktree 预检已完成。</strong> 不创建目录、不切换分支、不初始化 Submodule；点击后只把已批准 Plan 写入该 Worktree。"
-      : "<strong>创建前预检已完成。</strong> 未提交的主仓库改动不会复制到新 Worktree；不会 Fetch、切换主仓库分支、Push 或 Merge。";
+      : quick
+        ? "<strong>轻量执行单与 Worktree 预检已完成。</strong> 已跳过两次前置 Agent 等待；点击后只创建隔离 Worktree 并绑定执行单，不会开始改代码。"
+        : "<strong>创建前预检已完成。</strong> 未提交的主仓库改动不会复制到新 Worktree；不会 Fetch、切换主仓库分支、Push 或 Merge。";
     return `<section class="section">${error || callout(intro, "warning")}</section>
       <section class="section"><div class="path-list"><div class="path-row"><span>主仓库</span><strong class="mono">${escapeHTML(health?.paths?.repo)}</strong></div>${imported ? "" : `<div class="path-row"><span>基准</span><strong class="mono">${escapeHTML(section.base)}</strong></div>`}<div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(section.branch)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(section.path)}</strong></div><div class="path-row"><span>Plan 目标</span><strong class="mono">${escapeHTML(task.paths.planRelative)}</strong></div></div></section>
       <section class="section"><h3>${imported ? "已有 Worktree 校验" : "真实 dry-run"}</h3><div class="preview"><pre>${escapeHTML(section.preview || "等待预检输出")}</pre></div></section>
@@ -1131,7 +1153,7 @@
         : fast ? `Codex App 快速修改 · ${section.phase || "implementation"}` : `workmission 标准执行 · ${section.phase || "implementation"}`;
       const fixMinutes = Math.ceil(Number(health?.limits?.acceptanceFixSeconds || 480) / 60);
       const reviewMinutes = Math.ceil(Number(health?.limits?.acceptanceReviewSeconds || 300) / 60);
-      const quickMinutes = Math.ceil(Number(health?.limits?.quickExecutionSeconds || 360) / 60);
+      const quickMinutes = Math.ceil(Number(health?.limits?.quickExecutionSeconds || 600) / 60);
       const hint = fast
         ? `复用同一个 App Thread；本轮最长 ${quickMinutes} 分钟，不启动独立 Review。`
         : targeted ? `只处理验收备注；返修最长 ${fixMinutes} 分钟，定向 Review 最长 ${reviewMinutes} 分钟。` : "停止后保留已有实施结果与 Worktree 改动。";
@@ -1337,6 +1359,13 @@
     document.querySelectorAll("[data-intake-mode]").forEach((button) => button.addEventListener("click", () => {
       captureVisibleFields();
       ui.intakeMode = button.dataset.intakeMode;
+      render();
+    }));
+    document.querySelectorAll("[data-workflow-mode]").forEach((input) => input.addEventListener("change", () => {
+      captureVisibleFields();
+      ui.workflowMode = input.value === "standard" ? "standard" : "quick";
+      if (ui.workflowMode === "quick") ui.sourceType = "paste";
+      saveUi();
       render();
     }));
     document.querySelectorAll("[data-plan-view]").forEach((button) => button.addEventListener("click", () => {
@@ -1550,7 +1579,7 @@
     if (ui.sourceType === "paste" && !ui.sourceText.trim()) return showToast("请粘贴需求内容。", true);
     if (ui.sourceType === "file" && !selectedFile) return showToast("请重新选择要上传的策划文档。", true);
     await withAction(async () => {
-      const body = { title: ui.title.trim(), sourceType: ui.sourceType, sourceUrl: ui.sourceUrl.trim(), larkReader: ui.larkReader, sourceText: ui.sourceText, baseBranch: ui.baseBranch.trim() || health?.project?.defaultBaseBranch || "main" };
+      const body = { title: ui.title.trim(), workflowMode: ui.workflowMode, sourceType: ui.sourceType, sourceUrl: ui.sourceUrl.trim(), larkReader: ui.larkReader, sourceText: ui.sourceText, baseBranch: ui.baseBranch.trim() || health?.project?.defaultBaseBranch || "main" };
       if (selectedFile) {
         if (selectedFile.size > 8 * 1024 * 1024) throw new Error("上传文件不能超过 8 MB。");
         body.fileName = selectedFile.name;
@@ -1561,6 +1590,7 @@
       ui.customAnswers = {};
       ui.discussionNote = "";
       setTask(result.task, true);
+      if (result.task.intake?.mode === "quick_change") showToast("轻量执行单已生成；确认 dry-run 后即可创建 Worktree。" );
       if (result.task.source?.reader === "chrome_mcp") showToast("已交给 Chrome MCP 读取飞书需求；只读，不会编辑网页。" );
       if (result.task.source?.reader === "lark_cli") showToast("已交给官方 Lark CLI 读取飞书需求；只读，不会修改飞书内容。" );
     });
