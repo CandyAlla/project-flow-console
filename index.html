@@ -399,6 +399,122 @@
       padding: 28px clamp(20px, 4vw, 38px) 34px;
     }
 
+    .stage-section-anchor { scroll-margin-top: 22px; }
+
+    .section-navigator {
+      position: fixed;
+      z-index: 20;
+      top: 50%;
+      left: var(--section-nav-left, 12px);
+      display: flex;
+      align-items: center;
+      width: var(--section-nav-width, 18px);
+      transform: translateY(-50%);
+      transition: opacity .14s ease, visibility 0s linear 0s;
+    }
+
+    .section-navigator[hidden] { display: none; }
+    .section-navigator.is-outside-stage { opacity: 0; pointer-events: none; visibility: hidden; transition-delay: 0s, .14s; }
+
+    .section-navigator-toggle {
+      display: grid;
+      place-content: center;
+      gap: 5px;
+      width: 100%;
+      min-width: 0;
+      min-height: 76px;
+      padding: 0;
+      border-color: transparent;
+      border-radius: 8px;
+      background: rgb(255 255 255 / 46%);
+      opacity: .72;
+      transition: opacity .18s ease, background-color .18s ease, box-shadow .18s ease;
+    }
+
+    .section-navigator-toggle:hover:not(:disabled),
+    .section-navigator:is(:hover, .is-open) .section-navigator-toggle {
+      border-color: transparent;
+      background: rgb(255 255 255 / 90%);
+      box-shadow: inset 0 0 0 1px rgb(189 199 212 / 72%);
+      opacity: 1;
+    }
+
+    .section-navigator-line {
+      display: block;
+      width: 11px;
+      height: 2px;
+      border-radius: 999px;
+      background: #a6b0bd;
+      transition: width .16s ease, background-color .16s ease;
+    }
+
+    .section-navigator-line:nth-child(2n) { width: 8px; }
+    .section-navigator-line.is-active { width: 14px; height: 3px; background: var(--accent); }
+
+    .section-navigator-panel {
+      position: absolute;
+      top: 50%;
+      left: calc(100% + 4px);
+      width: min(332px, calc(100vw - 72px));
+      max-height: min(540px, calc(100vh - 36px));
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgb(255 255 255 / 98%);
+      box-shadow: 0 18px 48px rgb(23 32 42 / 18%);
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(-9px, -50%) scale(.985);
+      transform-origin: left center;
+      visibility: hidden;
+      transition: opacity .16s ease, transform .18s ease, visibility 0s linear .18s;
+    }
+
+    .section-navigator:is(:hover, .is-open) .section-navigator-panel {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translate(0, -50%) scale(1);
+      visibility: visible;
+      transition-delay: 0s;
+    }
+
+    .section-navigator-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 13px 14px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .section-navigator-head strong { font-size: .9rem; }
+    .section-navigator-head span { color: var(--muted); font-size: .72rem; }
+    .section-navigator-list { max-height: calc(min(540px, 100vh - 36px) - 48px); overflow-y: auto; padding: 6px; scrollbar-width: thin; }
+
+    .section-navigator-item {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
+      gap: 9px;
+      align-items: start;
+      width: 100%;
+      min-height: 52px;
+      padding: 8px 9px;
+      border-color: transparent;
+      background: transparent;
+      color: #556273;
+      font-size: .82rem;
+      text-align: left;
+      white-space: normal;
+    }
+
+    .section-navigator-item:hover:not(:disabled) { border-color: transparent; background: #f4f7fb; }
+    .section-navigator-item.is-active { box-shadow: inset 3px 0 0 var(--accent); background: var(--accent-soft); color: var(--accent-strong); }
+    .section-navigator-index { padding-top: 2px; color: #8995a4; font-size: .68rem; font-variant-numeric: tabular-nums; text-align: right; }
+    .section-navigator-item.is-active .section-navigator-index { color: var(--accent); }
+    .section-navigator-copy { display: grid; min-width: 0; }
+    .section-navigator-label { overflow: hidden; font-size: .82rem; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+    .section-navigator-snapshot { display: -webkit-box; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: .7rem; font-weight: 400; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+
     .codex-app-panel {
       display: flex;
       align-items: center;
@@ -955,7 +1071,7 @@
 
     @media (max-width: 760px) {
       .topbar { flex-direction: column; padding-top: 26px; }
-      .app-shell { grid-template-columns: 1fr; gap: 18px; padding-top: 20px; }
+      .app-shell, .app-shell.verification-layout-active { grid-template-columns: 1fr; gap: 18px; padding-top: 20px; }
       .task-sidebar, .workflow-sidebar { position: static; }
       .sidebar-head { padding-block: 12px 10px; }
       .sidebar-head span, .sidebar-note { display: none; }
@@ -982,6 +1098,11 @@
       .image-drop-zone button { width: 100%; }
       .diff-wrap { overflow-x: auto; }
       .diff-table { min-width: 620px; }
+      .section-navigator { top: auto; right: 10px; bottom: 16px; left: auto; width: 48px; transform: none; }
+      .section-navigator-toggle { width: 48px; min-height: 48px; border-radius: 50%; }
+      .section-navigator-panel { top: auto; right: 56px; bottom: 0; left: auto; width: min(320px, calc(100vw - 88px)); max-height: min(480px, calc(100vh - 32px)); transform: translateY(9px) scale(.985); transform-origin: right bottom; }
+      .section-navigator:is(:hover, .is-open) .section-navigator-panel { transform: translateY(0) scale(1); }
+      .section-navigator-list { max-height: calc(min(480px, 100vh - 32px) - 48px); }
     }
 
     @media (max-width: 480px) {
@@ -1008,7 +1129,7 @@
       html, body { background: #fff; }
       .topbar, .app-shell, footer { width: 100%; }
       .app-shell { display: block; padding-top: 24px; }
-      .task-sidebar, .workflow-sidebar, .prototype-badge, .actions, .toast, #resetButton { display: none !important; }
+      .task-sidebar, .workflow-sidebar, .prototype-badge, .actions, .toast, .section-navigator, #resetButton { display: none !important; }
       .workspace { border: 0; }
       .workspace-header, .workspace-body { padding-inline: 0; }
       details { break-inside: avoid; }

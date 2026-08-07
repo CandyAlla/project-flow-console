@@ -68,6 +68,7 @@
   let pollTimer = null;
   let toastTimer = null;
   let workspaceRefreshPending = false;
+  let sectionNavigatorCleanup = null;
 
   const stepsEl = document.querySelector("#steps");
   const globalStatusEl = document.querySelector("#globalStatus");
@@ -665,6 +666,7 @@
   }
 
   function render() {
+    destroySectionNavigator();
     workspaceRefreshPending = false;
     renderShell();
     const stageId = currentStageId();
@@ -694,7 +696,150 @@
     if (task?.archivedAt) {
       stageContentEl.querySelectorAll("button, input, textarea, select").forEach((control) => { control.disabled = true; });
     }
+    setupSectionNavigator(askActive ? "ask" : stageId);
     saveUi();
+  }
+
+  function destroySectionNavigator() {
+    sectionNavigatorCleanup?.();
+    sectionNavigatorCleanup = null;
+    document.querySelector("#sectionNavigator")?.remove();
+  }
+
+  function sectionTitle(section) {
+    const explicit = section.dataset.sectionTitle?.trim();
+    if (explicit) return explicit;
+    const heading = section.querySelector(":scope > h3, :scope > .section-heading h3, :scope > .progress-heading h3");
+    if (heading?.textContent.trim()) return heading.textContent.trim();
+    const fieldTitle = section.querySelector(":scope > .field > label, :scope > .field > span");
+    if (fieldTitle?.textContent.trim()) return fieldTitle.textContent.trim();
+    const summaryTitle = section.querySelector(":scope > .summary-grid .summary-item:first-child > span");
+    return summaryTitle?.textContent.trim() || "";
+  }
+
+  function sectionSnapshot(section, title) {
+    const preferred = section.querySelector(":scope > .section-copy, :scope > .summary-grid .summary-item:first-child strong, :scope > .callout, :scope > .checklist .check-row div span, :scope > .acceptance-log-list .acceptance-log-head strong, :scope > .field .hint, :scope > p");
+    const raw = (preferred?.textContent || section.textContent || "").replace(/\s+/g, " ").trim();
+    const snapshot = raw.startsWith(title) ? raw.slice(title.length).trim() : raw;
+    if (!snapshot) return "打开查看本段内容";
+    return snapshot.length > 82 ? `${snapshot.slice(0, 82)}…` : snapshot;
+  }
+
+  function setupSectionNavigator(stageId) {
+    const stageRoot = stageContentEl.querySelector(".flow-stage-view") || stageContentEl;
+    const sections = Array.from(stageRoot.querySelectorAll(".section"))
+      .map((element) => {
+        const title = sectionTitle(element);
+        return { element, title, snapshot: sectionSnapshot(element, title) };
+      })
+      .filter((item) => item.title && !item.element.closest("details"));
+    if (sections.length < 2) return;
+
+    sections.forEach((item, index) => {
+      item.element.id = `stage-section-${stageId}-${index + 1}`;
+      item.element.classList.add("stage-section-anchor");
+    });
+
+    const navigator = document.createElement("aside");
+    navigator.className = "section-navigator";
+    navigator.id = "sectionNavigator";
+    navigator.setAttribute("aria-label", "当前页面段落导航");
+    navigator.innerHTML = `<div class="section-navigator-panel" id="sectionNavigatorPanel" aria-hidden="true"><div class="section-navigator-head"><strong>段落与快照</strong><span>${sections.length} 个</span></div><nav class="section-navigator-list" aria-label="段落标题">${sections.map((item, index) => `<button class="section-navigator-item" type="button" data-section-jump="${index}" title="跳转到：${escapeHTML(item.title)}"><span class="section-navigator-index">${String(index + 1).padStart(2, "0")}</span><span class="section-navigator-copy"><span class="section-navigator-label">${escapeHTML(item.title)}</span><small class="section-navigator-snapshot">${escapeHTML(item.snapshot)}</small></span></button>`).join("")}</nav></div><button class="section-navigator-toggle" type="button" aria-expanded="false" aria-controls="sectionNavigatorPanel" aria-label="段落导航，悬停展开" title="悬停查看段落">${sections.slice(0, 5).map((_, index) => `<span class="section-navigator-line ${index === 0 ? "is-active" : ""}" data-section-marker="${index}" aria-hidden="true"></span>`).join("")}</button>`;
+    document.body.append(navigator);
+
+    const toggle = navigator.querySelector(".section-navigator-toggle");
+    const panel = navigator.querySelector(".section-navigator-panel");
+    const items = Array.from(navigator.querySelectorAll("[data-section-jump]"));
+    const markers = Array.from(navigator.querySelectorAll("[data-section-marker]"));
+    let activeIndex = 0;
+    let scrollFrame = 0;
+    let open = false;
+
+    const setOpen = (nextOpen) => {
+      open = nextOpen;
+      navigator.classList.toggle("is-open", nextOpen);
+      panel.setAttribute("aria-hidden", String(!nextOpen));
+      toggle.setAttribute("aria-expanded", String(nextOpen));
+      toggle.setAttribute("aria-label", nextOpen ? "段落导航已展开" : "段落导航，悬停展开");
+    };
+    const setActive = (index) => {
+      if (index === activeIndex && items[index]?.classList.contains("is-active")) return;
+      activeIndex = index;
+      items.forEach((item, itemIndex) => {
+        const active = itemIndex === index;
+        item.classList.toggle("is-active", active);
+        if (active) item.setAttribute("aria-current", "location");
+        else item.removeAttribute("aria-current");
+      });
+      const markerIndex = Math.min(index, markers.length - 1);
+      markers.forEach((marker, itemIndex) => marker.classList.toggle("is-active", itemIndex === markerIndex));
+      toggle.title = `当前：${sections[index].title}`;
+    };
+    const updatePosition = () => {
+      const workspace = document.querySelector(".workspace");
+      if (!workspace) return;
+      const workspaceRect = workspace.getBoundingClientRect();
+      const workflowRect = document.querySelector(".workflow-sidebar")?.getBoundingClientRect();
+      const gapLeft = workflowRect?.right ?? workspaceRect.left - 18;
+      const gapWidth = Math.max(1, Math.round(workspaceRect.left - gapLeft));
+      navigator.style.setProperty("--section-nav-left", `${Math.round(gapLeft)}px`);
+      navigator.style.setProperty("--section-nav-width", `${gapWidth}px`);
+      const stageVisible = workspaceRect.top < window.innerHeight - 150 && workspaceRect.bottom > 150;
+      navigator.classList.toggle("is-outside-stage", !stageVisible);
+    };
+    const updateActive = () => {
+      scrollFrame = 0;
+      const threshold = Math.min(180, window.innerHeight * .28);
+      let nextIndex = 0;
+      sections.forEach((item, index) => {
+        if (item.element.getBoundingClientRect().top <= threshold) nextIndex = index;
+      });
+      if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 8) nextIndex = sections.length - 1;
+      setActive(nextIndex);
+      updatePosition();
+    };
+    const onScroll = () => {
+      if (!scrollFrame) scrollFrame = window.requestAnimationFrame(updateActive);
+    };
+    const onDocumentClick = (event) => {
+      if (!navigator.contains(event.target)) setOpen(false);
+    };
+    const onKeydown = (event) => {
+      if (event.key === "Escape" && open) {
+        toggle.focus();
+        setOpen(false);
+      }
+    };
+
+    navigator.addEventListener("pointerenter", () => setOpen(true));
+    navigator.addEventListener("pointerleave", () => setOpen(false));
+    navigator.addEventListener("focusin", () => setOpen(true));
+    navigator.addEventListener("focusout", (event) => {
+      if (!navigator.contains(event.relatedTarget)) setOpen(false);
+    });
+    toggle.addEventListener("click", () => setOpen(true));
+    items.forEach((button, index) => button.addEventListener("click", () => {
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+      sections[index].element.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+      setActive(index);
+      setOpen(false);
+    }));
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", updatePosition, { passive: true });
+    document.addEventListener("click", onDocumentClick);
+    document.addEventListener("keydown", onKeydown);
+    updatePosition();
+    setActive(0);
+    updateActive();
+
+    sectionNavigatorCleanup = () => {
+      if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", updatePosition);
+      document.removeEventListener("click", onDocumentClick);
+      document.removeEventListener("keydown", onKeydown);
+      navigator.remove();
+    };
   }
 
   function renderShell() {
@@ -1262,13 +1407,13 @@
     const requiredIndexes = requiredManualIndexes(cases);
     const completedRequired = requiredIndexes.filter((index) => ui.checks[index]).length;
     const requiredDone = requiredIndexes.length > 0 && completedRequired === requiredIndexes.length;
-    return `<section class="section"><div class="summary-grid"><div class="summary-item"><span>${inBugfix ? "Bug 修改结果" : "执行结果"}</span><strong>${escapeHTML(result.summary || "实现已完成")}</strong></div><div class="summary-item"><span>检查方式</span><strong>${escapeHTML(reviewLabel)}</strong></div></div></section>
+    return `<section class="section" data-section-title="${inBugfix ? "Bug 修改结果概览" : "执行结果概览"}"><div class="summary-grid"><div class="summary-item"><span>${inBugfix ? "Bug 修改结果" : "执行结果"}</span><strong>${escapeHTML(result.summary || "实现已完成")}</strong></div><div class="summary-item"><span>检查方式</span><strong>${escapeHTML(reviewLabel)}</strong></div></div></section>
       ${renderMinimumVerification(result.minimum_manual_verification)}
       <section class="section"><h3>自动/逻辑验证</h3><div class="checklist">${(result.verification || []).map((item) => `<div class="check-row"><span>${item.status === "passed" ? "✓" : item.status === "failed" ? "!" : "–"}</span><div><strong>${escapeHTML(item.check)}</strong><span>${escapeHTML(item.result)} · ${escapeHTML(item.status)}</span></div></div>`).join("") || '<span class="hint">Codex 未返回自动验证条目。</span>'}</div></section>
       <div class="verification-case-layout"><section class="section verification-case-content"><div class="section-heading"><div><p class="section-kicker">逐条勾选</p><h3>详细测试用例</h3></div><strong class="gate-progress">P0 / 必测 ${completedRequired} / ${requiredIndexes.length}</strong></div><p class="section-copy">只有标记为“Commit 必测”的用例会阻塞提交；P1/P2 补充回归可按本次发布风险选择执行，并在备注中记录。</p><div class="test-case-list">${cases.map(renderManualCase).join("")}</div></section>${renderManualCaseNavigation(cases, requiredIndexes)}</div>
       ${renderAcceptanceLogs(result.acceptance_logs)}
       ${renderExecutionModeSelector("acceptance")}
-      <section class="section"><div class="field"><label for="verificationNote">验收备注或发现的问题</label><textarea id="verificationNote" placeholder="记录设备、操作证据，或描述需要定向返修的问题……">${escapeHTML(ui.verificationNote)}</textarea>${renderFeedbackImageInput("verification")}<span class="hint">文字和图片可以单独或一起提交。退回后只处理这条人工反馈，不会重新执行整份 Plan；上一轮未受影响的测试用例会保留。</span></div></section>
+      <section class="section" data-section-title="验收备注与问题"><div class="field"><label for="verificationNote">验收备注或发现的问题</label><textarea id="verificationNote" placeholder="记录设备、操作证据，或描述需要定向返修的问题……">${escapeHTML(ui.verificationNote)}</textarea>${renderFeedbackImageInput("verification")}<span class="hint">文字和图片可以单独或一起提交。退回后只处理这条人工反馈，不会重新执行整份 Plan；上一轮未受影响的测试用例会保留。</span></div></section>
       <div class="actions"><div class="actions-secondary"><button class="danger" id="returnToExecution" ${ui.verificationNote.trim() || feedbackImageItems("verification").length ? "" : "disabled"}>发现问题，启动定向返修</button></div><div class="actions-primary"><button class="primary" id="approveVerification" ${requiredDone ? "" : "disabled"}>${inBugfix ? "Bug 复验通过" : "P0 / 必测验证通过"}</button></div></div>${reviewPanel(task.execution.review)}${eventLogDetails()}`;
   }
 
