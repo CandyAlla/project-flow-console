@@ -1,6 +1,8 @@
-# Project Flow Console 本机部署指南
+# DevConductor 本机部署指南
 
-这份指南用于把 Project Flow Console 分享给其他人，让每位使用者在自己的电脑上运行独立实例。
+这份指南用于把 DevConductor 分享给其他人，让每位使用者在自己的电脑上运行独立实例。
+
+兼容说明：GitHub 仓库地址、`$project-flow-setup` Skill 名称和 `PROJECT_FLOW_*` 环境变量暂时保留旧技术标识；已有安装不需要重命名目录或迁移任务数据。
 
 推荐模式是：共享同一个 GitHub 工具仓库，但每个人分别维护自己的 Project Profile、任务状态、项目仓库和 Worktree。不要把控制台部署成一台多人共用的远程服务。
 
@@ -8,7 +10,7 @@
 
 每位使用者的电脑上包含四类内容：
 
-1. `project-flow-console`：可通过 Git 更新的公共工具代码。
+1. `dev-conductor`：可通过 Git 更新的公共工具代码。
 2. 主项目仓库：实际开发项目的主 Git checkout。
 3. `worktrees`：控制台为需求创建的隔离执行目录，底层使用 Git Worktree，但不要求使用者手工管理。
 4. `docs` 与 `.runtime`：需求文档、验收 HTML，以及只属于当前电脑的任务状态。
@@ -44,7 +46,7 @@ Skill 只在发现多个可信候选目录、且选择会改变行为时询问�
         └── MyGame-fix-payment-c3d4/
 
 /Users/alice/Developer/tools/
-└── project-flow-console/               # 公共控制台代码
+└── dev-conductor/                      # DevConductor 工具代码
 ```
 
 对应的 Profile 路径如下：
@@ -78,7 +80,7 @@ Skill 只在发现多个可信候选目录、且选择会改变行为时询问�
 
 ```text
 /Users/alice/Developer/
-├── tools/project-flow-console/
+├── tools/dev-conductor/
 └── workspaces/my-game/                 # workspaceRoot
     ├── repo/                           # repoRoot
     ├── docs/                           # docsRoot
@@ -109,7 +111,7 @@ Skill 只在发现多个可信候选目录、且选择会改变行为时询问�
 - `planRelativeDir`、`projectFacts` 和 `planTemplate` 是仓库内相对路径，不能包含 `..`。
 - `worktreeNamePrefix` 只能使用字母、数字、点、下划线和连字符，建议使用 `MyGame` 这类短名称。
 - 没有 Worktree 使用习惯时，不需要手工执行 Git 命令；把 `worktreesRoot` 视为控制台管理的隔离执行目录即可。
-- 根目录建议使用 ASCII、小写且不包含空格，例如 `project-flow-console`、`my-game`；这不是强制要求，但能减少外部脚本和终端引用路径时的转义问题。
+- 根目录建议使用 ASCII、小写且不包含空格，例如 `dev-conductor`、`my-game`；这不是强制要求，但能减少外部脚本和终端引用路径时的转义问题。
 - 每个人都应重新生成自己的 Profile，不要直接复制包含其他人用户名和绝对路径的 Profile。
 
 ## 四、安装前检查
@@ -139,8 +141,8 @@ Codex App 是可选项。没有安装 Codex App 时，仍可使用基于 `codex 
 ```bash
 mkdir -p ~/Developer/tools
 cd ~/Developer/tools
-git clone https://github.com/CandyAlla/project-flow-console.git
-cd project-flow-console
+git clone https://github.com/CandyAlla/project-flow-console.git dev-conductor
+cd dev-conductor
 ```
 
 服务端只使用 Python 标准库，不需要执行 `pip install`。
@@ -192,13 +194,13 @@ Skill 会先执行只读 dry-run，展示：
 确认 dry-run 后才生成：
 
 ```text
-project-flow-console/profiles/<project-id>.json
+dev-conductor/profiles/<project-id>.json
 ```
 
 也可以直接运行脚本：
 
 ```bash
-cd ~/Developer/tools/project-flow-console
+cd ~/Developer/tools/dev-conductor
 
 python3 skills/project-flow-setup/scripts/configure_project.py \
   /absolute/path/to/your-project \
@@ -246,7 +248,7 @@ python3 skills/project-flow-setup/scripts/configure_project.py \
 macOS 推荐显式指定 Profile：
 
 ```bash
-cd ~/Developer/tools/project-flow-console
+cd ~/Developer/tools/dev-conductor
 
 PROJECT_FLOW_PROFILE="$PWD/profiles/my-game.json" \
 ./start.command
@@ -300,7 +302,7 @@ python3 server.py --port 4319
 更新公共工具：
 
 ```bash
-cd ~/Developer/tools/project-flow-console
+cd ~/Developer/tools/dev-conductor
 git pull --ff-only
 ```
 

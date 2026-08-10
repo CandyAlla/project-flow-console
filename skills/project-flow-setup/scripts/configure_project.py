@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discover and write a safe Project Flow Profile for a local Git repository."""
+"""Discover and write a safe DevConductor Profile for a local Git repository."""
 
 from __future__ import annotations
 
@@ -196,7 +196,7 @@ def stage_skills(repo: Path, explicit: list[str] | None, stage: str, no_defaults
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Configure a Git repository for Project Flow.")
+    parser = argparse.ArgumentParser(description="Configure a Git repository for DevConductor.")
     parser.add_argument("project", help="Absolute project path inside the target Git repository")
     parser.add_argument("--name", help="Human-facing project name; defaults to repository directory name")
     parser.add_argument("--id", dest="project_id", help="Lowercase kebab-case project id")

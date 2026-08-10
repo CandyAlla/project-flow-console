@@ -1,0 +1,63 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string" },
+    "candidates": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["fact", "decision", "runbook", "pitfall", "acceptance", "skill", "automation"]
+          },
+          "title": { "type": "string" },
+          "content": { "type": "string" },
+          "scope": { "type": "string", "enum": ["project", "global-candidate"] },
+          "appliesTo": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "nonScope": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "evidence": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "enum": ["commit", "file", "test", "review", "manual"]
+                },
+                "reference": { "type": "string" },
+                "detail": { "type": "string" }
+              },
+              "required": ["source", "reference", "detail"],
+              "additionalProperties": false
+            }
+          },
+          "suggestedTarget": { "type": "string" },
+          "novelty": { "type": "string" }
+        },
+        "required": [
+          "type",
+          "title",
+          "content",
+          "scope",
+          "appliesTo",
+          "nonScope",
+          "evidence",
+          "suggestedTarget",
+          "novelty"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["summary", "candidates"],
+  "additionalProperties": false
+}

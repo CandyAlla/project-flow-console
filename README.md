@@ -1,12 +1,14 @@
-# Project Flow Console
+# DevConductor
+
+> **AI 开发指挥台 · 从需求到可信提交**
 
 > [本机部署指南与目录选择策略](docs/local-deployment.md)
 
-一个运行在本机的、多项目需求交付控制台。
+DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 
 它通过 Project Profile 适配不同 Git 项目，把下面这些原本散落在对话、终端和文档里的步骤，收拢成一条可恢复、可人工审批的工作流：
 
-> 需求输入 → 轻量执行单或完整讨论 / Plan → Git Worktree → 快速修改或标准执行 → 人工验收 → Commit → Bug 返修
+> 需求输入 → 轻量执行单或完整讨论 / Plan → Git Worktree → 快速修改或标准执行 → 人工验收 → Commit → Bug 返修 → AI 沉淀审核
 
 每条任务还提供独立的 **Ask · 只读问答** 模块，可以随时询问当前实现、状态来源、相关文件和修改影响；Ask 不属于流程阶段，不会修改文件或改变任务状态。
 
@@ -48,6 +50,8 @@
 - 人工验收返修和 Commit 后 Bug 修复都可附加多张截图，支持选择、粘贴、拖入、预览和单张删除。
 - Commit 前重新校验真实 Git 状态，防止确认后文件又发生变化。
 - Commit 后发现问题时，复用当前 Worktree 和任务记忆，在 Bug 修复模块内完成定向修改、Review、复验和新 Commit，不重新执行 Plan。
+- Commit 与 Bug 修复闭环后，可只读生成最多 5 条 AI 沉淀候选；候选按稳定事实、决策、手册、踩坑、验收规律、Skill 或自动化分类，并保留直接证据。
+- 任务级“沉淀”阶段和跨任务“沉淀中心”支持保留或忽略候选；审核只更新 `.runtime`，不会自动修改项目文档、Skill、代码或 Git。
 - 每个任务提供独立 Ask 只读问答，可询问当前实现、状态来源、相关文件和修改影响范围，不改变任务阶段。
 - 多需求队列可切换查看，支持归档、删除、恢复和有限并行。
 - 每个项目由独立 Profile 配置，不在服务代码中写死路径。
@@ -73,7 +77,7 @@
 ## 目录结构
 
 ```text
-ProjectFlowConsole/
+DevConductor/
 ├── server.py
 ├── app.js
 ├── index.html
@@ -103,9 +107,11 @@ ProjectFlowConsole/
 ### 1. 获取代码
 
 ```bash
-git clone https://github.com/CandyAlla/project-flow-console.git
-cd ProjectFlowConsole
+git clone https://github.com/CandyAlla/project-flow-console.git dev-conductor
+cd dev-conductor
 ```
+
+兼容说明：产品品牌已更新为 DevConductor；GitHub 仓库地址、`$project-flow-setup` Skill 名称和 `PROJECT_FLOW_*` 环境变量暂时保留旧技术标识，现有安装目录和任务数据不需要迁移。
 
 ### 2. 安装配置 Skill
 
@@ -203,7 +209,7 @@ PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" ./start.command
 服务只监听 `127.0.0.1`。启动日志会打印实际地址，例如：
 
 ```text
-My Project Project Flow: http://127.0.0.1:4318/
+My Project · DevConductor: http://127.0.0.1:4318/
 ```
 
 在浏览器打开该地址即可。
@@ -220,6 +226,7 @@ My Project Project Flow: http://127.0.0.1:4318/
 | 人工验收 | 展示最小验证步骤、详细用例和验收日志；问题反馈可填写文字或附截图 | 用户逐项确认 P0 / 必测项；截图仅进入任务运行目录 |
 | Commit | 刷新 Git 摘要并校验状态指纹 | 需要单独确认；只提交当前 Worktree |
 | Bug 修复 | 根据文字、截图或两者组合，在本模块内完成定向修改、Review、人工复验和新 Commit | 不重新执行 Plan；复用当前 Worktree，不重写旧 Commit |
+| AI 沉淀 | 从任务记忆引用、Plan Hash、Commit、变更文件和验证证据中生成 0–5 条候选，并逐条审核 | 严格只读；候选与审核状态仅保存到 `.runtime`，不自动发布 |
 | Ask | 基于当前任务、Plan、持久记忆和 Worktree 回答实现问题 | 严格只读，不修改文件，不改变流程阶段 |
 
 任务在后台运行时可以切换查看其他需求。服务重启后，进行中的操作会标记为中断，已有文档和 Worktree 改动会保留，可从对应阶段重试。
@@ -381,6 +388,8 @@ python3 server.py
 - Plan、HTML 和 Worktree 绑定信息
 
 它不是“每个需求常驻一个一直运行的 Agent”。后台 Worker 只在阶段执行时占用资源，任务上下文通过结构化状态、Codex session id、Plan 和 Git 指纹恢复。
+
+为避免每轮反复发送完整上下文，DevConductor 使用增量 Prompt：稳定执行规则保存在工具 Skill 的版本化契约中；持久任务事实写入任务目录下的 `task-memory.json`，Prompt 只传绝对路径和 SHA-256；每轮只补充新增要求、Review findings、受影响文件和需要重新确认的验收项。旧任务会在服务启动时自动生成记忆引用，不需要迁移。
 
 ## 飞书 / Lark 文档
 

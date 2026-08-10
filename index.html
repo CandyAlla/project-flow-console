@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Project Flow · 需求工作流控制台</title>
+  <title>DevConductor · AI 开发指挥台</title>
   <style>
     :root {
       --ink: #17202a;
@@ -174,6 +174,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
       gap: 10px;
       padding: 14px 14px 12px;
       border-bottom: 1px solid var(--line);
@@ -182,7 +183,8 @@
     .task-sidebar-head strong { display: block; }
     .task-sidebar-head span { display: block; margin-top: 2px; color: var(--muted); font-size: .76rem; }
     .task-sidebar-head button { flex: 0 0 auto; }
-    .task-sidebar-actions { display: flex; align-items: center; gap: 4px; }
+    .task-sidebar-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; width: 100%; gap: 4px; }
+    .task-sidebar-actions button { width: 100%; padding-inline: 6px; }
 
     .task-filters {
       display: grid;
@@ -975,6 +977,25 @@
     .reader-mode-grid { margin: 10px 0; }
     .review-gaps { margin: 12px 0 0; padding-left: 1.2rem; color: var(--warning); font-size: .85rem; }
 
+    .knowledge-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .knowledge-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+    .knowledge-filters button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-strong); }
+    .knowledge-grid { display: grid; gap: 14px; margin-top: 16px; }
+    .knowledge-card { padding: 17px; border: 1px solid var(--line); background: #fbfcfe; }
+    .knowledge-card[data-status="approved"] { border-left: 4px solid var(--ok); }
+    .knowledge-card[data-status="ignored"] { opacity: .7; border-left: 4px solid var(--muted); }
+    .knowledge-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+    .knowledge-card-head h3 { margin: 6px 0 0; }
+    .knowledge-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+    .knowledge-badge { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong); font-size: .72rem; font-weight: 800; }
+    .knowledge-badge.scope { background: var(--warning-soft); color: var(--warning); }
+    .knowledge-card-content { max-width: var(--reading); margin: 14px 0 0; color: #354252; white-space: pre-wrap; }
+    .knowledge-meta { display: grid; gap: 7px; margin: 14px 0 0; color: var(--muted); font-size: .82rem; }
+    .knowledge-meta strong { color: var(--ink); }
+    .knowledge-evidence { margin: 8px 0 0; padding-left: 1.15rem; }
+    .knowledge-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 15px; }
+    .knowledge-source { margin-top: 4px; color: var(--muted); font-size: .78rem; }
+
     details {
       max-width: var(--reading);
       margin-top: 22px;
@@ -1140,8 +1161,8 @@
   <header>
     <div class="topbar">
       <div>
-        <p class="eyebrow" id="projectEyebrow">Project · Project Flow</p>
-        <h1>需求工作流控制台</h1>
+        <p class="eyebrow" id="projectEyebrow">Project · DevConductor</p>
+        <h1>AI 开发指挥台</h1>
         <p class="lede">控制台负责需求、Plan、验收和 Git 门禁；Codex App 负责交互式编码。每个需求可绑定持久 Thread，并在快速修改与带独立 Review 的标准流程之间切换。</p>
       </div>
       <span class="prototype-badge" id="serviceBadge">正在连接本地服务</span>
@@ -1156,6 +1177,7 @@
           <span id="taskCount">正在读取任务</span>
         </div>
         <div class="task-sidebar-actions">
+          <button class="small ghost" id="knowledgeCenterButton" type="button">沉淀中心</button>
           <button class="small ghost" id="archiveViewButton" type="button">查看归档</button>
           <button class="small primary" id="createTaskButton" type="button">＋ 新建</button>
         </div>
@@ -1198,7 +1220,7 @@
   </div>
 
   <footer>
-    本页只连接 127.0.0.1 本地服务和本机 Codex App Server。生成文档、创建 Worktree、执行、Commit 与 Bug 修复均需单独点击；快速模式仍保留人工验收和 Commit 门禁；不会自动 Push 或 Merge。
+    本页只连接 127.0.0.1 本地服务和本机 Codex App Server。生成文档、创建 Worktree、执行、Commit、Bug 修复与沉淀提炼均需单独点击；沉淀候选仅保存在本地运行目录，不会自动发布；不会自动 Push 或 Merge。
   </footer>
 
   <div class="toast" id="toast" role="status" hidden></div>

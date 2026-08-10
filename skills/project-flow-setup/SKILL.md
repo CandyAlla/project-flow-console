@@ -1,11 +1,13 @@
 ---
 name: project-flow-setup
-description: Configure any local Git project for the shared Project Flow requirement console by scanning repository facts and skills, validating safe repository/docs/worktree boundaries, and generating a versioned Project Profile JSON. Use when the user asks to configure, initialize, migrate, or reuse the requirement workflow console in another project; mentions Project Flow/Profile; or wants project paths, Git worktrees, stage skills, and verification sources configured through one skill.
+description: Configure any local Git project for DevConductor by scanning repository facts and skills, validating safe repository/docs/worktree boundaries, and generating a versioned Project Profile JSON. Use when the user asks to configure, initialize, migrate, or reuse DevConductor in another project; mentions DevConductor or Project Flow/Profile; or wants project paths, Git worktrees, stage skills, and verification sources configured through one skill.
 ---
 
-# Project Flow Setup
+# DevConductor Project Setup
 
 Configure a project without modifying its code, creating a Worktree, starting implementation, committing, fetching, pushing, or merging. Keep the generated Profile beside the shared console so it remains the single configuration entrypoint.
+
+The controller references [references/task-runtime-contract.md](references/task-runtime-contract.md) by absolute path and SHA-256 during execution. Do not inline it into generated Profiles or load it during normal project discovery; inspect it only when validating DevConductor runtime-context behavior.
 
 ## Workflow
 

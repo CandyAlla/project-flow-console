@@ -129,6 +129,21 @@ class ControllerTests(unittest.TestCase):
         run(["git", "worktree", "add", "-b", "worktree/existing-task", str(path)], self.repo)
         return path
 
+    def seed_committed_knowledge_task(self, task_id: str = "00000000-0000-0000-0000-000000000071") -> str:
+        task_id = self.seed_execution_task(task_id)
+        plan_path = self.repo / "plan.md"
+        plan_path.write_text("# Stable delivery plan\n", encoding="utf-8")
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "bugfix"
+            task["maxStageIndex"] = server.STAGE_INDEX["bugfix"]
+            task["plan"].update({"finalPath": str(plan_path), "draftPath": str(plan_path)})
+            task["execution"].update({"status": "complete", "result": self.quick_result(), "review": {"verdict": "pass", "summary": "review passed", "findings": []}})
+            task["verification"] = {"approved": True, "checks": [True], "note": "manual passed"}
+            task["git"].update({"committed": True, "commitId": task["git"]["head"], "message": "feat: deliver"})
+            task["bugfix"] = {"status": "idle", "description": "", "history": []}
+            task["knowledge"] = server.default_knowledge()
+        return task_id
+
     def imported_paths(self):
         docs = self.root / "ProjectDocs"
         docs.mkdir(exist_ok=True)
@@ -748,12 +763,45 @@ class ControllerTests(unittest.TestCase):
 
         prompt = server.execution_prompt(task, "")
 
-        self.assertIn("minimum_manual_verification", prompt)
-        self.assertIn("3–5 分钟", prompt)
-        self.assertIn("P0/P1/P2", prompt)
-        self.assertIn("acceptance_logs", prompt)
-        self.assertIn("禁止每帧刷屏", prompt)
-        self.assertIn("不得写成 passed", prompt)
+        contract = server.TASK_RUNTIME_CONTRACT.read_text(encoding="utf-8")
+        self.assertIn("<task-memory-ref>", prompt)
+        self.assertIn("<static-contract-ref>", prompt)
+        self.assertNotIn('"confirmedFacts"', prompt)
+        self.assertIn("3–5 minute", contract)
+        self.assertIn("P0/P1/P2", contract)
+        self.assertIn("acceptance_logs", contract)
+        self.assertIn("low-frequency", contract)
+        self.assertIn("never `passed`", contract)
+
+    def test_prompt_references_large_memory_by_path_and_hash(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000062"
+        task = {
+            "id": task_id,
+            "title": "大任务记忆",
+            "updatedAt": "2026-08-10T12:00:00+08:00",
+            "plan": {"finalPath": "/tmp/plan.md", "markdown": "# Plan"},
+            "execution": {"review": None},
+            "discussion": {},
+            "paths": {},
+            "worktree": {},
+            "git": {},
+            "agentMemory": {
+                "version": 1,
+                "confirmedFacts": [f"fact-{index}-" + ("x" * 900) for index in range(16)],
+                "decisions": [f"decision-{index}-" + ("y" * 900) for index in range(16)],
+                "sessions": {"execution": "secret-thread"},
+            },
+        }
+        reference = server.persist_agent_memory(task)
+        prompt = server.execution_prompt(task, "只处理新增要求")
+
+        memory_size = server.task_memory_file(task_id).stat().st_size
+        self.assertGreater(memory_size, 20_000)
+        self.assertLess(len(prompt), 3_000)
+        self.assertIn(reference["path"], prompt)
+        self.assertIn(reference["sha256"], prompt)
+        self.assertNotIn("fact-0-", prompt)
+        self.assertNotIn("secret-thread", server.task_memory_file(task_id).read_text(encoding="utf-8"))
 
     def test_acceptance_fix_prompt_is_targeted_and_reports_only_round_files(self) -> None:
         task = {
@@ -1201,6 +1249,8 @@ class ControllerTests(unittest.TestCase):
         stored = server.get_task_copy(task_id)
         memory = stored["agentMemory"]
         disk = server.json.loads(server.task_file(task_id).read_text(encoding="utf-8"))["agentMemory"]
+        memory_path = server.task_memory_file(task_id)
+        memory_bytes = memory_path.read_bytes()
         self.assertEqual(memory, disk)
         self.assertEqual(memory["summary"], "实现完成")
         self.assertEqual(memory["sessions"], {"discussion": "discussion-thread", "execution": "execution-thread", "review": "review-thread", "ask": None, "app": None})
@@ -1208,6 +1258,16 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("server.py", memory["relevantFiles"])
         self.assertIn("人工验收", memory["completedSteps"])
         self.assertTrue(memory["fingerprints"]["planSha256"])
+        self.assertTrue(memory_path.is_file())
+        self.assertEqual(stored["agentMemoryRef"]["path"], str(memory_path.resolve()))
+        self.assertEqual(stored["agentMemoryRef"]["sha256"], server.hashlib.sha256(memory_bytes).hexdigest())
+        self.assertNotIn("sessions", server.json.loads(memory_bytes))
+
+        prompt = server.execution_prompt(stored, "只处理本轮反馈")
+        self.assertIn(str(memory_path.resolve()), prompt)
+        self.assertIn(stored["agentMemoryRef"]["sha256"], prompt)
+        self.assertNotIn('"confirmedFacts"', prompt)
+        self.assertNotIn('"decisions"', prompt)
 
     def test_execution_and_review_threads_are_kept_in_separate_slots(self) -> None:
         task_id = "00000000-0000-0000-0000-000000000031"
@@ -2168,6 +2228,154 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["app"]["status"], "ready")
         self.assertEqual(task["app"]["deepLink"], "codex://threads/legacy-app-thread")
         self.assertEqual(task["app"]["cwd"], "")
+        self.assertEqual(task["knowledge"]["status"], "idle")
+        self.assertEqual(task["knowledge"]["candidates"], [])
+
+    def test_knowledge_generation_requires_committed_idle_task(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000072")
+        with self.assertRaisesRegex(server.WorkflowError, "已完成 Commit"):
+            server.prepare_knowledge_generation(task_id)
+
+        server.TASKS[task_id]["git"]["committed"] = True
+        server.TASKS[task_id]["activeJob"] = "execution"
+        with self.assertRaisesRegex(server.WorkflowError, "正在执行"):
+            server.prepare_knowledge_generation(task_id)
+
+        server.TASKS[task_id]["activeJob"] = None
+        server.TASKS[task_id]["bugfix"] = {"status": "verify"}
+        with self.assertRaisesRegex(server.WorkflowError, "Bug 修复循环尚未闭环"):
+            server.prepare_knowledge_generation(task_id)
+
+        server.TASKS[task_id]["bugfix"] = {"status": "idle"}
+        server.prepare_knowledge_generation(task_id)
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "knowledge")
+        self.assertEqual(task["maxStageIndex"], server.STAGE_INDEX["knowledge"])
+
+    def test_knowledge_payload_allows_zero_and_caps_candidates_at_five(self) -> None:
+        task_id = self.seed_committed_knowledge_task("00000000-0000-0000-0000-000000000073")
+        task = server.get_task_copy(task_id)
+        base = {
+            "type": "fact",
+            "content": "A reusable verified fact.",
+            "scope": "project",
+            "appliesTo": ["future tasks"],
+            "nonScope": [],
+            "evidence": [{"source": "commit", "reference": task["git"]["commitId"], "detail": "delivered"}],
+            "suggestedTarget": "Doc/wiki",
+            "novelty": "Not recorded before",
+        }
+        payload = {"summary": "seven raw candidates", "candidates": [{**base, "title": f"Fact {index}"} for index in range(7)]}
+        summary, candidates = server.normalize_knowledge_payload(task, payload)
+        self.assertEqual(summary, "seven raw candidates")
+        self.assertEqual(len(candidates), 5)
+        self.assertTrue(all(item["status"] == "pending" for item in candidates))
+
+        empty_summary, empty = server.normalize_knowledge_payload(task, {"summary": "本任务无需沉淀。", "candidates": []})
+        self.assertEqual(empty_summary, "本任务无需沉淀。")
+        self.assertEqual(empty, [])
+
+    def test_knowledge_job_is_read_only_and_persists_runtime_candidates(self) -> None:
+        task_id = self.seed_committed_knowledge_task("00000000-0000-0000-0000-000000000074")
+        server.prepare_knowledge_generation(task_id)
+        payload = {
+            "summary": "one reusable decision",
+            "candidates": [{
+                "type": "decision",
+                "title": "Keep validation separate",
+                "content": "Automatic and manual validation remain separate gates.",
+                "scope": "project",
+                "appliesTo": ["delivery workflow"],
+                "nonScope": [],
+                "evidence": [{"source": "test", "reference": "tests/test_controller.py", "detail": "gate coverage"}],
+                "suggestedTarget": "Doc/decisions",
+                "novelty": "Reusable delivery boundary",
+            }],
+        }
+        with mock.patch.object(server, "run_codex_structured", return_value=(payload, None)) as run_structured:
+            server.knowledge_job(task_id)
+
+        command = run_structured.call_args.args[2]
+        self.assertIn("--sandbox", command)
+        self.assertIn("read-only", command)
+        self.assertNotIn("git", command)
+        prompt = command[-1]
+        self.assertIn(str(server.task_memory_file(task_id).resolve()), prompt)
+        self.assertIn(str(server.TASK_RUNTIME_CONTRACT.resolve()), prompt)
+        self.assertIn("sha256:", prompt)
+        self.assertNotIn('"logicalAgentId"', prompt)
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "knowledge")
+        self.assertEqual(task["knowledge"]["status"], "ready")
+        self.assertEqual(len(task["knowledge"]["candidates"]), 1)
+        self.assertTrue(server.task_file(task_id).is_file())
+
+    def test_knowledge_review_only_updates_runtime_and_aggregates_source_task(self) -> None:
+        task_id = self.seed_committed_knowledge_task("00000000-0000-0000-0000-000000000075")
+        task = server.get_task_copy(task_id)
+        _, candidates = server.normalize_knowledge_payload(task, {
+            "summary": "candidate",
+            "candidates": [{
+                "type": "pitfall",
+                "title": "Avoid stale state",
+                "content": "Refresh runtime state before the final gate.",
+                "scope": "project",
+                "appliesTo": ["controller"],
+                "nonScope": [],
+                "evidence": [{"source": "test", "reference": "test_controller.py", "detail": "stale digest test"}],
+                "suggestedTarget": "Doc/wiki",
+                "novelty": "Prevents repeated failure",
+            }],
+        })
+        with server.mutate_task(task_id) as live:
+            live["knowledge"].update({"status": "ready", "generatedAt": "2026-08-10T12:00:00+08:00", "summary": "candidate", "candidates": candidates})
+        head_before = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip()
+
+        with mock.patch.object(server, "run_command") as run_command:
+            reviewed = server.review_knowledge_candidate(task_id, candidates[0]["id"], "approved")
+
+        run_command.assert_not_called()
+        self.assertEqual(reviewed["knowledge"]["candidates"][0]["status"], "approved")
+        self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip(), head_before)
+        aggregate = server.list_knowledge_candidates()
+        item = next(item for item in aggregate if item["taskId"] == task_id)
+        self.assertEqual(item["taskTitle"], "Codex App 快速模式")
+        self.assertEqual(item["status"], "approved")
+
+        server.TASKS[task_id]["archivedAt"] = "2026-08-10T12:30:00+08:00"
+        with self.assertRaisesRegex(server.WorkflowError, "先恢复"):
+            server.review_knowledge_candidate(task_id, candidates[0]["id"], "ignored")
+
+    def test_new_bugfix_withdraws_candidates_from_the_previous_commit(self) -> None:
+        task_id = self.seed_committed_knowledge_task("00000000-0000-0000-0000-000000000076")
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "knowledge"
+            task["maxStageIndex"] = server.STAGE_INDEX["knowledge"]
+            task["knowledge"].update({
+                "status": "ready",
+                "generatedAt": "2026-08-10T12:00:00+08:00",
+                "candidates": [{"id": "old-candidate", "status": "approved", "title": "Old evidence"}],
+            })
+        status = server.git_status(self.repo)
+        server.TASKS[task_id]["git"].update({**status, "committed": True, "commitId": status["head"]})
+
+        server.prepare_bugfix_request(task_id, "new regression", status["digest"])
+
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "bugfix")
+        self.assertEqual(task["maxStageIndex"], server.STAGE_INDEX["bugfix"])
+        self.assertEqual(task["knowledge"]["status"], "idle")
+        self.assertEqual(task["knowledge"]["candidates"], [])
+
+    def test_frontend_exposes_knowledge_stage_center_and_runtime_only_copy(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id: "knowledge"', app_js)
+        self.assertIn('id="generateKnowledge"', app_js)
+        self.assertIn('/api/knowledge', app_js)
+        self.assertIn('data-knowledge-review', app_js)
+        self.assertIn("不会自动修改项目文档、Skill 或 Git", app_js)
+        self.assertIn('id="knowledgeCenterButton"', index_html)
 
     def test_health_advertises_codex_app_and_quick_mode(self) -> None:
         lark_reader = {
@@ -2182,8 +2390,10 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(health["features"]["appServer"])
         self.assertTrue(health["features"]["quickMode"])
         self.assertTrue(health["features"]["larkCliReader"])
+        self.assertTrue(health["features"]["knowledge"])
         self.assertTrue(health["readers"]["larkCli"]["ready"])
         self.assertGreaterEqual(health["limits"]["quickExecutionSeconds"], 120)
+        self.assertGreaterEqual(health["limits"]["knowledgeSeconds"], 60)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,8 @@
     { id: "execute", label: "执行", title: "选择速度后执行 Plan", description: "快速模式复用 Codex App Thread；标准模式保留独立 Code Review。" },
     { id: "verify", label: "人工验收", title: "按测试案例完成最终验收", description: "自动验证和人工结果分开记录；全部必测项通过后才进入 Commit。" },
     { id: "commit", label: "Commit", title: "确认真实 Diff 后提交", description: "提交前重新读取 Git 状态；状态摘要变化时会拒绝 Commit。" },
-    { id: "bugfix", label: "Bug 修复", title: "提交后发现问题，进入修复循环", description: "填写复现信息后复用当前 Worktree 和任务记忆；可选快速修改或带独立 Review 的标准流程。" }
+    { id: "bugfix", label: "Bug 修复", title: "提交后发现问题，进入修复循环", description: "填写复现信息后复用当前 Worktree 和任务记忆；可选快速修改或带独立 Review 的标准流程。" },
+    { id: "knowledge", label: "沉淀", title: "提炼可复用经验", description: "从 Commit、代码、测试、Review 和人工验收中生成候选；人工审核前不会发布到项目。" }
   ];
   const askModule = {
     id: "ask",
@@ -20,10 +21,17 @@
     title: "询问当前实现",
     description: "复用当前任务、Plan 和 Worktree 上下文进行只读问答；不会修改文件或改变任务阶段。"
   };
+  const knowledgeCenterModule = {
+    id: "knowledge-center",
+    label: "沉淀中心",
+    title: "跨任务沉淀中心",
+    description: "集中审核所有任务的沉淀候选；保留或忽略只更新本地运行态，不会自动修改项目文档、Skill 或 Git。"
+  };
 
   const defaultUi = {
     taskId: "",
     taskFilter: "all",
+    knowledgeFilter: "pending",
     showArchived: false,
     taskViews: {},
     module: "flow",
@@ -56,6 +64,10 @@
   let ui = loadUi();
   let task = null;
   let taskSummaries = [];
+  let knowledgeCandidates = [];
+  let knowledgeLoading = false;
+  let knowledgeLoaded = false;
+  let knowledgeError = "";
   let scheduler = { maxConcurrentJobs: 2, runningJobs: 0, queuedJobs: 0 };
   let health = null;
   let projectBranches = [];
@@ -82,14 +94,24 @@
   const taskQueueTitleEl = document.querySelector("#taskQueueTitle");
   const taskFiltersEl = document.querySelector(".task-filters");
   const archiveViewButtonEl = document.querySelector("#archiveViewButton");
+  const knowledgeCenterButtonEl = document.querySelector("#knowledgeCenterButton");
   const createTaskButtonEl = document.querySelector("#createTaskButton");
   const schedulerNoteEl = document.querySelector("#schedulerNote");
   document.querySelector("#resetButton").addEventListener("click", newTask);
   createTaskButtonEl.addEventListener("click", newTask);
   archiveViewButtonEl.addEventListener("click", () => {
+    ui.module = "flow";
     ui.showArchived = !ui.showArchived;
     saveUi();
     renderTaskConsole();
+  });
+  knowledgeCenterButtonEl.addEventListener("click", async () => {
+    captureVisibleFields();
+    ui.module = ui.module === "knowledge-center" ? "flow" : "knowledge-center";
+    ui.showArchived = false;
+    saveUi();
+    render();
+    if (ui.module === "knowledge-center") await refreshKnowledgeCenter();
   });
   stepsEl.addEventListener("click", (event) => {
     const moduleButton = event.target.closest("[data-module-jump]");
@@ -124,7 +146,7 @@
   });
 
   const taskViewKeys = [
-    "module", "viewStage", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
+    "module", "viewStage", "knowledgeFilter", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
     "existingDocumentPath", "existingWorktreePath",
     "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
   ];
@@ -399,9 +421,9 @@
     defaultUi.baseBranch = health.project?.defaultBaseBranch || "main";
     if (!ui.taskId && (!ui.baseBranch || ui.baseBranch === previousDefaultBranch)) ui.baseBranch = defaultUi.baseBranch;
     const projectName = health.project?.name || "Project";
-    document.title = `${projectName} · 需求工作流控制台`;
+    document.title = `${projectName} · DevConductor`;
     const projectEyebrow = document.querySelector("#projectEyebrow");
-    if (projectEyebrow) projectEyebrow.textContent = `${projectName} · Project Flow`;
+    if (projectEyebrow) projectEyebrow.textContent = `${projectName} · DevConductor`;
     serviceBadgeEl.textContent = health.ok ? `本地服务已连接 · ${health.codex.version}` : "本地服务预检失败";
     serviceBadgeEl.style.borderColor = health.ok ? "#92bea9" : "#d8a0a6";
     serviceBadgeEl.style.background = health.ok ? "#eaf7f1" : "#fff0f1";
@@ -462,8 +484,8 @@
   function summaryFromTask(value) {
     let state = "attention";
     if (value.archivedAt) state = "archived";
-    else if (value.git?.committed) state = "done";
     else if (value.activeJob) state = value.jobState === "queued" ? "queued" : "running";
+    else if (value.git?.committed) state = "done";
     else if ([value.discussion, value.plan, value.worktree, value.execution].some((section) => ["error", "interrupted"].includes(section?.status))) state = "error";
     return {
       id: value.id,
@@ -480,6 +502,11 @@
       worktree: value.worktree,
       intakeMode: value.intake?.mode || "new",
       committed: Boolean(value.git?.committed),
+      knowledge: {
+        status: value.knowledge?.status || "idle",
+        pending: (value.knowledge?.candidates || []).filter((item) => item.status === "pending").length,
+        approved: (value.knowledge?.candidates || []).filter((item) => item.status === "approved").length
+      },
       appLinked: Boolean(value.app?.threadId),
       agent: {
         id: String(value.agentMemory?.logicalAgentId || value.id).slice(0, 8),
@@ -501,6 +528,23 @@
     taskSummaries = result.tasks || [];
     scheduler = result.scheduler || scheduler;
     return result;
+  }
+
+  async function refreshKnowledgeCenter() {
+    if (!token || knowledgeLoading) return;
+    knowledgeLoading = true;
+    knowledgeError = "";
+    render();
+    try {
+      const result = await api("/api/knowledge");
+      knowledgeCandidates = Array.isArray(result.candidates) ? result.candidates : [];
+      knowledgeLoaded = true;
+    } catch (error) {
+      knowledgeError = error.message || "无法读取沉淀候选。";
+    } finally {
+      knowledgeLoading = false;
+      render();
+    }
   }
 
   async function refreshProjectBranches() {
@@ -531,6 +575,7 @@
       try { await refreshProjectBranches(); }
       catch (_) { /* 输入页保留 Profile 默认分支，并展示读取错误。 */ }
       await refreshTaskSummaries();
+      if (ui.module === "knowledge-center") await refreshKnowledgeCenter();
       if (ui.taskId) {
         try {
           const result = await api(`/api/tasks/${ui.taskId}`);
@@ -561,6 +606,15 @@
         const wasActive = task?.activeJob;
         const selectedId = task?.id;
         await refreshTaskSummaries();
+        if (ui.module === "knowledge-center" && !knowledgeLoading) {
+          const knowledgeResult = await api("/api/knowledge");
+          const nextCandidates = Array.isArray(knowledgeResult.candidates) ? knowledgeResult.candidates : [];
+          if (JSON.stringify(nextCandidates) !== JSON.stringify(knowledgeCandidates)) {
+            knowledgeCandidates = nextCandidates;
+            knowledgeLoaded = true;
+            workspaceRefreshPending = true;
+          }
+        }
         const selectedSummary = taskSummaries.find((item) => item.id === selectedId);
         const selectedExecutionPhase = selectedSummary?.executionPhase ?? (selectedId === task?.id ? task?.execution?.phase || "" : "");
         const selectedTaskChanged = selectedSummary && (
@@ -601,11 +655,13 @@
 
   function activeFlowStageId() {
     if (!task) return "input";
+    if (task.stage === "knowledge") return "knowledge";
     return task.git?.committed ? "bugfix" : task.stage;
   }
 
   function isCompletedStage(stageId) {
     if (!task) return false;
+    if (stageId === "bugfix" && task.git?.committed) return false;
     const index = stages.findIndex((item) => item.id === stageId);
     const furthest = Math.max(0, Number(task.maxStageIndex) || 0);
     return index >= 0 && (index < furthest || (stageId === "commit" && Boolean(task.git?.committed)));
@@ -636,9 +692,12 @@
 
   function statusText() {
     if (!health?.ok) return "等待启动本地服务";
+    if (ui.module === "knowledge-center") {
+      const pending = knowledgeCandidates.filter((item) => item.status === "pending").length;
+      return `沉淀中心 · ${pending} 条待审核`;
+    }
     if (!task) return "等待输入需求";
     if (task.archivedAt) return "任务已归档 · 恢复后可继续";
-    if (task.git?.committed) return `Commit 完成 · ${task.git.commitId.slice(0, 12)}${task.stage === "bugfix" ? " · 可继续修 Bug" : ""}`;
     if (task.activeJob) {
       if (task.activeJob === "execution" && task.stage === "bugfix") {
         if (task.jobState === "queued") return "Bug 任务排队中";
@@ -649,6 +708,7 @@
           : jobLabel(task.activeJob);
       return `${label}${task.jobState === "queued" ? "排队中" : "正在运行"}`;
     }
+    if (task.git?.committed && task.stage !== "knowledge") return `Commit 完成 · ${task.git.commitId.slice(0, 12)}${task.stage === "bugfix" ? " · 可继续修 Bug" : ""}`;
     const map = {
       discuss: "等待讨论与口径确认",
       plan: "等待 Plan 逻辑验收",
@@ -656,30 +716,32 @@
       execute: task.execution?.status === "needs_attention" ? "Review 仍有发现" : "等待执行 Plan",
       verify: "等待人工验收",
       commit: "等待 Commit 确认",
-      bugfix: ({ running: "Bug 定向修改中", review: "Bug Review 等待继续修改", verify: "等待 Bug 人工复验", commit: "等待 Bug 修复 Commit" })[task.bugfix?.status] || "等待 Bug 反馈或任务归档"
+      bugfix: ({ running: "Bug 定向修改中", review: "Bug Review 等待继续修改", verify: "等待 Bug 人工复验", commit: "等待 Bug 修复 Commit" })[task.bugfix?.status] || "等待 Bug 反馈或进入沉淀",
+      knowledge: ({ queued: "沉淀提炼排队中", running: "正在提炼沉淀候选", ready: "等待审核沉淀候选", error: "沉淀提炼需要处理", interrupted: "沉淀提炼已中断" })[task.knowledge?.status] || "等待生成沉淀候选"
     };
     return map[task.stage] || "等待操作";
   }
 
   function jobLabel(value) {
-    return ({ discussion: "需求讨论", plan: "Plan 生成", worktree: "Worktree 创建", execution: "Plan 执行", ask: "Ask 只读问答" })[value] || value;
+    return ({ discussion: "需求讨论", plan: "Plan 生成", worktree: "Worktree 创建", execution: "Plan 执行", knowledge: "沉淀提炼", ask: "Ask 只读问答" })[value] || value;
   }
 
   function render() {
     destroySectionNavigator();
     workspaceRefreshPending = false;
     renderShell();
+    const knowledgeCenterActive = ui.module === "knowledge-center";
     const stageId = currentStageId();
     const askActive = Boolean(task && ui.module === "ask");
-    const completedStageView = !askActive && isCompletedStageView(stageId);
-    const meta = askActive ? askModule : stages.find((item) => item.id === stageId) || stages[0];
+    const completedStageView = !knowledgeCenterActive && !askActive && isCompletedStageView(stageId);
+    const meta = knowledgeCenterActive ? knowledgeCenterModule : askActive ? askModule : stages.find((item) => item.id === stageId) || stages[0];
     stageTitleEl.textContent = completedStageView
       ? `${meta.title} · 只读回看`
-      : askActive ? meta.title : task?.git?.committed && stageId === "commit" ? "Commit 已完成" : meta.title;
+      : knowledgeCenterActive || askActive ? meta.title : task?.git?.committed && stageId === "commit" ? "Commit 已完成" : meta.title;
     stageDescriptionEl.textContent = completedStageView
       ? "该阶段已经完成，仅展示当时结果；所有会改变流程或重复执行的操作均已锁定。"
       : meta.description;
-    const renderers = { input: renderInput, discuss: renderDiscuss, plan: renderPlan, worktree: renderWorktree, execute: renderExecute, verify: renderVerify, commit: renderCommit, bugfix: renderBugfix };
+    const renderers = { input: renderInput, discuss: renderDiscuss, plan: renderPlan, worktree: renderWorktree, execute: renderExecute, verify: renderVerify, commit: renderCommit, bugfix: renderBugfix, knowledge: renderKnowledge };
     const archiveNotice = task?.archivedAt
       ? callout(`<strong>该任务已归档。</strong> 当前仅供回看；请从左侧归档列表恢复后再继续执行。`, "warning")
       : "";
@@ -688,15 +750,21 @@
     const completedNotice = completedStageView
       ? `<section class="completed-stage-notice">${callout(`<strong>已完成阶段，只读回看。</strong> 为避免误判进度或重复执行，本阶段的输入和执行入口已锁定。当前进度：${escapeHTML(currentMeta?.label || activeStageId)}。`, "ok")}<button class="primary" id="goActiveStage" data-readonly-view type="button">返回当前阶段</button></section>`
       : "";
-    const stageView = askActive ? renderAsk() : `<div class="flow-stage-view ${completedStageView ? "completed-stage-view" : ""}">${renderers[stageId]()}</div>`;
-    stageContentEl.innerHTML = `${archiveNotice}${renderCodexAppPanel()}${renderAgentMemory()}${completedNotice}${stageView}`;
+    const stageView = knowledgeCenterActive
+      ? renderKnowledgeCenter()
+      : askActive
+        ? renderAsk()
+        : `<div class="flow-stage-view ${completedStageView ? "completed-stage-view" : ""}">${renderers[stageId]()}</div>`;
+    stageContentEl.innerHTML = knowledgeCenterActive
+      ? stageView
+      : `${archiveNotice}${renderCodexAppPanel()}${renderAgentMemory()}${completedNotice}${stageView}`;
     document.querySelector(".app-shell")?.classList.toggle("verification-layout-active", Boolean(stageContentEl.querySelector(".verification-case-layout")));
-    attachHandlers(askActive ? "ask" : stageId);
+    attachHandlers(knowledgeCenterActive ? "knowledge-center" : askActive ? "ask" : stageId);
     if (completedStageView) lockCompletedStageView(stageContentEl);
-    if (task?.archivedAt) {
+    if (!knowledgeCenterActive && task?.archivedAt) {
       stageContentEl.querySelectorAll("button, input, textarea, select").forEach((control) => { control.disabled = true; });
     }
-    setupSectionNavigator(askActive ? "ask" : stageId);
+    setupSectionNavigator(knowledgeCenterActive ? "knowledge-center" : askActive ? "ask" : stageId);
     saveUi();
   }
 
@@ -894,6 +962,9 @@
     });
     taskFiltersEl.hidden = ui.showArchived;
     taskQueueTitleEl.textContent = ui.showArchived ? "归档任务" : "需求队列";
+    knowledgeCenterButtonEl.textContent = ui.module === "knowledge-center" ? "返回任务" : "沉淀中心";
+    knowledgeCenterButtonEl.setAttribute("aria-pressed", ui.module === "knowledge-center" ? "true" : "false");
+    knowledgeCenterButtonEl.disabled = busy || !health?.features?.knowledge;
     archiveViewButtonEl.textContent = ui.showArchived ? "返回队列" : `查看归档${archivedTasks.length ? ` ${archivedTasks.length}` : ""}`;
     archiveViewButtonEl.setAttribute("aria-pressed", ui.showArchived ? "true" : "false");
     const managementReady = taskManagementReady();
@@ -934,7 +1005,7 @@
     const flowSteps = stages.map((item, index) => {
       const reached = index <= furthest;
       const completed = isCompletedStage(item.id);
-      const active = ui.module !== "ask" && index === current;
+      const active = ui.module === "flow" && index === current;
       const cls = `${completed ? "completed" : ""} ${active ? "current" : ""}`.trim();
       const title = completed ? "已完成，仅供只读回看" : active ? "当前阶段" : reached ? "已到达" : "尚未到达";
       return `<button type="button" class="step ${cls}" data-stage-jump="${item.id}" ${reached ? "" : "disabled"} ${active ? 'aria-current="step"' : ""} title="${title}"><span class="step-number">${completed ? "✓" : index + 1}</span><span class="step-label">${item.label}</span>${completed ? '<span class="step-state">只读</span>' : ""}</button>`;
@@ -1470,7 +1541,75 @@
       <section class="section"><div class="path-list"><div class="path-row"><span>当前 HEAD</span><strong class="mono">${escapeHTML(task.git.head || task.git.commitId)}</strong></div><div class="path-row"><span>最近确认的 Commit</span><strong class="mono">${escapeHTML(task.git.commitId)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div></div></section>
       ${renderExecutionModeSelector("bugfix")}
       <section class="section"><div class="field"><label for="bugfixDescription">Bug 描述与复现信息</label><textarea id="bugfixDescription" maxlength="8000" placeholder="建议填写：复现步骤、实际结果、预期结果、设备/版本、关键日志……">${escapeHTML(ui.bugfixDescription)}</textarea>${renderFeedbackImageInput("bugfix")}</div><p class="hint">文字和图片可以单独或一起提交。快速模式走“定向修改 → 自检 → 人工复验”，标准模式额外运行独立 Review；两者最后都需要新 Commit。不会自动 Push 或 Merge。</p></section>
-      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button><button id="newTaskButton">没有 Bug，新建下一条需求</button></div><div class="actions-primary"><button class="primary" id="startBugfix" ${!task.activeJob && (ui.bugfixDescription.trim() || feedbackImageItems("bugfix").length) ? "" : "disabled"}>开始修复 Bug</button></div></div>${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button><button id="newTaskButton">没有 Bug，新建下一条需求</button></div><div class="actions-primary">${health?.features?.knowledge ? `<button id="generateKnowledge" ${task.activeJob ? "disabled" : ""}>完成任务并生成沉淀建议</button>` : ""}<button class="primary" id="startBugfix" ${!task.activeJob && (ui.bugfixDescription.trim() || feedbackImageItems("bugfix").length) ? "" : "disabled"}>开始修复 Bug</button></div></div>${eventLogDetails()}`;
+  }
+
+  const knowledgeTypeLabels = {
+    fact: "稳定事实",
+    decision: "关键决策",
+    runbook: "操作手册",
+    pitfall: "踩坑",
+    acceptance: "验收规律",
+    skill: "Skill 候选",
+    automation: "自动化候选"
+  };
+
+  function renderKnowledgeCandidate(candidate, center = false) {
+    const status = ["pending", "approved", "ignored"].includes(candidate.status) ? candidate.status : "pending";
+    const statusLabel = ({ pending: "待审核", approved: "已保留", ignored: "已忽略" })[status];
+    const scopeLabel = candidate.scope === "global-candidate" ? "跨项目候选" : "当前项目";
+    const archived = Boolean(candidate.taskArchivedAt);
+    const evidence = (candidate.evidence || []).map((item) => `<li><strong>${escapeHTML(item.source)}</strong> · <span class="mono">${escapeHTML(item.reference)}</span>${item.detail ? ` — ${escapeHTML(item.detail)}` : ""}</li>`).join("");
+    const appliesTo = (candidate.appliesTo || []).join("、") || "未限定";
+    const nonScope = (candidate.nonScope || []).join("、") || "无";
+    const locked = busy || archived;
+    return `<article class="knowledge-card" data-status="${escapeHTML(status)}">
+      <div class="knowledge-card-head"><div><div class="knowledge-badges"><span class="knowledge-badge">${escapeHTML(knowledgeTypeLabels[candidate.type] || candidate.type)}</span><span class="knowledge-badge scope">${escapeHTML(scopeLabel)}</span><span class="knowledge-badge">${escapeHTML(statusLabel)}</span></div><h3>${escapeHTML(candidate.title)}</h3>${center ? `<p class="knowledge-source">来源：${escapeHTML(candidate.taskTitle || "未命名需求")} · ${escapeHTML(formatDateTime(candidate.generatedAt))}${archived ? " · 已归档" : ""}</p>` : ""}</div>${center ? `<button type="button" data-knowledge-task="${escapeHTML(candidate.taskId)}">查看任务</button>` : ""}</div>
+      <p class="knowledge-card-content">${escapeHTML(candidate.content)}</p>
+      <div class="knowledge-meta"><span><strong>适用：</strong>${escapeHTML(appliesTo)}</span><span><strong>不适用：</strong>${escapeHTML(nonScope)}</span><span><strong>建议去向：</strong>${escapeHTML(candidate.suggestedTarget || "待审核时决定")}</span>${candidate.novelty ? `<span><strong>为何值得沉淀：</strong>${escapeHTML(candidate.novelty)}</span>` : ""}</div>
+      ${evidence ? `<details><summary>核验证据 · ${(candidate.evidence || []).length}</summary><ul class="knowledge-evidence">${evidence}</ul></details>` : callout("这条候选没有足够的直接证据，建议忽略。", "warning")}
+      <div class="knowledge-card-actions"><button type="button" data-knowledge-review="ignored" data-knowledge-task-id="${escapeHTML(candidate.taskId || task?.id || "")}" data-knowledge-candidate-id="${escapeHTML(candidate.id)}" ${locked || status === "ignored" ? "disabled" : ""}>${status === "ignored" ? "已忽略" : "忽略"}</button><button class="primary" type="button" data-knowledge-review="approved" data-knowledge-task-id="${escapeHTML(candidate.taskId || task?.id || "")}" data-knowledge-candidate-id="${escapeHTML(candidate.id)}" ${locked || status === "approved" ? "disabled" : ""}>${status === "approved" ? "已保留候选" : "保留候选"}</button></div>
+      ${archived ? '<p class="hint">任务已归档；恢复后才能修改审核状态。</p>' : ""}
+    </article>`;
+  }
+
+  function renderKnowledge() {
+    const section = task.knowledge || { status: "idle", candidates: [] };
+    if (["queued", "running"].includes(section.status)) {
+      const minutes = Math.ceil(Number(health?.limits?.knowledgeSeconds || 240) / 60);
+      return `${renderProgress(section, "正在从交付证据中提炼沉淀候选")}<p class="hint">最长约 ${minutes} 分钟；只读检查代码、Plan、Commit 和验证证据，不会修改项目文件或 Git。</p>`;
+    }
+    if (["error", "interrupted"].includes(section.status)) {
+      return `<section class="section">${callout(`<strong>沉淀提炼未完成：</strong>${escapeHTML(section.error)}`, "danger")}</section><div class="actions"><div class="actions-secondary"><button id="backToBugfix">返回 Bug 修复</button></div><div class="actions-primary"><button class="primary" id="generateKnowledge">重试生成沉淀候选</button></div></div>${eventLogDetails()}`;
+    }
+    if (section.status !== "ready") {
+      return `<section class="section">${callout("<strong>Commit 已闭环。</strong> 点击后会只读提炼最多 5 条可复用候选；不会自动写入项目文档、Skill 或 Git。", "warning")}</section><div class="actions"><div class="actions-secondary"><button id="backToBugfix">返回 Bug 修复</button></div><div class="actions-primary"><button class="primary" id="generateKnowledge">生成沉淀候选</button></div></div>${eventLogDetails()}`;
+    }
+    const candidates = section.candidates || [];
+    const pending = candidates.filter((item) => item.status === "pending").length;
+    const approved = candidates.filter((item) => item.status === "approved").length;
+    const result = candidates.length
+      ? `<div class="knowledge-grid">${candidates.map((item) => renderKnowledgeCandidate(item)).join("")}</div>`
+      : callout("<strong>本任务无需沉淀。</strong> 没有发现比现有项目知识更稳定、可复用的新经验。", "ok");
+    return `<section class="section">${callout("<strong>候选已生成，但尚未发布。</strong> “保留候选”只记录你的审核意见；后续如需写入项目知识库，仍应走单独的发布门禁。", "warning")}<div class="summary-grid" style="margin-top:16px"><div class="summary-item"><span>生成结果</span><strong>${escapeHTML(section.summary || `${candidates.length} 条候选`)}</strong></div><div class="summary-item"><span>审核进度</span><strong>${approved} 保留 · ${pending} 待审核</strong></div></div>${result}</section>
+      <div class="actions"><div class="actions-secondary"><button id="backToBugfix">返回 Bug 修复</button><button id="newTaskButton">新建下一条需求</button></div><div class="actions-primary"><button id="generateKnowledge">重新生成候选</button></div></div>${eventLogDetails()}`;
+  }
+
+  function renderKnowledgeCenter() {
+    const counts = { all: knowledgeCandidates.length, pending: 0, approved: 0, ignored: 0 };
+    knowledgeCandidates.forEach((item) => { if (counts[item.status] !== undefined) counts[item.status] += 1; });
+    const filter = counts[ui.knowledgeFilter] !== undefined ? ui.knowledgeFilter : "pending";
+    const labels = { pending: "待审核", approved: "已保留", ignored: "已忽略", all: "全部" };
+    const visible = filter === "all" ? knowledgeCandidates : knowledgeCandidates.filter((item) => item.status === filter);
+    const filters = Object.entries(labels).map(([id, label]) => `<button type="button" data-knowledge-filter="${id}" class="${filter === id ? "active" : ""}">${label} ${counts[id]}</button>`).join("");
+    const body = knowledgeLoading && !knowledgeLoaded
+      ? renderProgress({ status: "running", logs: [] }, "正在读取跨任务沉淀候选")
+      : knowledgeError
+        ? callout(`<strong>沉淀中心读取失败：</strong>${escapeHTML(knowledgeError)}`, "danger")
+        : visible.length
+          ? `<div class="knowledge-grid">${visible.map((item) => renderKnowledgeCandidate(item, true)).join("")}</div>`
+          : callout(filter === "pending" ? "<strong>没有待审核候选。</strong> 已完成的任务可以在“沉淀”阶段生成新候选。" : `<strong>${escapeHTML(labels[filter])}列表为空。</strong>`, "ok");
+    return `<section class="section"><div class="knowledge-toolbar"><div><p class="section-kicker">Knowledge Review</p><h3>统一审核，不自动发布</h3><p class="section-copy">这里聚合所有任务的候选。审核只写入 <code>.runtime</code>；不会修改项目文档、Skill、代码或 Git。</p></div><button id="refreshKnowledgeCenter" type="button" ${knowledgeLoading ? "disabled" : ""}>刷新</button></div><div class="knowledge-filters" style="margin-top:16px">${filters}</div>${body}</section>`;
   }
 
   function staticCheck(title, detail) {
@@ -1613,6 +1752,22 @@
     on("commitChanges", "click", commitChanges);
     on("startBugfix", "click", startBugfix);
     on("continueBugfix", "click", () => executePlan(""));
+    on("generateKnowledge", "click", generateKnowledge);
+    on("backToBugfix", "click", () => { ui.module = "flow"; ui.viewStage = "bugfix"; render(); });
+    on("refreshKnowledgeCenter", "click", refreshKnowledgeCenter);
+    document.querySelectorAll("[data-knowledge-filter]").forEach((button) => button.addEventListener("click", () => {
+      ui.knowledgeFilter = button.dataset.knowledgeFilter || "pending";
+      saveUi();
+      render();
+    }));
+    document.querySelectorAll("[data-knowledge-review]").forEach((button) => button.addEventListener("click", () => {
+      reviewKnowledge(
+        button.dataset.knowledgeTaskId,
+        button.dataset.knowledgeCandidateId,
+        button.dataset.knowledgeReview
+      );
+    }));
+    document.querySelectorAll("[data-knowledge-task]").forEach((button) => button.addEventListener("click", () => openKnowledgeTask(button.dataset.knowledgeTask)));
     on("submitAsk", "click", submitAsk);
     on("cancelAsk", "click", () => cancelActiveJob("Ask"));
     on("askQuestion", "input", (event) => {
@@ -1912,6 +2067,51 @@
     });
   }
 
+  async function generateKnowledge() {
+    if (!task?.id) return;
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/knowledge`, {});
+      setTask(result.task, true);
+      showToast("沉淀提炼已进入只读后台队列。" );
+    });
+  }
+
+  async function reviewKnowledge(taskId, candidateId, decision) {
+    if (!taskId || !candidateId || !["approved", "ignored"].includes(decision)) return;
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${taskId}/knowledge/${candidateId}/review`, { decision });
+      if (task?.id === taskId) {
+        task = result.task;
+        upsertTaskSummary(task);
+      }
+      const centerActive = ui.module === "knowledge-center";
+      if (centerActive) await refreshKnowledgeCenter();
+      showToast(decision === "approved" ? "候选已保留在本地审核清单；尚未发布到项目。" : "候选已忽略。" );
+    });
+  }
+
+  async function openKnowledgeTask(taskId) {
+    if (!taskId) return;
+    if (task?.id === taskId) {
+      ui.module = "flow";
+      ui.viewStage = task.stage;
+      saveUi();
+      render();
+      return;
+    }
+    captureVisibleFields();
+    saveUi();
+    await withAction(async () => {
+      const result = await api(`/api/tasks/${taskId}`);
+      selectedFile = null;
+      setTask(result.task, false);
+      ui.module = "flow";
+      ui.viewStage = result.task.stage;
+      saveUi();
+      render();
+    });
+  }
+
   async function manageTask(taskId, action) {
     if (!taskId || !["archive", "restore", "delete"].includes(action)) return;
     const summary = taskSummaries.find((item) => item.id === taskId);
@@ -1962,6 +2162,7 @@
     delete taskViews.__new__;
     ui.showArchived = false;
     activateTaskView("__new__");
+    ui.module = "flow";
     saveUi();
     render();
     schedulePoll();

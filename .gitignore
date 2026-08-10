@@ -1,3 +1,4 @@
+# Local-only task state: task.json, task-memory.json, attachments, logs, and structured outputs.
 .runtime/
 __pycache__/
 *.py[cod]

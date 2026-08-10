@@ -1,4 +1,4 @@
 interface:
-  display_name: "Project Flow Setup"
-  short_description: "扫描 Git 项目并生成可直接启动的 Project Flow Profile"
-  default_prompt: "Use $project-flow-setup to configure this Git project for the shared requirement workflow console."
+  display_name: "DevConductor Setup"
+  short_description: "扫描 Git 项目并生成可直接启动的 DevConductor Profile"
+  default_prompt: "Use $project-flow-setup to configure this Git project for DevConductor."
