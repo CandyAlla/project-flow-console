@@ -54,6 +54,8 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 - 任务级“沉淀”阶段和跨任务“沉淀中心”支持保留或忽略候选；审核只更新 `.runtime`，不会自动修改项目文档、Skill、代码或 Git。
 - 每个任务提供独立 Ask 只读问答，可询问当前实现、状态来源、相关文件和修改影响范围，不改变任务阶段。
 - 多需求队列可切换查看，支持归档、删除、恢复和有限并行。
+- Project Hub 统一展示所有项目、全部任务和跨项目沉淀；左侧项目轨道可随时切换，后台任务不会因切换视图而停止。
+- 可以从控制台扫描本地 Git 项目生成 Profile，也可以接入已有 Project Profile；添加前必须先查看 dry-run 预览。
 - 每个项目由独立 Profile 配置，不在服务代码中写死路径。
 
 ## 运行环境
@@ -78,6 +80,7 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 
 ```text
 DevConductor/
+├── hub.py                         # 多项目 Hub、Worker 路由与全局并发门禁
 ├── server.py
 ├── app.js
 ├── index.html
@@ -96,6 +99,9 @@ DevConductor/
 
 ```text
 .runtime/<project-id>/tasks/
+.runtime/hub/projects.json         # 工具目录外 Profile 的本机路径引用
+.runtime/hub/logs/                 # 各项目 Worker 日志
+.runtime/hub/job-slots/            # 跨项目并发锁
 ```
 
 不同 Profile 的任务队列和任务记忆互相隔离，`.runtime/` 已加入 `.gitignore`。
@@ -185,9 +191,40 @@ python3 skills/project-flow-setup/scripts/configure_project.py \
 python3 skills/project-flow-setup/scripts/configure_project.py --help
 ```
 
-### 4. 启动控制台
+### 4. 启动多项目控制台
 
-首次使用或从 GitHub 新克隆后，建议显式设置 Profile：
+macOS 推荐直接运行：
+
+```bash
+./start.command
+```
+
+未设置 `PROJECT_FLOW_PROFILE` 时，`start.command` 默认启动 Project Hub。Hub 自动发现 `profiles/*.json`，项目 Worker 在首次进入项目或汇总跨项目数据时按需启动。
+
+即使当前还没有任何 Profile，Hub 也可以启动；页面会直接进入“所有项目”，通过“＋ 添加项目”完成第一次配置。
+
+如果 4318 上已经有旧的单项目服务在运行，`start.command` 会直接打开它，不会为了切换 Hub 而中断正在执行的任务；等任务完成并正常停止旧服务后，再次启动即可进入 Hub。
+
+也可以直接运行：
+
+```bash
+python3 hub.py --port 4318
+```
+
+打开 `http://127.0.0.1:4318/` 后：
+
+1. 左侧最窄的项目轨道用于切换项目；顶部“⌂”进入所有项目首页。
+2. 所有项目首页可以查看全部任务和跨项目沉淀。
+3. 点击“＋ 添加项目”，可扫描 Git 项目或填写已有 Profile 绝对路径。
+4. 扫描只读预览通过后，点击“确认添加”才会生成或登记 Profile；不会创建 Worktree、执行 Plan 或修改项目代码。
+
+每个项目继续使用独立的 Profile、Worker 进程、任务目录、Codex 会话和 Git 写锁。切换项目只改变当前视图，不会停止其他项目正在运行的任务。
+
+同一个项目运行目录同一时间只允许一个控制器占用；如果已经有单项目服务或另一个 Hub Worker 在运行，新进程会拒绝启动该项目，避免两个进程同时写 `task.json`。
+
+### 5. 单项目兼容启动
+
+需要保持旧的单项目入口时，显式设置 Profile：
 
 ```bash
 PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" python3 server.py
@@ -213,6 +250,38 @@ My Project · DevConductor: http://127.0.0.1:4318/
 ```
 
 在浏览器打开该地址即可。
+
+单项目模式与已有任务数据保持兼容，但不会显示项目轨道和所有项目首页。
+
+## 多项目架构与并发
+
+DevConductor 使用 `Project Hub + 每项目独立 Worker`：
+
+```text
+Browser
+  └── Project Hub :4318
+        ├── Project A Worker → Profile A → Repo / Worktrees / .runtime/A
+        ├── Project B Worker → Profile B → Repo / Worktrees / .runtime/B
+        └── Project C Worker → Profile C → Repo / Worktrees / .runtime/C
+```
+
+Hub 只负责项目注册、API 路由、聚合视图和全局并发门禁。实际需求流程仍由原有单项目 `server.py` 执行，因此不会在一个进程里动态替换 `REPO_ROOT`、`TASK_ROOT` 或 Git 上下文。
+
+默认并发限制：
+
+- 单项目最多 2 个后台任务。
+- 所有项目合计最多 4 个后台任务。
+- 同一个项目的 Git 写操作继续使用该 Worker 内的独占锁。
+
+可以在启动 Hub 前调整：
+
+```bash
+PROJECT_FLOW_PROJECT_CONCURRENCY=2 \
+PROJECT_FLOW_GLOBAL_CONCURRENCY=4 \
+python3 hub.py
+```
+
+项目 Worker 不是常驻 Agent。没有阶段正在执行时，它只保存和提供任务状态；每条需求的上下文仍由 `task-memory.json`、Plan 路径与 Hash、Codex session / Thread 和 Git 指纹恢复。
 
 ## 如何使用控制台
 

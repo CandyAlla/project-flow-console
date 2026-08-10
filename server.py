@@ -30,10 +30,15 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import quote, unquote, urlparse
 
+try:
+    import fcntl
+except ImportError:  # Windows keeps single-project compatibility; Hub global slots require POSIX file locks.
+    fcntl = None  # type: ignore[assignment]
+
 
 TOOL_DIR = Path(__file__).resolve().parent
 PRODUCT_NAME = "DevConductor"
-PRODUCT_VERSION = "2.5.0"
+PRODUCT_VERSION = "2.6.0"
 SCHEMA_ROOT = TOOL_DIR / "schemas"
 TASK_RUNTIME_CONTRACT = TOOL_DIR / "skills" / "project-flow-setup" / "references" / "task-runtime-contract.md"
 WORKTREE_SCRIPT = TOOL_DIR / "scripts" / "create_git_worktree.py"
@@ -52,7 +57,9 @@ REPO_ROOT = TOOL_DIR
 DOCS_ROOT = TOOL_DIR
 WORKTREES_ROOT = TOOL_DIR / "worktrees"
 HTML_TASK_ROOT = TOOL_DIR / "html"
-RUNTIME_ROOT = TOOL_DIR / ".runtime" / PROJECT_ID
+RUNTIME_BASE_VALUE = os.environ.get("PROJECT_FLOW_RUNTIME_BASE", "").strip()
+RUNTIME_BASE = Path(RUNTIME_BASE_VALUE).expanduser().resolve(strict=False) if RUNTIME_BASE_VALUE else TOOL_DIR / ".runtime"
+RUNTIME_ROOT = RUNTIME_BASE / PROJECT_ID
 TASK_ROOT = RUNTIME_ROOT / "tasks"
 PLAN_RELATIVE_DIR = "Docs/plans/active"
 DEFAULT_BASE_BRANCH = "main"
@@ -141,6 +148,15 @@ try:
     MAX_CONCURRENT_JOBS = max(1, min(4, int(os.environ.get("PROJECT_FLOW_CONCURRENCY", "2"))))
 except ValueError:
     MAX_CONCURRENT_JOBS = 2
+
+try:
+    GLOBAL_CONCURRENT_JOBS = max(1, min(16, int(os.environ.get("PROJECT_FLOW_GLOBAL_CONCURRENCY", "4"))))
+except ValueError:
+    GLOBAL_CONCURRENT_JOBS = 4
+
+GLOBAL_SLOT_DIR_VALUE = os.environ.get("PROJECT_FLOW_GLOBAL_SLOT_DIR", "").strip()
+GLOBAL_SLOT_DIR = Path(GLOBAL_SLOT_DIR_VALUE).expanduser().resolve(strict=False) if GLOBAL_SLOT_DIR_VALUE else None
+GLOBAL_SLOTS_ENABLED = GLOBAL_SLOT_DIR is not None and fcntl is not None
 
 try:
     REVIEW_TIMEOUT_SECONDS = max(180, min(1800, int(os.environ.get("PROJECT_FLOW_REVIEW_TIMEOUT", "600"))))
@@ -576,7 +592,7 @@ def apply_project_profile(
     DOCS_ROOT = Path(validated["docsRoot"])
     WORKTREES_ROOT = Path(validated["worktreesRoot"])
     HTML_TASK_ROOT = Path(validated["htmlTaskRoot"])
-    RUNTIME_ROOT = TOOL_DIR / ".runtime" / PROJECT_ID
+    RUNTIME_ROOT = RUNTIME_BASE / PROJECT_ID
     TASK_ROOT = RUNTIME_ROOT / "tasks"
     PLAN_RELATIVE_DIR = validated["planRelativeDir"]
     DEFAULT_BASE_BRANCH = validated["defaultBaseBranch"]
@@ -1319,7 +1335,39 @@ def scheduler_payload() -> dict[str, int]:
     with LOCK:
         running = sum(1 for task in TASKS.values() if task.get("activeJob") and task.get("jobState") == "running")
         queued = sum(1 for task in TASKS.values() if task.get("activeJob") and task.get("jobState") == "queued")
-    return {"maxConcurrentJobs": MAX_CONCURRENT_JOBS, "runningJobs": running, "queuedJobs": queued}
+    return {
+        "maxConcurrentJobs": MAX_CONCURRENT_JOBS,
+        "projectMaxConcurrentJobs": MAX_CONCURRENT_JOBS,
+        "globalMaxConcurrentJobs": GLOBAL_CONCURRENT_JOBS if GLOBAL_SLOTS_ENABLED else MAX_CONCURRENT_JOBS,
+        "runningJobs": running,
+        "queuedJobs": queued,
+    }
+
+
+@contextlib.contextmanager
+def global_job_slot(task_id: str) -> Iterator[None]:
+    """Acquire one cross-process slot when this Worker is managed by the Project Hub."""
+    if not GLOBAL_SLOTS_ENABLED or GLOBAL_SLOT_DIR is None or fcntl is None:
+        yield
+        return
+    GLOBAL_SLOT_DIR.mkdir(parents=True, exist_ok=True)
+    while True:
+        if task_id in CANCEL_REQUESTED:
+            raise WorkflowError("用户已停止当前任务。")
+        for index in range(GLOBAL_CONCURRENT_JOBS):
+            handle = (GLOBAL_SLOT_DIR / f"slot-{index + 1}.lock").open("a+")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.close()
+                continue
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                handle.close()
+            return
+        time.sleep(0.2)
 
 
 def add_event(task: dict[str, Any], message: str, kind: str = "info") -> None:
@@ -2338,10 +2386,11 @@ def launch_job(task_id: str, job_name: str, target: Callable[[], None]) -> None:
         try:
             JOB_SLOTS.acquire()
             acquired = True
-            with mutate_task(task_id) as task:
-                task["jobState"] = "running"
-                add_event(task, f"开始执行：{job_name}")
-            target()
+            with global_job_slot(task_id):
+                with mutate_task(task_id) as task:
+                    task["jobState"] = "running"
+                    add_event(task, f"开始执行：{job_name}")
+                target()
         except Exception as exc:  # noqa: BLE001 - background boundary
             with mutate_task(task_id) as task:
                 section = task.get(job_name)
@@ -3993,7 +4042,7 @@ def health_payload() -> dict[str, Any]:
 
 
 class WorkflowHandler(BaseHTTPRequestHandler):
-    server_version = "DevConductor/2.5"
+    server_version = "DevConductor/2.6"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(f"[{now_iso()}] {self.client_address[0]} {fmt % args}\n")
@@ -4292,6 +4341,34 @@ def verify_layout() -> None:
     HTML_TASK_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+def claim_controller_lock() -> Any:
+    """Prevent two controller processes from mutating the same project runtime."""
+    if fcntl is None:
+        return None
+    RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+    handle = (RUNTIME_ROOT / "controller.lock").open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        handle.close()
+        raise WorkflowError(
+            f"{PROJECT_NAME} 已有控制服务在使用运行目录：{RUNTIME_ROOT}。"
+            "请继续使用现有服务，或正常停止它后再启动。"
+        ) from exc
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()}\nprofile={PROFILE_PATH}\nstartedAt={now_iso()}\n")
+    handle.flush()
+    return handle
+
+
+def release_controller_lock(handle: Any) -> None:
+    if handle is None or fcntl is None:
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    handle.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the profile-driven project workflow controller.")
     parser.add_argument(
@@ -4306,6 +4383,10 @@ def main() -> int:
     if not 1024 <= port <= 65535:
         raise SystemExit("端口必须在 1024–65535 之间。")
     verify_layout()
+    try:
+        controller_lock = claim_controller_lock()
+    except WorkflowError as exc:
+        raise SystemExit(str(exc)) from exc
     load_tasks()
     server = ThreadingHTTPServer(("127.0.0.1", port), WorkflowHandler)
     print(f"{PROJECT_NAME} · {PRODUCT_NAME}: http://127.0.0.1:{port}/")
@@ -4322,6 +4403,7 @@ def main() -> int:
             stop_codex_process(process)
         shutdown_app_server()
         server.server_close()
+        release_controller_lock(controller_lock)
     return 0
 
 

@@ -1205,6 +1205,22 @@ class ControllerTests(unittest.TestCase):
         second_thread.join(1)
         self.assertIsNone(server.get_task_copy(second_id)["activeJob"])
 
+    def test_controller_lock_rejects_two_owners_for_one_project_runtime(self) -> None:
+        if server.fcntl is None:
+            self.skipTest("POSIX controller lock is unavailable")
+        runtime = self.root / "runtime-lock"
+        with mock.patch.object(server, "RUNTIME_ROOT", runtime), \
+                mock.patch.object(server, "PROJECT_NAME", "Sample"), \
+                mock.patch.object(server, "PROFILE_PATH", self.root / "sample.json"):
+            first = server.claim_controller_lock()
+            try:
+                with self.assertRaisesRegex(server.WorkflowError, "已有控制服务"):
+                    server.claim_controller_lock()
+            finally:
+                server.release_controller_lock(first)
+            second = server.claim_controller_lock()
+            server.release_controller_lock(second)
+
     def test_agent_memory_is_derived_and_persisted_with_task(self) -> None:
         task_id = "00000000-0000-0000-0000-000000000030"
         task = {

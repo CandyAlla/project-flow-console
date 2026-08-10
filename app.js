@@ -3,7 +3,9 @@
 
   window.REQUIREMENT_FLOW_REAL_APP = true;
 
-  const UI_KEY = "project-flow-controller-v2";
+  const UI_KEY_BASE = "project-flow-controller-v2";
+  const HUB_PROJECT_KEY = "dev-conductor-active-project";
+  let currentProjectId = localStorage.getItem(HUB_PROJECT_KEY) || "";
   const stages = [
     { id: "input", label: "需求输入", title: "选择需求接入方式", description: "可创建新需求，或填写已有需求文档、执行 Plan 与 Worktree；接入前先做只读校验。" },
     { id: "discuss", label: "讨论澄清", title: "先讨论，只问会导致返工的问题", description: "Codex 先读取当前 Project Profile 的项目事实，再把高返工决策压缩为 1–3 个问题。" },
@@ -62,6 +64,17 @@
   };
 
   let ui = loadUi();
+  let hubMode = false;
+  let hubToken = "";
+  let hubProjects = [];
+  let hubErrors = [];
+  let hubScheduler = { globalMaxConcurrentJobs: 4, projectMaxConcurrentJobs: 2, runningJobs: 0, queuedJobs: 0 };
+  let hubView = "project";
+  let hubSection = "projects";
+  let hubTasks = [];
+  let hubKnowledge = [];
+  let hubDataLoading = false;
+  let pendingProjectDraft = null;
   let task = null;
   let taskSummaries = [];
   let knowledgeCandidates = [];
@@ -97,6 +110,13 @@
   const knowledgeCenterButtonEl = document.querySelector("#knowledgeCenterButton");
   const createTaskButtonEl = document.querySelector("#createTaskButton");
   const schedulerNoteEl = document.querySelector("#schedulerNote");
+  const appShellEl = document.querySelector(".app-shell");
+  const projectRailEl = document.querySelector("#projectRail");
+  const projectRailListEl = document.querySelector("#projectRailList");
+  const hubDashboardEl = document.querySelector("#hubDashboard");
+  const hubHomeButtonEl = document.querySelector("#hubHomeButton");
+  const addProjectButtonEl = document.querySelector("#addProjectButton");
+  const addProjectDialogEl = document.querySelector("#addProjectDialog");
   document.querySelector("#resetButton").addEventListener("click", newTask);
   createTaskButtonEl.addEventListener("click", newTask);
   archiveViewButtonEl.addEventListener("click", () => {
@@ -144,6 +164,23 @@
     const button = event.target.closest("[data-task-open]");
     if (button) switchTask(button.dataset.taskOpen);
   });
+  hubHomeButtonEl?.addEventListener("click", () => showHubHome("projects"));
+  addProjectButtonEl?.addEventListener("click", openAddProjectDialog);
+  projectRailListEl?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-project-id]");
+    if (button) switchProject(button.dataset.projectId);
+  });
+  hubDashboardEl?.addEventListener("click", handleHubDashboardClick);
+  document.querySelector("#addProjectMode")?.addEventListener("change", (event) => {
+    const profileMode = event.target.value === "profile";
+    document.querySelector("#addProjectRepoFields").hidden = profileMode;
+    document.querySelector("#addProjectProfileFields").hidden = !profileMode;
+    document.querySelector("#addProjectPreview").hidden = true;
+    document.querySelector("#confirmAddProjectButton").disabled = true;
+    pendingProjectDraft = null;
+  });
+  document.querySelector("#previewProjectButton")?.addEventListener("click", previewProject);
+  document.querySelector("#confirmAddProjectButton")?.addEventListener("click", confirmAddProject);
 
   const taskViewKeys = [
     "module", "viewStage", "knowledgeFilter", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
@@ -157,9 +194,13 @@
     return result;
   }
 
+  function uiStorageKey(projectId = currentProjectId) {
+    return projectId ? `${UI_KEY_BASE}:${projectId}` : UI_KEY_BASE;
+  }
+
   function loadUi() {
     try {
-      const saved = JSON.parse(localStorage.getItem(UI_KEY));
+      const saved = JSON.parse(localStorage.getItem(uiStorageKey()));
       const merged = {
         ...structuredClone(defaultUi),
         ...(saved || {}),
@@ -178,7 +219,7 @@
     const viewKey = task?.id || "__new__";
     ui.taskViews ||= {};
     ui.taskViews[viewKey] = taskViewSnapshot(ui);
-    localStorage.setItem(UI_KEY, JSON.stringify(ui));
+    localStorage.setItem(uiStorageKey(), JSON.stringify(ui));
   }
 
   function activateTaskView(taskId, fallback = {}) {
@@ -227,6 +268,221 @@
     if (!value) return "";
     try { return new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }); }
     catch (_) { return value; }
+  }
+
+  function projectApiPath(path, projectId = currentProjectId) {
+    if (!hubMode || path.startsWith("/api/hub/") || path.startsWith("/api/projects/")) return path;
+    const suffix = path.startsWith("/api") ? path.slice(4) : path;
+    return `/api/projects/${encodeURIComponent(projectId)}${suffix || "/health"}`;
+  }
+
+  function projectInitials(project) {
+    const words = String(project?.name || project?.id || "P").trim().split(/[\s._-]+/).filter(Boolean);
+    return (words.length > 1 ? words.slice(0, 2).map((word) => word[0]).join("") : words[0]?.slice(0, 2) || "P").toUpperCase();
+  }
+
+  async function refreshHubProjects({ discover = false } = {}) {
+    try {
+      const response = await fetch("/api/hub/projects", { cache: "no-store" });
+      if (!response.ok) return false;
+      const payload = await response.json();
+      if (!payload?.projects || !payload.token) return false;
+      hubMode = true;
+      hubToken = payload.token;
+      token = hubToken;
+      hubProjects = payload.projects;
+      hubErrors = payload.errors || [];
+      hubScheduler = payload.scheduler || hubScheduler;
+      if (!currentProjectId || !hubProjects.some((project) => project.id === currentProjectId)) {
+        currentProjectId = hubProjects[0]?.id || "";
+        if (currentProjectId) localStorage.setItem(HUB_PROJECT_KEY, currentProjectId);
+        if (discover) ui = loadUi();
+      }
+      renderProjectRail();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function renderProjectRail() {
+    projectRailEl.hidden = !hubMode;
+    appShellEl.classList.toggle("hub-enabled", hubMode);
+    appShellEl.classList.toggle("hub-home", hubMode && hubView === "home");
+    if (!hubMode) return;
+    const projectEyebrow = document.querySelector("#projectEyebrow");
+    if (hubView === "home") {
+      document.title = "所有项目 · DevConductor";
+      if (projectEyebrow) projectEyebrow.textContent = "Project Hub · DevConductor";
+    } else {
+      const projectName = (health?.project?.id === currentProjectId ? health.project.name : "")
+        || hubProjects.find((project) => project.id === currentProjectId)?.name || "Project";
+      document.title = `${projectName} · DevConductor`;
+      if (projectEyebrow) projectEyebrow.textContent = `${projectName} · DevConductor`;
+    }
+    hubHomeButtonEl.classList.toggle("active", hubView === "home");
+    hubHomeButtonEl.setAttribute("aria-current", hubView === "home" ? "page" : "false");
+    projectRailListEl.innerHTML = hubProjects.map((project) => {
+      const active = hubView === "project" && project.id === currentProjectId;
+      const running = Number(project.counts?.running || 0) + Number(project.counts?.queued || 0) > 0;
+      const label = `${project.name} · ${project.counts?.active || 0} 条需求${running ? " · 有任务运行" : ""}`;
+      return `<button class="project-rail-button ${active ? "active" : ""}" type="button" data-project-id="${escapeHTML(project.id)}" data-running="${running}" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}" ${active ? 'aria-current="page"' : ""}>${escapeHTML(projectInitials(project))}</button>`;
+    }).join("");
+  }
+
+  function hubTaskStateLabel(item) {
+    if (item.archivedAt) return "已归档";
+    if (item.state === "queued") return "排队中";
+    if (item.state === "running") return "正在运行";
+    if (item.state === "done") return "已完成";
+    if (item.state === "error") return "需要处理";
+    return "等待操作";
+  }
+
+  function renderHubWorkspace() {
+    if (!hubMode || hubView !== "home") return;
+    const totals = hubProjects.reduce((result, project) => {
+      Object.entries(project.counts || {}).forEach(([key, value]) => { result[key] = (result[key] || 0) + Number(value || 0); });
+      return result;
+    }, {});
+    const tabs = [
+      ["projects", "所有项目"],
+      ["tasks", `全部任务${hubTasks.length ? ` ${hubTasks.length}` : ""}`],
+      ["knowledge", `跨项目沉淀${hubKnowledge.length ? ` ${hubKnowledge.length}` : ""}`]
+    ].map(([id, label]) => `<button class="hub-tab ${hubSection === id ? "active" : ""}" type="button" data-hub-section="${id}" aria-pressed="${hubSection === id}">${label}</button>`).join("");
+    const summary = `<div class="hub-summary-grid">
+      <div class="hub-summary-card"><span>项目</span><strong>${hubProjects.length}</strong></div>
+      <div class="hub-summary-card"><span>活动需求</span><strong>${totals.active || 0}</strong></div>
+      <div class="hub-summary-card"><span>运行 / 排队</span><strong>${totals.running || 0} / ${totals.queued || 0}</strong></div>
+      <div class="hub-summary-card"><span>待审核沉淀</span><strong>${totals.knowledgePending || 0}</strong></div>
+    </div>`;
+    const errorList = hubErrors.length ? `<ul class="hub-error-list">${hubErrors.map((item) => `<li><code>${escapeHTML(item.profilePath)}</code>：${escapeHTML(item.error)}</li>`).join("")}</ul>` : "";
+    let content = "";
+    if (hubSection === "projects") {
+      content = `<div class="project-card-grid">${hubProjects.map((project) => {
+        const counts = project.counts || {};
+        const state = project.workerState === "running" ? "Worker 已连接" : "按需启动";
+        return `<article class="project-card">
+          <div class="project-card-head"><div><h3>${escapeHTML(project.name)}</h3><p>${escapeHTML(project.repoRoot)}</p></div><span class="project-worker-state ${project.workerState === "running" ? "running" : ""}">${state}</span></div>
+          <div class="project-card-counts"><div><strong>${counts.active || 0}</strong><span>活动</span></div><div><strong>${counts.running || 0}</strong><span>运行</span></div><div><strong>${counts.attention || 0}</strong><span>待处理</span></div><div><strong>${counts.done || 0}</strong><span>完成</span></div></div>
+          <div class="project-card-actions"><button class="small" type="button" data-hub-project="${escapeHTML(project.id)}">进入项目</button><button class="small primary" type="button" data-hub-new-task="${escapeHTML(project.id)}">新建需求</button></div>
+        </article>`;
+      }).join("")}</div>${errorList}`;
+    } else if (hubDataLoading) {
+      content = callout("正在汇总各项目数据；项目 Worker 彼此隔离，加载不会停止后台任务。", "warning");
+    } else if (hubSection === "tasks") {
+      content = hubTasks.length ? `<div class="hub-list">${hubTasks.map((item) => `<article class="hub-list-item"><div><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(formatDateTime(item.updatedAt))} · ${escapeHTML(item.projectName)}</span></div><span class="hub-list-state">${escapeHTML(hubTaskStateLabel(item))}</span><button class="small" type="button" data-hub-task="${escapeHTML(item.id)}" data-project-id="${escapeHTML(item.projectId)}">查看任务</button></article>`).join("")}</div>${errorList}` : `<p class="task-empty">所有项目都还没有任务。</p>${errorList}`;
+    } else {
+      content = hubKnowledge.length ? `<div class="knowledge-grid">${hubKnowledge.map((item) => `<article class="knowledge-card" data-status="${escapeHTML(item.status || "pending")}"><div class="knowledge-card-head"><div><p class="section-kicker">${escapeHTML(item.projectName)} · ${escapeHTML(item.type || "经验")}</p><h3>${escapeHTML(item.title || "未命名沉淀")}</h3></div><div class="knowledge-badges"><span class="knowledge-badge">${escapeHTML(item.status || "pending")}</span><span class="knowledge-badge scope">${escapeHTML(item.scope || "project")}</span></div></div><p class="knowledge-card-content">${escapeHTML(item.content || "")}</p><div class="knowledge-card-actions"><button class="small" type="button" data-hub-task="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">查看任务</button>${item.status === "pending" ? `<button class="small" type="button" data-hub-knowledge-action="ignore" data-candidate-id="${escapeHTML(item.id)}" data-task-id="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">忽略</button><button class="small primary" type="button" data-hub-knowledge-action="approve" data-candidate-id="${escapeHTML(item.id)}" data-task-id="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">保留</button>` : ""}</div></article>`).join("")}</div>${errorList}` : `<p class="task-empty">当前没有跨项目沉淀候选。</p>${errorList}`;
+    }
+    hubDashboardEl.innerHTML = `<div class="hub-dashboard-shell"><div class="hub-dashboard-head"><div><p class="eyebrow">Project Hub</p><h2>所有项目</h2><p>切换项目只改变当前查看内容；后台任务继续在各自 Worker、Profile、Git 仓库和任务记忆中运行。</p></div><button class="primary" type="button" data-hub-add-project>＋ 添加项目</button></div><div class="hub-tabs">${tabs}</div><div class="hub-dashboard-body">${summary}${content}</div></div>`;
+  }
+
+  async function loadHubSection(section = hubSection) {
+    if (!hubMode || section === "projects") return;
+    hubDataLoading = true;
+    renderHubWorkspace();
+    try {
+      const result = await api(section === "tasks" ? "/api/hub/tasks" : "/api/hub/knowledge");
+      if (section === "tasks") hubTasks = result.tasks || [];
+      else hubKnowledge = result.candidates || [];
+      hubErrors = result.errors || hubErrors;
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      hubDataLoading = false;
+      renderHubWorkspace();
+    }
+  }
+
+  function showHubHome(section = "projects") {
+    if (!hubMode) return;
+    captureVisibleFields();
+    saveUi();
+    hubView = "home";
+    hubSection = section;
+    render();
+    loadHubSection(section);
+  }
+
+  async function handleHubDashboardClick(event) {
+    const section = event.target.closest("[data-hub-section]");
+    if (section) {
+      hubSection = section.dataset.hubSection;
+      renderHubWorkspace();
+      await loadHubSection(hubSection);
+      return;
+    }
+    if (event.target.closest("[data-hub-add-project]")) {
+      openAddProjectDialog();
+      return;
+    }
+    const taskButton = event.target.closest("[data-hub-task]");
+    if (taskButton) {
+      await switchProject(taskButton.dataset.projectId, taskButton.dataset.hubTask);
+      return;
+    }
+    const action = event.target.closest("[data-hub-knowledge-action]");
+    if (action) {
+      await withAction(async () => {
+        await apiForProject(action.dataset.projectId, `/api/tasks/${action.dataset.taskId}/knowledge/${action.dataset.candidateId}/review`, {
+          method: "POST", body: JSON.stringify({ decision: action.dataset.hubKnowledgeAction })
+        });
+        await loadHubSection("knowledge");
+      });
+      return;
+    }
+    const projectButton = event.target.closest("[data-hub-project], [data-hub-new-task]");
+    if (projectButton) await switchProject(projectButton.dataset.hubProject || projectButton.dataset.hubNewTask, "", Boolean(projectButton.dataset.hubNewTask));
+  }
+
+  function openAddProjectDialog() {
+    if (!hubMode) return;
+    pendingProjectDraft = null;
+    document.querySelector("#addProjectPreview").hidden = true;
+    document.querySelector("#confirmAddProjectButton").disabled = true;
+    addProjectDialogEl.showModal();
+  }
+
+  function projectDraftPayload() {
+    const mode = document.querySelector("#addProjectMode").value;
+    if (mode === "profile") return { profilePath: document.querySelector("#addProjectProfilePath").value.trim() };
+    return {
+      repoRoot: document.querySelector("#addProjectRepoRoot").value.trim(),
+      name: document.querySelector("#addProjectName").value.trim(),
+      id: document.querySelector("#addProjectId").value.trim()
+    };
+  }
+
+  async function previewProject() {
+    pendingProjectDraft = projectDraftPayload();
+    await withAction(async () => {
+      const result = await api("/api/hub/projects/preview", { method: "POST", body: JSON.stringify(pendingProjectDraft) });
+      const preview = document.querySelector("#addProjectPreview");
+      preview.textContent = JSON.stringify({
+        id: result.profile.id,
+        name: result.profile.name,
+        repoRoot: result.profile.repoRoot,
+        docsRoot: result.profile.docsRoot,
+        worktreesRoot: result.profile.worktreesRoot,
+        defaultBaseBranch: result.profile.defaultBaseBranch,
+        warnings: result.warnings || []
+      }, null, 2);
+      preview.hidden = false;
+      document.querySelector("#confirmAddProjectButton").disabled = false;
+    });
+  }
+
+  async function confirmAddProject() {
+    if (!pendingProjectDraft) return;
+    await withAction(async () => {
+      const result = await api("/api/hub/projects", { method: "POST", body: JSON.stringify(pendingProjectDraft) });
+      hubProjects = result.projects || hubProjects;
+      hubErrors = result.errors || [];
+      addProjectDialogEl.close();
+      showToast(`已添加项目：${result.profile.name}`);
+      await switchProject(result.profile.id);
+    });
   }
 
   function feedbackImageKey(kind) {
@@ -416,7 +672,7 @@
   function applyHealth(nextHealth) {
     const previousDefaultBranch = defaultUi.baseBranch;
     health = nextHealth;
-    token = health.token || "";
+    token = hubMode ? hubToken : health.token || "";
     scheduler = health.scheduler || scheduler;
     defaultUi.baseBranch = health.project?.defaultBaseBranch || "main";
     if (!ui.taskId && (!ui.baseBranch || ui.baseBranch === previousDefaultBranch)) ui.baseBranch = defaultUi.baseBranch;
@@ -432,9 +688,10 @@
 
   async function refreshSessionToken() {
     try {
-      const response = await fetch("/api/health", { cache: "no-store" });
+      if (hubMode) await refreshHubProjects();
+      const response = await fetch(projectApiPath("/api/health"), { cache: "no-store" });
       const payload = await response.json();
-      if (!response.ok || !payload.token) return false;
+      if (!response.ok || (!hubMode && !payload.token)) return false;
       applyHealth(payload);
       return true;
     } catch (_) {
@@ -443,7 +700,7 @@
   }
 
   async function api(path, options = {}, retryToken = true) {
-    const response = await fetch(path, {
+    const response = await fetch(projectApiPath(path), {
       ...options,
       headers: {
         "Content-Type": "application/json",
@@ -452,6 +709,23 @@
       }
     });
     if (response.status === 403 && retryToken && await refreshSessionToken()) return api(path, options, false);
+    let payload;
+    try { payload = await response.json(); }
+    catch (_) { payload = { error: `本地服务返回了无法解析的响应（HTTP ${response.status}）。` }; }
+    if (!response.ok || payload.ok === false) throw new Error(payload.error || `HTTP ${response.status}`);
+    return payload;
+  }
+
+  async function apiForProject(projectId, path, options = {}) {
+    const suffix = path.startsWith("/api") ? path.slice(4) : path;
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}${suffix}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Requirement-Flow-Token": hubToken,
+        ...(options.headers || {})
+      }
+    });
     let payload;
     try { payload = await response.json(); }
     catch (_) { payload = { error: `本地服务返回了无法解析的响应（HTTP ${response.status}）。` }; }
@@ -568,18 +842,20 @@
     }
   }
 
-  async function boot() {
+  async function bootProject(preferredTaskId = "") {
     try {
-      const response = await fetch("/api/health", { cache: "no-store" });
+      const response = await fetch(projectApiPath("/api/health"), { cache: "no-store" });
       applyHealth(await response.json());
       try { await refreshProjectBranches(); }
       catch (_) { /* 输入页保留 Profile 默认分支，并展示读取错误。 */ }
       await refreshTaskSummaries();
       if (ui.module === "knowledge-center") await refreshKnowledgeCenter();
-      if (ui.taskId) {
+      const taskId = preferredTaskId || ui.taskId;
+      if (taskId) {
         try {
-          const result = await api(`/api/tasks/${ui.taskId}`);
+          const result = await api(`/api/tasks/${taskId}`);
           task = result.task;
+          ui.taskId = task.id;
         } catch (error) {
           activateTaskView("__new__");
           task = null;
@@ -594,6 +870,26 @@
       serviceBadgeEl.style.background = "#fff0f1";
       serviceBadgeEl.style.color = "#a2333e";
     }
+  }
+
+  async function boot() {
+    const discoveredHub = await refreshHubProjects({ discover: true });
+    if (!discoveredHub) {
+      currentProjectId = "";
+      ui = loadUi();
+    }
+    if (hubMode && !currentProjectId) {
+      hubView = "home";
+      health = { ok: true, warnings: ["Project Hub 中还没有项目。"] };
+      serviceBadgeEl.textContent = "Project Hub 已连接 · 等待添加项目";
+      serviceBadgeEl.style.borderColor = "#92bea9";
+      serviceBadgeEl.style.background = "#eaf7f1";
+      serviceBadgeEl.style.color = "#216e4e";
+      render();
+      schedulePoll();
+      return;
+    }
+    await bootProject();
     render();
     schedulePoll();
   }
@@ -603,6 +899,15 @@
     if (!token) return;
     pollTimer = window.setTimeout(async () => {
       try {
+        if (hubMode) {
+          await refreshHubProjects();
+          if (hubView === "home") {
+            renderProjectRail();
+            renderHubWorkspace();
+            schedulePoll();
+            return;
+          }
+        }
         const wasActive = task?.activeJob;
         const selectedId = task?.id;
         await refreshTaskSummaries();
@@ -729,6 +1034,11 @@
   function render() {
     destroySectionNavigator();
     workspaceRefreshPending = false;
+    renderProjectRail();
+    if (hubMode && hubView === "home") {
+      renderHubWorkspace();
+      return;
+    }
     renderShell();
     const knowledgeCenterActive = ui.module === "knowledge-center";
     const stageId = currentStageId();
@@ -976,7 +1286,9 @@
       : `${activeTasks.length} 条需求 · ${scheduler.runningJobs || 0} 运行${scheduler.queuedJobs ? ` / ${scheduler.queuedJobs} 排队` : ""}`;
     schedulerNoteEl.textContent = ui.showArchived
       ? "恢复后任务会回到原阶段；删除不会清理 Worktree、Plan 或 HTML。"
-      : `最多并行 ${scheduler.maxConcurrentJobs || 2} 个后台任务；切换查看不会停止执行。`;
+      : hubMode
+        ? `本项目最多并行 ${scheduler.projectMaxConcurrentJobs || scheduler.maxConcurrentJobs || 2} 个，全局最多 ${scheduler.globalMaxConcurrentJobs || hubScheduler.globalMaxConcurrentJobs || 4} 个；切换项目不会停止执行。`
+        : `最多并行 ${scheduler.maxConcurrentJobs || 2} 个后台任务；切换查看不会停止执行。`;
     const visible = ui.showArchived ? archivedTasks : groups[activeFilter];
     taskListEl.innerHTML = visible.length ? visible.map((item) => {
       const stage = stages.find((entry) => entry.id === item.stage)?.label || item.stage;
@@ -2151,6 +2463,38 @@
       selectedFile = null;
       setTask(result.task, false);
     });
+  }
+
+  async function switchProject(projectId, taskId = "", createNew = false) {
+    if (!hubMode || !projectId || !hubProjects.some((project) => project.id === projectId)) return;
+    if (projectId === currentProjectId) {
+      hubView = "project";
+      renderProjectRail();
+      if (createNew) newTask();
+      else if (taskId) await switchTask(taskId);
+      else render();
+      return;
+    }
+    captureVisibleFields();
+    saveUi();
+    window.clearTimeout(pollTimer);
+    currentProjectId = projectId;
+    localStorage.setItem(HUB_PROJECT_KEY, projectId);
+    ui = loadUi();
+    task = null;
+    taskSummaries = [];
+    knowledgeCandidates = [];
+    knowledgeLoaded = false;
+    projectBranches = [];
+    branchLoadError = "";
+    selectedFile = null;
+    token = hubToken;
+    hubView = "project";
+    renderProjectRail();
+    await bootProject(taskId);
+    if (createNew) newTask();
+    else render();
+    schedulePoll();
   }
 
   function newTask() {

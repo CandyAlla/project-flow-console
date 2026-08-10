@@ -29,6 +29,8 @@
 
     * { box-sizing: border-box; }
 
+    [hidden] { display: none !important; }
+
     html { background: var(--soft); color: var(--ink); }
 
     body {
@@ -158,6 +160,119 @@
       align-items: start;
       padding: 32px 0 64px;
     }
+
+    .app-shell.hub-enabled { grid-template-columns: 58px 270px 226px minmax(0, 1fr); }
+
+    .project-rail {
+      position: sticky;
+      top: 18px;
+      display: flex;
+      align-items: center;
+      flex-direction: column;
+      gap: 8px;
+      max-height: calc(100vh - 36px);
+      padding: 8px 6px;
+      overflow-y: auto;
+      border: 1px solid var(--line);
+      background: #202a37;
+      scrollbar-width: thin;
+    }
+
+    .project-rail-divider { width: 30px; height: 1px; flex: 0 0 auto; background: #465363; }
+    .project-rail-list { display: grid; gap: 8px; width: 100%; }
+    .project-rail-button {
+      position: relative;
+      display: grid;
+      place-items: center;
+      width: 44px;
+      min-height: 44px;
+      padding: 0;
+      border-color: transparent;
+      border-radius: 12px;
+      background: #344152;
+      color: #fff;
+      font-size: .78rem;
+      font-weight: 850;
+      letter-spacing: .02em;
+    }
+
+    .project-rail-button:hover:not(:disabled) { border-color: #718096; background: #425168; }
+    .project-rail-button.active { border-color: #8fb5ef; border-radius: 8px; background: var(--accent); }
+    .project-rail-button.home { font-size: 1.05rem; }
+    .project-rail-button.add { margin-top: auto; border-style: dashed; color: #cbd5e1; font-size: 1.2rem; }
+    .project-rail-button[data-running="true"]::after {
+      content: "";
+      position: absolute;
+      right: -2px;
+      bottom: -2px;
+      width: 10px;
+      height: 10px;
+      border: 2px solid #202a37;
+      border-radius: 50%;
+      background: #68d391;
+      animation: activity-pulse 1.35s ease-out infinite;
+    }
+
+    .app-shell.hub-home .task-sidebar,
+    .app-shell.hub-home .workflow-sidebar,
+    .app-shell.hub-home > main { display: none; }
+
+    .hub-dashboard { display: none; min-width: 0; grid-column: 2 / -1; }
+    .app-shell.hub-home .hub-dashboard { display: block; }
+    .hub-dashboard-shell { overflow: hidden; border: 1px solid var(--line); background: var(--surface); }
+    .hub-dashboard-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 25px 28px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .hub-dashboard-head p { max-width: 72ch; margin: 8px 0 0; color: var(--muted); }
+    .hub-tabs { display: flex; gap: 5px; padding: 9px 12px; overflow-x: auto; border-bottom: 1px solid var(--line); background: var(--soft); }
+    .hub-tab { min-height: 36px; border-color: transparent; background: transparent; color: var(--muted); font-size: .84rem; }
+    .hub-tab.active { border-color: var(--line-strong); background: var(--surface); color: var(--ink); font-weight: 800; }
+    .hub-dashboard-body { padding: 25px 28px 32px; }
+    .hub-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 22px; }
+    .hub-summary-card { padding: 15px 16px; border: 1px solid var(--line); background: #fbfcfe; }
+    .hub-summary-card span { display: block; color: var(--muted); font-size: .78rem; }
+    .hub-summary-card strong { display: block; margin-top: 3px; font-size: 1.45rem; line-height: 1.2; }
+    .project-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 13px; }
+    .project-card { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--line); background: var(--surface); }
+    .project-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .project-card-head h3 { font-size: 1.05rem; }
+    .project-card-head p { margin: 3px 0 0; color: var(--muted); font-size: .76rem; overflow-wrap: anywhere; }
+    .project-worker-state { padding: 2px 7px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: .7rem; font-weight: 800; }
+    .project-worker-state.running { background: var(--ok-soft); color: var(--ok); }
+    .project-card-counts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); background: var(--line); }
+    .project-card-counts div { padding: 9px 8px; background: #fbfcfe; text-align: center; }
+    .project-card-counts strong, .project-card-counts span { display: block; }
+    .project-card-counts span { color: var(--muted); font-size: .68rem; }
+    .project-card-actions { display: flex; justify-content: flex-end; gap: 7px; }
+    .hub-list { display: grid; gap: 8px; }
+    .hub-list-item { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(140px, .6fr) auto; gap: 14px; align-items: center; padding: 14px 15px; border: 1px solid var(--line); background: #fbfcfe; }
+    .hub-list-item strong, .hub-list-item span { display: block; min-width: 0; }
+    .hub-list-item > div > span { margin-top: 2px; color: var(--muted); font-size: .76rem; }
+    .hub-list-state { color: var(--accent-strong); font-size: .78rem; font-weight: 750; }
+    .hub-error-list { margin: 18px 0 0; color: var(--danger); font-size: .82rem; }
+
+    .project-dialog {
+      width: min(660px, calc(100% - 28px));
+      max-height: calc(100vh - 42px);
+      padding: 0;
+      overflow: auto;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--ink);
+      box-shadow: 0 24px 70px rgb(23 32 42 / 26%);
+    }
+    .project-dialog::backdrop { background: rgb(23 32 42 / 45%); }
+    .project-dialog-head { display: flex; justify-content: space-between; gap: 18px; padding: 20px 22px 16px; border-bottom: 1px solid var(--line); }
+    .project-dialog-head p { margin: 6px 0 0; color: var(--muted); font-size: .84rem; }
+    .project-dialog-body { padding: 20px 22px; }
+    .project-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px 20px; border-top: 1px solid var(--line); }
+    .project-preview { max-height: 240px; margin: 18px 0 0; padding: 12px; overflow: auto; border: 1px solid var(--line); background: var(--code); color: #354252; font-size: .78rem; white-space: pre-wrap; }
 
     .task-sidebar,
     .workflow-sidebar {
@@ -1070,6 +1185,8 @@
 
     @media (max-width: 1080px) {
       .app-shell { grid-template-columns: 226px minmax(0, 1fr); }
+      .app-shell.hub-enabled { grid-template-columns: 58px 226px minmax(0, 1fr); }
+      .hub-enabled .task-sidebar { grid-column: 2 / -1; }
       .task-sidebar { position: static; grid-column: 1 / -1; grid-template-rows: auto auto auto auto; max-height: none; }
       .task-list { display: flex; gap: 4px; overflow-x: auto; padding: 8px; }
       .task-card { flex: 0 0 248px; }
@@ -1078,7 +1195,9 @@
 
     @media (max-width: 1320px) {
       .app-shell.verification-layout-active { grid-template-columns: 226px minmax(0, 1fr); }
+      .app-shell.hub-enabled.verification-layout-active { grid-template-columns: 58px 226px minmax(0, 1fr); }
       .verification-layout-active .task-sidebar { position: static; grid-column: 1 / -1; grid-template-rows: auto auto auto auto; max-height: none; }
+      .hub-enabled.verification-layout-active .task-sidebar { grid-column: 2 / -1; }
       .verification-layout-active .task-list { display: flex; gap: 4px; overflow-x: auto; padding: 8px; }
       .verification-layout-active .task-card { flex: 0 0 248px; }
       .verification-layout-active .task-card + .task-card { margin-top: 0; }
@@ -1093,6 +1212,16 @@
     @media (max-width: 760px) {
       .topbar { flex-direction: column; padding-top: 26px; }
       .app-shell, .app-shell.verification-layout-active { grid-template-columns: 1fr; gap: 18px; padding-top: 20px; }
+      .app-shell.hub-enabled { grid-template-columns: 1fr; }
+      .project-rail { position: static; flex-direction: row; grid-column: 1; max-height: none; overflow-x: auto; overflow-y: hidden; }
+      .project-rail-list { display: flex; width: auto; }
+      .project-rail-divider { width: 1px; height: 30px; }
+      .project-rail-button.add { margin-top: 0; margin-left: auto; }
+      .hub-dashboard { grid-column: 1; }
+      .hub-dashboard-head { flex-direction: column; padding-inline: 19px; }
+      .hub-dashboard-body { padding-inline: 19px; }
+      .hub-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .hub-list-item { grid-template-columns: 1fr; }
       .task-sidebar, .workflow-sidebar { position: static; }
       .sidebar-head { padding-block: 12px 10px; }
       .sidebar-head span, .sidebar-note { display: none; }
@@ -1150,7 +1279,7 @@
       html, body { background: #fff; }
       .topbar, .app-shell, footer { width: 100%; }
       .app-shell { display: block; padding-top: 24px; }
-      .task-sidebar, .workflow-sidebar, .prototype-badge, .actions, .toast, .section-navigator, #resetButton { display: none !important; }
+      .project-rail, .hub-dashboard, .task-sidebar, .workflow-sidebar, .prototype-badge, .actions, .toast, .section-navigator, #resetButton { display: none !important; }
       .workspace { border: 0; }
       .workspace-header, .workspace-body { padding-inline: 0; }
       details { break-inside: avoid; }
@@ -1170,6 +1299,13 @@
   </header>
 
   <div class="app-shell">
+    <aside class="project-rail" id="projectRail" aria-label="项目切换" hidden>
+      <button class="project-rail-button home" id="hubHomeButton" type="button" title="所有项目" aria-label="所有项目">⌂</button>
+      <span class="project-rail-divider" aria-hidden="true"></span>
+      <div class="project-rail-list" id="projectRailList"></div>
+      <button class="project-rail-button add" id="addProjectButton" type="button" title="添加项目" aria-label="添加项目">＋</button>
+    </aside>
+
     <aside class="task-sidebar" aria-label="需求任务控制台">
       <div class="task-sidebar-head">
         <div>
@@ -1217,7 +1353,43 @@
         <div class="workspace-body" id="stageContent"></div>
       </article>
     </main>
+
+    <section class="hub-dashboard" id="hubDashboard" aria-live="polite"></section>
   </div>
+
+  <dialog class="project-dialog" id="addProjectDialog">
+    <form method="dialog" id="addProjectForm">
+      <div class="project-dialog-head">
+        <div>
+          <h2>添加项目</h2>
+          <p>可以扫描一个本地 Git 项目生成 Profile，也可以接入已有 Project Profile。</p>
+        </div>
+        <button class="small ghost" value="cancel" type="submit" aria-label="关闭">关闭</button>
+      </div>
+      <div class="project-dialog-body">
+        <div class="field">
+          <label for="addProjectMode">接入方式</label>
+          <select id="addProjectMode">
+            <option value="repo">扫描本地 Git 项目</option>
+            <option value="profile">使用已有 Profile</option>
+          </select>
+        </div>
+        <div id="addProjectRepoFields">
+          <div class="field"><label for="addProjectRepoRoot">Git 项目根目录</label><input class="mono" id="addProjectRepoRoot" type="text" placeholder="/absolute/path/to/project"><span class="hint">只读扫描 Git、项目规则和目录惯例；确认后仅生成 Profile，不创建 Worktree。</span></div>
+          <div class="field"><label for="addProjectName">显示名称（可选）</label><input id="addProjectName" type="text" placeholder="默认使用仓库目录名"></div>
+          <div class="field"><label for="addProjectId">项目 ID（可选）</label><input class="mono" id="addProjectId" type="text" placeholder="lowercase-kebab-case"></div>
+        </div>
+        <div id="addProjectProfileFields" hidden>
+          <div class="field"><label for="addProjectProfilePath">Project Profile 绝对路径</label><input class="mono" id="addProjectProfilePath" type="text" placeholder="/absolute/path/to/project-profile.json"><span class="hint">Profile 不会被复制；Hub 只保存路径引用，任务仍位于 <code>.runtime/&lt;project-id&gt;</code>。</span></div>
+        </div>
+        <pre class="project-preview" id="addProjectPreview" hidden></pre>
+      </div>
+      <div class="project-dialog-actions">
+        <button id="previewProjectButton" value="preview" type="button">先扫描预览</button>
+        <button class="primary" id="confirmAddProjectButton" value="confirm" type="button" disabled>确认添加</button>
+      </div>
+    </form>
+  </dialog>
 
   <footer>
     本页只连接 127.0.0.1 本地服务和本机 Codex App Server。生成文档、创建 Worktree、执行、Commit、Bug 修复与沉淀提炼均需单独点击；沉淀候选仅保存在本地运行目录，不会自动发布；不会自动 Push 或 Merge。

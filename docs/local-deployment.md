@@ -245,23 +245,30 @@ python3 skills/project-flow-setup/scripts/configure_project.py \
 
 ## 八、启动本地控制台
 
-macOS 推荐显式指定 Profile：
+macOS 推荐直接启动多项目 Hub：
 
 ```bash
 cd ~/Developer/tools/dev-conductor
-
-PROJECT_FLOW_PROFILE="$PWD/profiles/my-game.json" \
 ./start.command
 ```
 
 也可以直接使用 Python：
 
 ```bash
-PROJECT_FLOW_PROFILE="$PWD/profiles/my-game.json" \
-python3 server.py
+python3 hub.py --port 4318
 ```
 
-Linux 或 Windows 没有使用 `start.command` 时，运行 `server.py`，再手动打开启动日志中的地址。
+Hub 会自动发现 `profiles/*.json`。左侧项目轨道可切换项目；“所有项目”首页集中显示项目、任务和跨项目沉淀。点击“添加项目”可以先 dry-run 扫描本地 Git 项目，或接入已有 Project Profile。
+
+没有任何 Profile 时 Hub 仍可启动，并直接显示添加项目入口，不需要先手工创建占位配置。
+
+如果默认端口上已经运行旧的单项目服务，`start.command` 会保留并打开现有服务，不会中断其后台任务。完成任务并正常停止旧服务后，再次启动即可切换到 Hub。
+
+每个项目使用独立 Worker 进程，切换页面不会替换其他项目的 Profile，也不会停止其后台任务。
+
+同一项目运行目录带有单控制器锁；重复启动不会接管或覆盖现有任务状态，而会提示继续使用原服务或先正常停止它。
+
+Linux 或没有使用 `start.command` 时，运行 `hub.py`，再手动打开启动日志中的地址。
 
 默认地址：
 
@@ -272,23 +279,35 @@ http://127.0.0.1:4318/
 健康检查：
 
 ```bash
-curl --fail http://127.0.0.1:4318/api/health
+curl --fail http://127.0.0.1:4318/api/hub/projects
 ```
 
 终端按 `Ctrl-C` 可以停止服务。
 
 ## 九、多个项目或端口冲突
 
-同一份控制台可以维护多个 Profile，但每个服务进程一次加载一个 Profile。
+默认使用一个 Hub 统一管理多个 Profile：
 
-如果只运行一个项目，建议始终显式指定 Profile。多个项目同时运行时，为每个进程使用不同端口：
+```text
+Project Hub :4318
+  ├── Project A Worker → Profile A → Repo A / .runtime/A
+  ├── Project B Worker → Profile B → Repo B / .runtime/B
+  └── Project C Worker → Profile C → Repo C / .runtime/C
+```
+
+Worker 使用 Hub 分配的本机内部端口，不需要为每个 Profile 手工维护端口。默认单项目最多并行 2 个后台任务，所有项目合计最多 4 个：
+
+```bash
+PROJECT_FLOW_PROJECT_CONCURRENCY=2 \
+PROJECT_FLOW_GLOBAL_CONCURRENCY=4 \
+python3 hub.py
+```
+
+如果只想运行旧的单项目界面，可以继续显式指定 Profile：
 
 ```bash
 PROJECT_FLOW_PROFILE="$PWD/profiles/game-client.json" \
 python3 server.py --port 4318
-
-PROJECT_FLOW_PROFILE="$PWD/profiles/backend-api.json" \
-python3 server.py --port 4319
 ```
 
 `id` 不同的 Profile 会把任务状态隔离到：
@@ -311,6 +330,9 @@ git pull --ff-only
 - `profiles/<project-id>.json`
 - `.runtime/<project-id>/tasks/`
 - `.runtime/<project-id>/tasks/<task-id>/feedback-images/`
+- `.runtime/hub/projects.json`
+- `.runtime/hub/logs/`
+- `.runtime/hub/job-slots/`
 
 如需备份任务状态，可在停止服务后备份 `.runtime/<project-id>`。不要把其中的需求文档、日志、截图或绝对路径提交到公共 GitHub 仓库。
 
