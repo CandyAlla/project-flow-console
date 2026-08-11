@@ -179,9 +179,18 @@ except ValueError:
     ASK_TIMEOUT_SECONDS = 300
 
 try:
-    QUICK_EXECUTION_TIMEOUT_SECONDS = max(120, min(900, int(os.environ.get("PROJECT_FLOW_QUICK_TIMEOUT", "600"))))
+    QUICK_EXECUTION_TIMEOUT_SECONDS = max(120, min(1800, int(os.environ.get("PROJECT_FLOW_QUICK_TIMEOUT", "600"))))
 except ValueError:
     QUICK_EXECUTION_TIMEOUT_SECONDS = 600
+
+try:
+    QUICK_EXECUTION_HARD_TIMEOUT_SECONDS = max(
+        QUICK_EXECUTION_TIMEOUT_SECONDS,
+        600,
+        min(3600, int(os.environ.get("PROJECT_FLOW_QUICK_HARD_TIMEOUT", "1800"))),
+    )
+except ValueError:
+    QUICK_EXECUTION_HARD_TIMEOUT_SECONDS = max(QUICK_EXECUTION_TIMEOUT_SECONDS, 1800)
 
 try:
     KNOWLEDGE_TIMEOUT_SECONDS = max(60, min(600, int(os.environ.get("PROJECT_FLOW_KNOWLEDGE_TIMEOUT", "240"))))
@@ -204,6 +213,10 @@ APP_SERVER_CLIENT_LOCK = threading.Lock()
 
 class WorkflowError(RuntimeError):
     pass
+
+
+class PartialWorkflowError(WorkflowError):
+    """Raised when a stopped job has recoverable Worktree progress."""
 
 
 class AppServerRPCError(WorkflowError):
@@ -666,6 +679,46 @@ def required_manual_case_indexes(task: dict[str, Any]) -> list[int]:
     ]
 
 
+def manual_case_identity(case: Any) -> str:
+    if isinstance(case, dict):
+        value = case.get("title")
+    else:
+        value = case
+    return safe_log(value, 600).casefold()
+
+
+def normalize_manual_verification_checks(cases: Any, checks: Any) -> list[bool]:
+    if not isinstance(cases, list):
+        return []
+    values = checks if isinstance(checks, list) else []
+    return [bool(values[index]) if index < len(values) else False for index in range(len(cases))]
+
+
+def remap_manual_verification_checks(
+    previous_cases: Any,
+    previous_checks: Any,
+    merged_cases: Any,
+    affected_cases: Any,
+) -> list[bool]:
+    previous = previous_cases if isinstance(previous_cases, list) else []
+    merged = merged_cases if isinstance(merged_cases, list) else []
+    normalized_checks = normalize_manual_verification_checks(previous, previous_checks)
+    passed = {
+        identity
+        for case, checked in zip(previous, normalized_checks)
+        if checked and (identity := manual_case_identity(case))
+    }
+    affected = {
+        identity
+        for case in (affected_cases if isinstance(affected_cases, list) else [])
+        if (identity := manual_case_identity(case))
+    }
+    return [
+        bool((identity := manual_case_identity(case)) and identity in passed and identity not in affected)
+        for case in merged
+    ]
+
+
 def manual_verification_checks_pass(task: dict[str, Any], checks: Any) -> bool:
     cases = task.get("execution", {}).get("result", {}).get("manual_cases") or []
     if not isinstance(checks, list) or not isinstance(cases, list) or not cases or len(checks) != len(cases):
@@ -698,6 +751,8 @@ def next_task_action(task: dict[str, Any]) -> str:
     if stage == "worktree":
         return "确认 dry-run 信息后创建隔离 Worktree。"
     if stage == "execute":
+        if task.get("execution", {}).get("status") == "partial":
+            return "已有 Worktree 修改，等待从断点继续自检并完成。"
         if task.get("execution", {}).get("status") == "needs_attention":
             return "确认 Code Review 发现并继续修复。"
         return "点击执行 Plan，或处理上一次执行错误。"
@@ -1165,7 +1220,7 @@ def task_state(task: dict[str, Any]) -> str:
         return "done"
     for key in ("discussion", "plan", "worktree", "execution"):
         status = task.get(key, {}).get("status")
-        if status in {"error", "interrupted"}:
+        if status in {"error", "interrupted", "partial"}:
             return "error"
     return "attention"
 
@@ -2245,7 +2300,14 @@ def record_app_server_event(task_id: str, operation: str, event: dict[str, Any])
         elif item_type == "fileChange":
             add_job_log(task_id, operation, "App Thread 已完成文件改动。")
         elif item_type == "agentMessage":
-            add_job_log(task_id, operation, "App Thread 已返回结构化结果。", "ok")
+            add_job_log(task_id, operation, "App Thread 已返回阶段消息。", "ok")
+
+
+def app_server_event_has_progress(event: Any) -> bool:
+    if not isinstance(event, dict):
+        return False
+    method = str(event.get("method") or "")
+    return method.startswith("item/") or method in {"turn/started", "turn/completed"}
 
 
 def run_app_server_structured(
@@ -2256,6 +2318,7 @@ def run_app_server_structured(
     schema_path: Path,
     *,
     timeout_seconds: int,
+    hard_timeout_seconds: int | None = None,
     timeout_label: str,
     allow_docs_root: bool,
     attachments: Any = None,
@@ -2312,21 +2375,32 @@ def run_app_server_structured(
                 "status": "running", "threadId": thread_id, "turnId": turn_id,
                 "deepLink": codex_app_deep_link(thread_id), "error": "",
             })
-        deadline = time.monotonic() + timeout_seconds
+        started_at = time.monotonic()
+        hard_timeout_seconds = max(timeout_seconds, hard_timeout_seconds or timeout_seconds * 3)
+        idle_deadline = started_at + timeout_seconds
+        hard_deadline = started_at + hard_timeout_seconds
         while completed is None:
             if task_id in CANCEL_REQUESTED:
                 client.interrupt(thread_id, turn_id)
-            remaining = deadline - time.monotonic()
+            current_time = time.monotonic()
+            remaining = min(idle_deadline, hard_deadline) - current_time
             if remaining <= 0:
                 client.interrupt(thread_id, turn_id)
-                minutes = max(1, timeout_seconds // 60)
-                raise WorkflowError(f"{timeout_label} 超过 {minutes} 分钟，已自动停止；已有 Worktree 改动均已保留。")
+                if current_time >= hard_deadline:
+                    minutes = max(1, hard_timeout_seconds // 60)
+                    reason = f"达到 {minutes} 分钟绝对上限"
+                else:
+                    minutes = max(1, timeout_seconds // 60)
+                    reason = f"连续 {minutes} 分钟没有新进度"
+                raise WorkflowError(f"{timeout_label}{reason}，已自动停止；已有 Worktree 改动均已保留。")
             try:
                 event = notifications.get(timeout=min(1.0, remaining))
             except queue.Empty:
                 continue
             if event.get("method") == "app-server/closed":
                 raise WorkflowError(str((event.get("params") or {}).get("message") or "Codex App Server 已停止。"))
+            if app_server_event_has_progress(event):
+                idle_deadline = min(time.monotonic() + timeout_seconds, hard_deadline)
             record_app_server_event(task_id, operation, event)
             params = event.get("params") if isinstance(event.get("params"), dict) else {}
             if event.get("method") == "item/completed":
@@ -2396,9 +2470,11 @@ def launch_job(task_id: str, job_name: str, target: Callable[[], None]) -> None:
                 section = task.get(job_name)
                 if not isinstance(section, dict):
                     section = task.setdefault("runtime", {})
-                section["status"] = "error"
+                section["status"] = "partial" if isinstance(exc, PartialWorkflowError) else "error"
                 section["error"] = safe_log(exc, 2400)
-                add_event(task, f"{job_name} 失败：{safe_log(exc, 1000)}", "error")
+                event_kind = "warning" if isinstance(exc, PartialWorkflowError) else "error"
+                event_label = "部分完成" if isinstance(exc, PartialWorkflowError) else "失败"
+                add_event(task, f"{job_name} {event_label}：{safe_log(exc, 1000)}", event_kind)
             traceback.print_exc()
         finally:
             with mutate_task(task_id) as task:
@@ -2723,7 +2799,8 @@ Plan 仅作为边界参考：{task['plan']['finalPath']}
 {static_contract_reference()}
 </static-contract-ref>
 
-只处理本轮反馈及其直接回归，保留已通过范围；禁止重新扫描、重新实施或重新验证整份 Plan。changed_files 只能列出本轮实际写入的文件。验证政策：{VERIFICATION_POLICY}
+只处理本轮反馈及其直接回归，保留已通过范围；禁止重新扫描、重新实施或重新验证整份 Plan。changed_files 只能列出本轮实际写入的文件；manual_cases 只能列出受本轮修改影响、必须重新人工验证的用例。
+验证政策：{VERIFICATION_POLICY}
 只按已提供的人工验收返修 JSON Schema 输出；不要 Commit、Push、Merge 或修改 Worktree 外内容。
 """.strip()
 
@@ -2913,6 +2990,8 @@ def execution_job(
         task.get("sessions", {}).get("execution") or previous_execution.get("threadId")
     )
     previous_result = previous_execution.get("result") if isinstance(previous_execution.get("result"), dict) else {}
+    previous_verification = task.get("verification") if isinstance(task.get("verification"), dict) else {}
+    remapped_checks: list[bool] | None = None
     retry_review_only = bool(retry_review_only and isinstance(previous_execution.get("result"), dict))
     with mutate_task(task_id) as live:
         live["execution"].update({
@@ -2975,6 +3054,12 @@ def execution_job(
             )
         fix_result["changed_files"] = round_changed_files
         result = merge_acceptance_fix_result(previous_result, fix_result)
+        remapped_checks = remap_manual_verification_checks(
+            previous_result.get("manual_cases"),
+            previous_verification.get("checks"),
+            result.get("manual_cases"),
+            fix_result.get("manual_cases"),
+        )
     elif bugfix_active:
         worktree = Path(task["worktree"]["path"])
         before_snapshot = worktree_change_snapshot(worktree)
@@ -3007,6 +3092,14 @@ def execution_job(
     with mutate_task(task_id) as live:
         live["execution"]["result"] = result
         live["execution"]["phase"] = "review"
+        if remapped_checks is not None:
+            verification = live.setdefault("verification", {})
+            verification.update({
+                "approved": False,
+                "checks": remapped_checks,
+                "note": "",
+                "revision": int(verification.get("revision") or 0) + 1,
+            })
         if (acceptance_fix or bugfix_active) and not retry_review_only:
             live["execution"]["roundResult"] = fix_result
             live["execution"]["roundChangedFiles"] = round_changed_files
@@ -3057,6 +3150,42 @@ def quick_mode_prompt(base_prompt: str) -> str:
 """.strip()
 
 
+def quick_resume_files(task: dict[str, Any], current_snapshot: dict[str, str]) -> list[str]:
+    execution = task.get("execution") if isinstance(task.get("execution"), dict) else {}
+    resumable_status = execution.get("status") in {"error", "interrupted", "partial"}
+    if execution.get("flowMode") != "fast" or not (execution.get("resumeFromCheckpoint") or resumable_status):
+        return []
+    checkpoint = execution.get("checkpoint") if isinstance(execution.get("checkpoint"), dict) else {}
+    values = compact_strings(checkpoint.get("changedFiles"), 80, 1200)
+    if not values:
+        values = sorted(current_snapshot)
+    plan_relative = safe_log((task.get("paths") or {}).get("planRelative"), 1200)
+    return [path for path in values if path and path != plan_relative and path in current_snapshot]
+
+
+def quick_resume_prompt(base_prompt: str, task: dict[str, Any], changed_files: list[str]) -> str:
+    if not changed_files:
+        return base_prompt
+    execution = task.get("execution") if isinstance(task.get("execution"), dict) else {}
+    checkpoint = execution.get("checkpoint") if isinstance(execution.get("checkpoint"), dict) else {}
+    last_activity = safe_log(checkpoint.get("lastActivity"), 200) or "未知"
+    return f"""
+这是快速执行的断点续跑，不是重新执行整份 Plan。
+
+<resume-checkpoint>
+已有实际改动：
+{prompt_list(changed_files, limit=80)}
+上次停止原因：{safe_log(execution.get('error') or checkpoint.get('reason'), 1200) or '本轮未完整返回结构化结果'}
+最后活动：{last_activity}
+</resume-checkpoint>
+
+先以当前 Git diff 和现有文件为事实源，确认哪些修改已经完成；只补齐未完成部分、直接相关验证和最终结构化结果。除非当前 Diff 无法理解，否则禁止重新扫描整份 Plan、全部 Skill、历史提交或所有项目文档。
+
+原执行边界：
+{base_prompt}
+""".strip()
+
+
 def quick_execution_job(
     task_id: str,
     feedback: str,
@@ -3066,6 +3195,7 @@ def quick_execution_job(
     task = get_task_copy(task_id)
     previous_execution = task.get("execution", {})
     previous_result = previous_execution.get("result") if isinstance(previous_execution.get("result"), dict) else {}
+    previous_verification = task.get("verification") if isinstance(task.get("verification"), dict) else {}
     bugfix_cycle = task.get("bugfix") or {}
     bugfix_active = bool(
         task.get("stage") == "bugfix"
@@ -3095,6 +3225,8 @@ def quick_execution_job(
         timeout_label = "快速执行"
     worktree = Path(task["worktree"]["path"])
     before_snapshot = worktree_change_snapshot(worktree)
+    resume_files = quick_resume_files(task, before_snapshot)
+    request_prompt = quick_resume_prompt(base_prompt, task, resume_files)
     with mutate_task(task_id) as live:
         execution = live.setdefault("execution", {})
         if isinstance(execution.get("review"), dict):
@@ -3112,22 +3244,52 @@ def quick_execution_job(
         if acceptance_fix:
             execution["feedback"] = acceptance_feedback
             execution["attachments"] = copy.deepcopy(attachments or [])
-        live["verification"] = {"approved": False, "checks": [], "note": ""}
         live["stage"] = "bugfix" if bugfix_active else "execute"
-        add_event(live, "使用持久 Codex App Thread 启动快速模式；本轮不运行独立 Code Review。", "ok")
-    payload, thread_id = run_app_server_structured(
-        task_id,
-        "execution",
-        quick_mode_prompt(base_prompt),
-        worktree,
-        schema,
-        timeout_seconds=QUICK_EXECUTION_TIMEOUT_SECONDS,
-        timeout_label=timeout_label,
-        allow_docs_root=allow_docs_root,
-        attachments=bugfix_cycle.get("attachments") or attachments,
-    )
+        message = "从已有 Worktree Diff 断点续跑；只补齐未完成修改、自检和结构化结果。" if resume_files else "使用持久 Codex App Thread 启动快速模式；本轮不运行独立 Code Review。"
+        add_event(live, message, "ok")
+    try:
+        payload, thread_id = run_app_server_structured(
+            task_id,
+            "execution",
+            quick_mode_prompt(request_prompt),
+            worktree,
+            schema,
+            timeout_seconds=QUICK_EXECUTION_TIMEOUT_SECONDS,
+            hard_timeout_seconds=QUICK_EXECUTION_HARD_TIMEOUT_SECONDS,
+            timeout_label=timeout_label,
+            allow_docs_root=allow_docs_root,
+            attachments=bugfix_cycle.get("attachments") or attachments,
+        )
+    except Exception as exc:
+        after_snapshot = worktree_change_snapshot(worktree)
+        attempt_changed_files = changed_paths_between(before_snapshot, after_snapshot)
+        cumulative_files = compact_strings(resume_files + attempt_changed_files, 80, 1200)
+        cumulative_files = [path for path in cumulative_files if path in after_snapshot]
+        if cumulative_files:
+            status = git_status(worktree)
+            with mutate_task(task_id) as live:
+                execution = live.setdefault("execution", {})
+                logs = execution.get("logs") if isinstance(execution.get("logs"), list) else []
+                previous_checkpoint = execution.get("checkpoint") if isinstance(execution.get("checkpoint"), dict) else {}
+                execution["checkpoint"] = {
+                    "attempt": int(previous_checkpoint.get("attempt") or 0) + 1,
+                    "createdAt": now_iso(),
+                    "lastActivity": (logs[-1].get("time") if logs and isinstance(logs[-1], dict) else ""),
+                    "changedFiles": cumulative_files,
+                    "roundChangedFiles": attempt_changed_files,
+                    "diffStat": status.get("diffStat", ""),
+                    "reason": safe_log(exc, 1200),
+                }
+                execution.update({"status": "partial", "phase": "implementation"})
+                live["git"] = {**status, "committed": False, "commitId": ""}
+            raise PartialWorkflowError(
+                f"{safe_log(exc, 1000)} 检测到 {len(cumulative_files)} 个执行文件已有改动，已保存断点；请继续现有修改并完成自检。"
+            ) from exc
+        raise
     after_snapshot = worktree_change_snapshot(worktree)
-    round_changed_files = changed_paths_between(before_snapshot, after_snapshot)
+    attempt_changed_files = changed_paths_between(before_snapshot, after_snapshot)
+    round_changed_files = compact_strings(resume_files + attempt_changed_files, 80, 1200)
+    round_changed_files = [path for path in round_changed_files if path in after_snapshot]
     reported_files = compact_strings(payload.get("changed_files"), 80, 1200)
     if reported_files != round_changed_files:
         add_job_log(
@@ -3138,6 +3300,12 @@ def quick_execution_job(
         )
     payload["changed_files"] = round_changed_files
     result = merge_acceptance_fix_result(previous_result, payload) if acceptance_fix or bugfix_active else payload
+    remapped_checks = remap_manual_verification_checks(
+        previous_result.get("manual_cases"),
+        previous_verification.get("checks"),
+        result.get("manual_cases"),
+        payload.get("manual_cases"),
+    ) if acceptance_fix else None
     review = {
         "verdict": "skipped",
         "summary": "快速模式已由同一 App Thread 完成自检；未启动第二个独立 Code Review。",
@@ -3159,7 +3327,17 @@ def quick_execution_job(
             "review": review,
             "error": "",
         })
+        live["execution"].pop("checkpoint", None)
+        live["execution"].pop("resumeFromCheckpoint", None)
         live["git"] = {**status, "committed": False, "commitId": ""}
+        if remapped_checks is not None:
+            verification = live.setdefault("verification", {})
+            verification.update({
+                "approved": False,
+                "checks": remapped_checks,
+                "note": "",
+                "revision": int(verification.get("revision") or 0) + 1,
+            })
         if bugfix_active:
             live["bugfix"]["status"] = "verify"
             live["bugfix"]["executionMode"] = "fast"
@@ -3180,10 +3358,43 @@ def prepare_execution_request(
     feedback: str = "",
     attachments: Any = None,
     flow_mode: str = "standard",
+    verification_checks: Any = None,
 ) -> None:
     with mutate_task(task_id) as task:
-        task["verification"] = {"approved": False, "checks": [], "note": ""}
-        task.setdefault("execution", {})["flowMode"] = flow_mode
+        previous_verification = task.get("verification") if isinstance(task.get("verification"), dict) else {}
+        execution = task.setdefault("execution", {})
+        resume_from_checkpoint = bool(
+            flow_mode == "fast"
+            and not reset_session
+            and execution.get("status") in {"error", "interrupted", "partial"}
+        )
+        if resume_from_checkpoint:
+            execution["resumeFromCheckpoint"] = True
+        else:
+            execution.pop("resumeFromCheckpoint", None)
+        review = execution.get("review") if isinstance(execution.get("review"), dict) else {}
+        continuing_acceptance_fix = bool(
+            execution.get("mode") == "acceptance_fix"
+            and not reset_session
+            and (
+                review.get("verdict") == "needs_fix"
+                or (execution.get("status") in {"error", "interrupted"} and execution.get("phase") == "review")
+            )
+        )
+        cases = (task.get("execution", {}).get("result") or {}).get("manual_cases") or []
+        if acceptance_fix:
+            checks = normalize_manual_verification_checks(cases, verification_checks)
+        elif continuing_acceptance_fix:
+            checks = normalize_manual_verification_checks(cases, previous_verification.get("checks"))
+        else:
+            checks = []
+        task["verification"] = {
+            "approved": False,
+            "checks": checks,
+            "note": "",
+            "revision": int(previous_verification.get("revision") or 0) + 1,
+        }
+        execution["flowMode"] = flow_mode
         task["execution"]["transport"] = "app-server" if flow_mode == "fast" else "exec"
         if acceptance_fix:
             task.setdefault("execution", {})["mode"] = "acceptance_fix"
@@ -3220,11 +3431,13 @@ def approve_manual_verification(task_id: str, checks: Any, note: str) -> None:
             raise WorkflowError("实施或 Code Review 尚未完成，不能确认人工验收。")
         if not manual_verification_checks_pass(task, checks):
             raise WorkflowError("请先完成全部 P0 / 必测人工验收项。")
+        verification_revision = int((task.get("verification") or {}).get("revision") or 0) + 1
         task["verification"] = {
             "approved": True,
             "checks": [bool(item) for item in checks],
             "note": note,
             "approvedAt": now_iso(),
+            "revision": verification_revision,
         }
         if isinstance(task.get("bugfix"), dict) and task["bugfix"].get("status") in {"running", "verify"}:
             task["bugfix"]["status"] = "commit"
@@ -3298,7 +3511,13 @@ def prepare_bugfix_request(
             "resultCommit": "",
             "history": history,
         }
-        live["verification"] = {"approved": False, "checks": [], "note": ""}
+        verification_revision = int((live.get("verification") or {}).get("revision") or 0) + 1
+        live["verification"] = {
+            "approved": False,
+            "checks": [],
+            "note": "",
+            "revision": verification_revision,
+        }
         live["git"] = {**status, "committed": False, "commitId": ""}
         live.setdefault("execution", {})["mode"] = "bugfix"
         live["execution"]["flowMode"] = execution_mode
@@ -3812,7 +4031,7 @@ workflow: quick-change
         "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
         "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
         "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "cwd": str(REPO_ROOT.resolve()), "logs": [], "error": ""},
-        "verification": {"approved": False, "checks": [], "note": ""},
+        "verification": {"approved": False, "checks": [], "note": "", "revision": 0},
         "git": {"entries": [], "digest": "", "committed": False, "commitId": ""},
         "bugfix": {"status": "idle", "description": "", "history": []},
         "knowledge": default_knowledge(),
@@ -3940,7 +4159,7 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
             "cwd": str(worktree_path.resolve()) if imported_plan else str(REPO_ROOT.resolve()),
             "logs": [], "error": "",
         },
-        "verification": {"approved": False, "checks": [], "note": ""},
+        "verification": {"approved": False, "checks": [], "note": "", "revision": 0},
         "git": {**status, "committed": False, "commitId": ""},
         "bugfix": {"status": "idle", "description": "", "history": []},
         "knowledge": default_knowledge(),
@@ -4008,6 +4227,7 @@ def health_payload() -> dict[str, Any]:
         "limits": {
             "askSeconds": ASK_TIMEOUT_SECONDS,
             "quickExecutionSeconds": QUICK_EXECUTION_TIMEOUT_SECONDS,
+            "quickExecutionHardSeconds": QUICK_EXECUTION_HARD_TIMEOUT_SECONDS,
             "knowledgeSeconds": KNOWLEDGE_TIMEOUT_SECONDS,
             "acceptanceFixSeconds": ACCEPTANCE_FIX_TIMEOUT_SECONDS,
             "acceptanceReviewSeconds": ACCEPTANCE_FIX_REVIEW_TIMEOUT_SECONDS,
@@ -4271,7 +4491,10 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 if images and not acceptance_fix:
                     raise WorkflowError("图片附件只能用于人工验收后的定向返修。")
                 attachments = persist_feedback_images(task_id, images, "acceptance-fix") if acceptance_fix else []
-                prepare_execution_request(task_id, reset_session, acceptance_fix, feedback, attachments, flow_mode)
+                prepare_execution_request(
+                    task_id, reset_session, acceptance_fix, feedback, attachments, flow_mode,
+                    payload.get("checks"),
+                )
                 if flow_mode == "fast":
                     launch_job(
                         task_id, "execution",

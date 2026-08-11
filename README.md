@@ -348,10 +348,11 @@ task.app.cwd
 
 已有 `.runtime`、任务、Worktree 以及 discussion / execution / review / ask session 会在加载时兼容迁移；不使用快速模式时，原有标准流程行为保持不变。
 
-快速 Turn 默认最长 600 秒，可在启动前调整为 120–900 秒。这样可避免接近 6 分钟的有效修改被硬中断后整轮重试；页面仍可随时手动停止：
+快速 Turn 默认采用两级超时：连续 600 秒没有新的命令、消息或文件进度时自动停止；持续有进度时自动续期，但单轮绝对不超过 1800 秒。无进度超时可配置为 120–1800 秒，绝对上限可配置为 600–3600 秒；页面仍可随时手动停止：
 
 ```bash
 PROJECT_FLOW_QUICK_TIMEOUT=600 \
+PROJECT_FLOW_QUICK_HARD_TIMEOUT=1800 \
 PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" \
 python3 server.py
 ```

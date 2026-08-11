@@ -507,6 +507,15 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('@keyframes activity-spin', index_html)
         self.assertIn('@media (prefers-reduced-motion: reduce)', index_html)
 
+    def test_quick_execution_ui_explains_progress_timeout_and_checkpoint_resume(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        readme = (SERVER_PATH.parent / "README.md").read_text(encoding="utf-8")
+        self.assertIn("quickExecutionHardSeconds", app_js)
+        self.assertIn("持续有进度会自动续期", app_js)
+        self.assertIn("继续现有修改并完成自检", app_js)
+        self.assertIn('section.status === "partial"', app_js)
+        self.assertIn("PROJECT_FLOW_QUICK_HARD_TIMEOUT=1800", readme)
+
     def test_manual_verification_has_sticky_case_navigation(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
@@ -523,6 +532,15 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('.manual-case-nav-item.is-complete', index_html)
         self.assertIn('@media (max-width: 1320px)', index_html)
         self.assertIn('@media (max-width: 1120px)', index_html)
+
+    def test_manual_verification_rework_persists_and_rehydrates_checks(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        execute_plan = app_js.split("async function executePlan", 1)[1].split("async function cancelExecution", 1)[0]
+        self.assertIn('"verificationRevision"', app_js)
+        self.assertIn("serverRevision !== Number(ui.verificationRevision || 0)", app_js)
+        self.assertIn("ui.checks = task.verification.checks.map(Boolean)", app_js)
+        self.assertIn("mode: ui.executionMode, checks: ui.checks", execute_plan)
+        self.assertNotIn("ui.checks = []", execute_plan)
 
     def test_stage_pages_have_hover_section_navigation_with_snapshots(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
@@ -852,6 +870,87 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(result["manual_cases"][0]["expected"], "新结果")
         self.assertEqual(result["acceptance_logs"][0]["expected"], "新日志")
         self.assertEqual(result["docs_backfill"], ["fix.md", "old.md"])
+
+    def test_acceptance_fix_rechecks_only_affected_manual_cases(self) -> None:
+        previous_cases = [
+            {"title": "复活计时", "expected": "旧结果"},
+            {"title": "主流程", "expected": "保持"},
+            {"title": "补充回归", "expected": "保持"},
+        ]
+        merged_cases = [
+            {"title": "新增长按回归", "expected": "新用例"},
+            {"title": "复活计时", "expected": "新结果"},
+            {"title": "主流程", "expected": "保持"},
+            {"title": "补充回归", "expected": "保持"},
+        ]
+        affected_cases = merged_cases[:2]
+
+        checks = server.remap_manual_verification_checks(
+            previous_cases,
+            [True, True, False],
+            merged_cases,
+            affected_cases,
+        )
+
+        self.assertEqual(checks, [False, False, True, False])
+
+    def test_acceptance_fix_check_mapping_uses_case_title_not_array_index(self) -> None:
+        previous_cases = [{"title": "主流程"}, {"title": "设置页"}]
+        merged_cases = [{"title": "设置页"}, {"title": "主流程"}]
+
+        checks = server.remap_manual_verification_checks(
+            previous_cases,
+            [True, False],
+            merged_cases,
+            [],
+        )
+
+        self.assertEqual(checks, [False, True])
+
+    def test_prepare_acceptance_fix_persists_current_manual_checks(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000080")
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "verify"
+            task["execution"]["result"] = {
+                "manual_cases": [{"title": "主流程"}, {"title": "设置页"}],
+            }
+            task["verification"] = {"approved": False, "checks": [], "note": "", "revision": 4}
+
+        server.prepare_execution_request(
+            task_id,
+            False,
+            acceptance_fix=True,
+            feedback="设置页仍有问题",
+            verification_checks=[True, False],
+        )
+
+        verification = server.get_task_copy(task_id)["verification"]
+        self.assertEqual(verification["checks"], [True, False])
+        self.assertEqual(verification["revision"], 5)
+
+    def test_prepare_acceptance_review_retry_keeps_mapped_checks(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000081")
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "execute"
+            task["execution"].update({
+                "status": "needs_attention",
+                "phase": "review",
+                "mode": "acceptance_fix",
+                "result": {"manual_cases": [{"title": "返修项"}, {"title": "主流程"}]},
+                "review": {"verdict": "needs_fix", "findings": [{"title": "仍需修复"}]},
+            })
+            task["verification"] = {
+                "approved": False,
+                "checks": [False, True],
+                "note": "",
+                "revision": 6,
+            }
+
+        server.prepare_execution_request(task_id, False, verification_checks=[False, False])
+
+        verification = server.get_task_copy(task_id)["verification"]
+        self.assertEqual(verification["checks"], [False, True])
+        self.assertEqual(verification["revision"], 7)
 
     def test_lark_links_default_to_chrome_mcp_without_accepting_spoofed_hosts(self) -> None:
         self.assertTrue(server.is_lark_url("https://example.feishu.cn/docx/abc"))
@@ -1613,7 +1712,7 @@ class ControllerTests(unittest.TestCase):
                 "review": {"verdict": "pass", "summary": "通过", "findings": []},
                 "logs": [], "error": "",
             },
-            "verification": {"approved": False},
+            "verification": {"approved": False, "checks": [True], "revision": 3},
             "git": {"committed": False},
             "events": [],
         }
@@ -1648,6 +1747,8 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["execution"]["roundChangedFiles"], ["timer.cs"])
         self.assertEqual(task["execution"]["result"]["changed_files"], ["timer.cs", "old.cs"])
         self.assertEqual([case["title"] for case in task["execution"]["result"]["manual_cases"]], ["计时返修", "主流程"])
+        self.assertEqual(task["verification"]["checks"], [False, True])
+        self.assertEqual(task["verification"]["revision"], 4)
         self.assertEqual(task["stage"], "verify")
 
     def test_manual_verification_rejects_stale_submit_while_execution_is_active(self) -> None:
@@ -2148,6 +2249,161 @@ class ControllerTests(unittest.TestCase):
         self.assertNotIn("readOnlyAccess", client.turn_params["sandboxPolicy"])
         self.assertFalse(client.turn_params["sandboxPolicy"]["networkAccess"])
 
+    def test_app_server_progress_extends_idle_timeout(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000083")
+        payload = self.quick_result()
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["app"] = "app-thread-progress"
+            task["app"].update({"status": "ready", "threadId": "app-thread-progress"})
+
+        class ProgressClient:
+            def __init__(self):
+                self.listener = None
+
+            def add_listener(self, _thread_id, listener):
+                self.listener = listener
+
+            def remove_listener(self, _thread_id, _listener):
+                self.listener = None
+
+            def request(self, method, _params, timeout=30):
+                if method != "turn/start":
+                    return {}
+                self.listener.put({
+                    "method": "item/completed",
+                    "params": {"item": {"type": "agentMessage", "text": json.dumps(payload, ensure_ascii=False)}},
+                })
+                self.listener.put({
+                    "method": "turn/completed",
+                    "params": {"turn": {"id": "turn-progress", "status": "completed"}},
+                })
+                return {"turn": {"id": "turn-progress"}}
+
+            def interrupt(self, _thread_id, _turn_id):
+                raise AssertionError("active progress must extend the idle timeout")
+
+        client = ProgressClient()
+        with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                mock.patch.object(server, "_ensure_task_app_thread", return_value=server.get_task_copy(task_id)), \
+                mock.patch.object(server, "get_app_server_client", return_value=client), \
+                mock.patch.object(server.time, "monotonic", side_effect=[0, 4, 4, 8, 8]):
+            result, _ = server.run_app_server_structured(
+                task_id,
+                "execution",
+                "quick task",
+                self.repo,
+                server.SCHEMA_ROOT / "execution.schema.json",
+                timeout_seconds=5,
+                hard_timeout_seconds=15,
+                timeout_label="快速执行",
+                allow_docs_root=False,
+            )
+
+        self.assertEqual(result["summary"], payload["summary"])
+
+    def test_app_server_hard_timeout_stops_even_with_progress(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000084")
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["app"] = "app-thread-hard-limit"
+            task["app"].update({"status": "ready", "threadId": "app-thread-hard-limit"})
+
+        class NeverCompletesClient:
+            def __init__(self):
+                self.listener = None
+                self.interrupted = False
+
+            def add_listener(self, _thread_id, listener):
+                self.listener = listener
+
+            def remove_listener(self, _thread_id, _listener):
+                self.listener = None
+
+            def request(self, method, _params, timeout=30):
+                if method != "turn/start":
+                    return {}
+                for _ in range(2):
+                    self.listener.put({"method": "item/completed", "params": {"item": {"type": "commandExecution", "exitCode": 0}}})
+                return {"turn": {"id": "turn-hard-limit"}}
+
+            def interrupt(self, _thread_id, _turn_id):
+                self.interrupted = True
+
+        client = NeverCompletesClient()
+        with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                mock.patch.object(server, "_ensure_task_app_thread", return_value=server.get_task_copy(task_id)), \
+                mock.patch.object(server, "get_app_server_client", return_value=client), \
+                mock.patch.object(server.time, "monotonic", side_effect=[0, 4, 4, 8, 8, 11]):
+            with self.assertRaisesRegex(server.WorkflowError, "绝对上限"):
+                server.run_app_server_structured(
+                    task_id,
+                    "execution",
+                    "quick task",
+                    self.repo,
+                    server.SCHEMA_ROOT / "execution.schema.json",
+                    timeout_seconds=5,
+                    hard_timeout_seconds=10,
+                    timeout_label="快速执行",
+                    allow_docs_root=False,
+                )
+
+        self.assertTrue(client.interrupted)
+
+    def test_quick_timeout_with_changes_saves_partial_checkpoint(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000085")
+        status = {"entries": [{"code": " M", "path": "feature.cs"}], "digest": "dirty", "branch": "main", "head": "abc", "diffStat": "1 file changed", "refreshedAt": "now"}
+
+        with mock.patch.object(server, "worktree_change_snapshot", side_effect=[{"plan.md": "plan"}, {"plan.md": "plan", "feature.cs": "changed"}]), \
+                mock.patch.object(server, "run_app_server_structured", side_effect=server.WorkflowError("连续 10 分钟没有新进度")), \
+                mock.patch.object(server, "git_status", return_value=status):
+            with self.assertRaisesRegex(server.PartialWorkflowError, "已保存断点"):
+                server.quick_execution_job(task_id, "")
+
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["execution"]["status"], "partial")
+        self.assertEqual(task["execution"]["checkpoint"]["changedFiles"], ["feature.cs"])
+        self.assertEqual(task["git"]["digest"], "dirty")
+
+    def test_quick_retry_resumes_current_diff_and_keeps_cumulative_files(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000086")
+        with server.mutate_task(task_id) as task:
+            task["execution"].update({
+                "status": "partial",
+                "flowMode": "fast",
+                "error": "上轮超时",
+                "checkpoint": {"attempt": 1, "changedFiles": ["feature.cs"], "lastActivity": "2026-08-11T17:17:57+08:00"},
+            })
+        status = {"entries": [{"code": " M", "path": "feature.cs"}], "digest": "dirty", "branch": "main", "head": "abc", "diffStat": "1 file changed", "refreshedAt": "now"}
+
+        with mock.patch.object(server, "worktree_change_snapshot", side_effect=[{"feature.cs": "before"}, {"feature.cs": "before"}]), \
+                mock.patch.object(server, "run_app_server_structured", return_value=(self.quick_result(), "app-thread-resume")) as run_app, \
+                mock.patch.object(server, "git_status", return_value=status):
+            server.quick_execution_job(task_id, "")
+
+        prompt = run_app.call_args.args[2]
+        self.assertIn("断点续跑", prompt)
+        self.assertIn("禁止重新扫描整份 Plan", prompt)
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["execution"]["result"]["changed_files"], ["feature.cs"])
+        self.assertNotIn("checkpoint", task["execution"])
+        self.assertEqual(task["execution"]["status"], "complete")
+
+    def test_prepare_quick_retry_keeps_resume_intent_after_queue_transition(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000087")
+        with server.mutate_task(task_id) as task:
+            task["execution"].update({
+                "status": "partial",
+                "flowMode": "fast",
+                "checkpoint": {"changedFiles": ["feature.cs"]},
+            })
+
+        server.prepare_execution_request(task_id, False, flow_mode="fast")
+        with server.mutate_task(task_id) as task:
+            task["execution"]["status"] = "queued"
+
+        task = server.get_task_copy(task_id)
+        self.assertTrue(task["execution"]["resumeFromCheckpoint"])
+        self.assertEqual(server.quick_resume_files(task, {"feature.cs": "changed"}), ["feature.cs"])
+
     def test_quick_mode_skips_independent_review_and_enters_manual_verification(self) -> None:
         task_id = self.seed_execution_task()
         with mock.patch.object(server, "run_app_server_structured", return_value=(self.quick_result(), "app-thread-fast")), \
@@ -2180,6 +2436,36 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["bugfix"]["status"], "verify")
         self.assertEqual(task["bugfix"]["executionMode"], "fast")
         self.assertEqual(task["execution"]["review"]["verdict"], "skipped")
+
+    def test_quick_acceptance_fix_keeps_unaffected_manual_checks(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000082")
+        previous_result = self.quick_result()
+        previous_result["manual_cases"] = [
+            {"title": "返修项", "required": True, "priority": "P0", "steps": ["复验"], "expected": "修复"},
+            {"title": "主流程", "required": True, "priority": "P0", "steps": ["运行"], "expected": "正常"},
+        ]
+        fix_result = self.quick_result()
+        fix_result["manual_cases"] = [
+            {"title": "返修项", "required": True, "priority": "P0", "steps": ["复验"], "expected": "已修复"},
+        ]
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "verify"
+            task["execution"].update({
+                "status": "complete",
+                "mode": "acceptance_fix",
+                "result": previous_result,
+                "review": {"verdict": "skipped", "summary": "快速自检", "findings": []},
+            })
+            task["verification"] = {"approved": False, "checks": [False, True], "note": "", "revision": 8}
+
+        with mock.patch.object(server, "run_app_server_structured", return_value=(fix_result, "app-thread-fix")):
+            server.quick_execution_job(task_id, "返修项仍有问题", acceptance_fix=True)
+
+        task = server.get_task_copy(task_id)
+        self.assertEqual([case["title"] for case in task["execution"]["result"]["manual_cases"]], ["返修项", "主流程"])
+        self.assertEqual(task["verification"]["checks"], [False, True])
+        self.assertEqual(task["verification"]["revision"], 9)
+        self.assertEqual(task["stage"], "verify")
 
     def test_fast_manual_verification_accepts_skipped_independent_review(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000053")
@@ -2409,6 +2695,7 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(health["features"]["knowledge"])
         self.assertTrue(health["readers"]["larkCli"]["ready"])
         self.assertGreaterEqual(health["limits"]["quickExecutionSeconds"], 120)
+        self.assertGreaterEqual(health["limits"]["quickExecutionHardSeconds"], health["limits"]["quickExecutionSeconds"])
         self.assertGreaterEqual(health["limits"]["knowledgeSeconds"], 60)
 
 

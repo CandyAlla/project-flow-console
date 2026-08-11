@@ -56,6 +56,7 @@
     agentMemoryOpen: false,
     executionMode: "fast",
     checks: [],
+    verificationRevision: 0,
     verificationNote: "",
     commitMessage: "",
     commitConfirmed: false,
@@ -185,7 +186,7 @@
   const taskViewKeys = [
     "module", "viewStage", "knowledgeFilter", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
     "existingDocumentPath", "existingWorktreePath",
-    "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
+    "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationRevision", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
   ];
 
   function taskViewSnapshot(source) {
@@ -760,7 +761,7 @@
     if (value.archivedAt) state = "archived";
     else if (value.activeJob) state = value.jobState === "queued" ? "queued" : "running";
     else if (value.git?.committed) state = "done";
-    else if ([value.discussion, value.plan, value.worktree, value.execution].some((section) => ["error", "interrupted"].includes(section?.status))) state = "error";
+    else if ([value.discussion, value.plan, value.worktree, value.execution].some((section) => ["error", "interrupted", "partial"].includes(section?.status))) state = "error";
     return {
       id: value.id,
       title: value.title,
@@ -1018,7 +1019,7 @@
       discuss: "等待讨论与口径确认",
       plan: "等待 Plan 逻辑验收",
       worktree: "等待创建 Worktree",
-      execute: task.execution?.status === "needs_attention" ? "Review 仍有发现" : "等待执行 Plan",
+      execute: task.execution?.status === "partial" ? "已有修改 · 等待断点续跑" : task.execution?.status === "needs_attention" ? "Review 仍有发现" : "等待执行 Plan",
       verify: "等待人工验收",
       commit: "等待 Commit 确认",
       bugfix: ({ running: "Bug 定向修改中", review: "Bug Review 等待继续修改", verify: "等待 Bug 人工复验", commit: "等待 Bug 修复 Commit" })[task.bugfix?.status] || "等待 Bug 反馈或进入沉淀",
@@ -1464,10 +1465,10 @@
       value = Math.max(value, 30);
       label = "读取项目与任务上下文";
     }
-    const activityMessages = messages.filter((message) => ["执行检查", "检查结束", "已应用文件改动", "已返回本阶段结果"].some((marker) => message.includes(marker)));
+    const activityMessages = messages.filter((message) => ["执行检查", "检查结束", "应用文件改动", "阶段消息", "已返回本阶段结果"].some((marker) => message.includes(marker)));
     if (activityMessages.length) {
       value = Math.max(value, Math.min(78, 40 + activityMessages.length * 5));
-      label = messages.some((message) => message.includes("已应用文件改动")) ? "落地修改与自检" : messages.some((message) => message.includes("执行检查") || message.includes("检查结束")) ? "执行检查与验证" : "处理当前阶段结果";
+      label = messages.some((message) => message.includes("应用文件改动")) ? "落地修改与自检" : messages.some((message) => message.includes("执行检查") || message.includes("检查结束")) ? "执行检查与验证" : "处理当前阶段结果";
     }
     if (section?.phase === "review") {
       value = Math.max(value, 88);
@@ -1682,21 +1683,26 @@
       const fixMinutes = Math.ceil(Number(health?.limits?.acceptanceFixSeconds || 480) / 60);
       const reviewMinutes = Math.ceil(Number(health?.limits?.acceptanceReviewSeconds || 300) / 60);
       const quickMinutes = Math.ceil(Number(health?.limits?.quickExecutionSeconds || 600) / 60);
+      const quickHardMinutes = Math.ceil(Number(health?.limits?.quickExecutionHardSeconds || 1800) / 60);
       const hint = fast
-        ? `复用同一个 App Thread；本轮最长 ${quickMinutes} 分钟，不启动独立 Review。`
+        ? `复用同一个 App Thread；持续有进度会自动续期，连续 ${quickMinutes} 分钟无进展才停止，绝对上限 ${quickHardMinutes} 分钟；不启动独立 Review。`
         : targeted ? `只处理验收备注；返修最长 ${fixMinutes} 分钟，定向 Review 最长 ${reviewMinutes} 分钟。` : "停止后保留已有实施结果与 Worktree 改动。";
       return `${renderProgress(section, title)}<div class="actions"><div class="actions-secondary"><span class="hint">${hint}</span></div><div class="actions-primary"><button class="danger" id="cancelExecution">停止当前执行</button></div></div>`;
     }
-    const error = ["error", "interrupted"].includes(section.status) ? callout(`<strong>执行中断：</strong>${escapeHTML(section.error)}`, "danger") : "";
+    const interrupted = ["error", "interrupted", "partial"].includes(section.status);
+    const partial = section.status === "partial";
+    const checkpoint = partial && section.checkpoint ? `<section class="section"><div class="summary-grid"><div class="summary-item"><span>已保存断点</span><strong>${Number(section.checkpoint.changedFiles?.length || 0)} 个执行文件</strong></div><div class="summary-item"><span>最后活动</span><strong>${escapeHTML(formatDateTime(section.checkpoint.lastActivity || section.checkpoint.createdAt))}</strong></div></div><p class="section-copy">继续时会先读取当前 Git Diff，只补齐未完成修改、自检和验收结果，不会重新执行整份 Plan。</p></section>` : "";
+    const error = interrupted ? callout(`<strong>${partial ? "执行已部分完成" : "执行中断"}：</strong>${escapeHTML(section.error)}`, partial ? "warning" : "danger") : "";
     const needs = section.status === "needs_attention";
     const fast = ui.executionMode !== "standard";
-    const canResetSession = Boolean(error && (fast ? task.agentMemory?.sessions?.app : task.agentMemory?.sessions?.execution));
+    const canResetSession = Boolean(interrupted && (fast ? task.agentMemory?.sessions?.app : task.agentMemory?.sessions?.execution));
     const imported = task.worktree?.imported ? "已有 Worktree 已接入" : "隔离环境已绑定";
     return `<section class="section">${error || callout(`<strong>${imported}。</strong> Plan 位于 <code>${escapeHTML(task.plan.finalPath || task.paths.planRelative)}</code>；点击后 Codex 才会获得 Worktree 写权限。`, needs ? "danger" : "warning")}</section>
       <section class="section"><div class="summary-grid"><div class="summary-item"><span>执行目录</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div><div class="summary-item"><span>Skill 链</span><strong>${escapeHTML([...(health?.skills?.execution || []), ...(health?.skills?.review || [])].join(" → ") || "通用项目规则")}</strong></div>${task.worktree?.imported ? `<div class="summary-item"><span>接入时 Git 改动</span><strong>${Number(task.git?.entries?.length || 0)} 个文件，Commit 前完整复核</strong></div>` : ""}</div></section>
+      ${checkpoint}
       ${reviewPanel(section.review)}
       ${renderExecutionModeSelector("execution")}
-      <div class="actions"><div class="actions-secondary"><span class="hint">不会 Commit、Push 或 Merge；快速模式不启动独立 Review。</span>${canResetSession ? `<button class="danger" id="resetExecutionSession">放弃旧${fast ? " App Thread" : " execution 会话"}，用任务记忆重建</button>` : ""}</div><div class="actions-primary"><button class="primary" id="executePlan">${needs ? fast ? "快速处理 Review 发现" : "根据 Review 继续执行" : ["error", "interrupted"].includes(section.status) && section.phase === "review" && section.result && !fast ? "只重试 Code Review" : ["error", "interrupted"].includes(section.status) ? fast ? "快速重试" : "重试原 execution 会话" : fast ? "快速执行 Plan" : "按标准流程执行 Plan"}</button></div></div>${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><span class="hint">不会 Commit、Push 或 Merge；快速模式不启动独立 Review。</span>${canResetSession ? `<button class="danger" id="resetExecutionSession">放弃旧${fast ? " App Thread" : " execution 会话"}，用任务记忆重建</button>` : ""}</div><div class="actions-primary"><button class="primary" id="executePlan">${partial && fast ? "继续现有修改并完成自检" : needs ? fast ? "快速处理 Review 发现" : "根据 Review 继续执行" : interrupted && section.phase === "review" && section.result && !fast ? "只重试 Code Review" : interrupted ? fast ? "从断点快速重试" : "重试原 execution 会话" : fast ? "快速执行 Plan" : "按标准流程执行 Plan"}</button></div></div>${eventLogDetails()}`;
   }
 
   function textItems(value) {
@@ -1782,6 +1788,11 @@
     const reviewVerdict = task.execution.review?.verdict;
     const reviewLabel = reviewVerdict === "pass" ? "独立 Review 通过" : reviewVerdict === "skipped" ? "快速自检完成（未独立 Review）" : "请查看执行阶段";
     const cases = result.manual_cases?.length ? result.manual_cases : [{ title: "主流程", steps: "按 Plan 执行一次完整主流程。", expected: "结果与验收口径一致。" }];
+    const serverRevision = Number(task.verification?.revision) || 0;
+    if (serverRevision !== Number(ui.verificationRevision || 0) && Array.isArray(task.verification?.checks)) {
+      ui.checks = task.verification.checks.map(Boolean);
+      ui.verificationRevision = serverRevision;
+    }
     if (!inBugfix && isCompletedStageView("verify") && task.verification?.approved && Array.isArray(task.verification.checks)) {
       ui.checks = task.verification.checks.map(Boolean);
     }
@@ -1796,7 +1807,7 @@
       <div class="verification-case-layout"><section class="section verification-case-content"><div class="section-heading"><div><p class="section-kicker">逐条勾选</p><h3>详细测试用例</h3></div><strong class="gate-progress">P0 / 必测 ${completedRequired} / ${requiredIndexes.length}</strong></div><p class="section-copy">只有标记为“Commit 必测”的用例会阻塞提交；P1/P2 补充回归可按本次发布风险选择执行，并在备注中记录。</p><div class="test-case-list">${cases.map(renderManualCase).join("")}</div></section>${renderManualCaseNavigation(cases, requiredIndexes)}</div>
       ${renderAcceptanceLogs(result.acceptance_logs)}
       ${renderExecutionModeSelector("acceptance")}
-      <section class="section" data-section-title="验收备注与问题"><div class="field"><label for="verificationNote">验收备注或发现的问题</label><textarea id="verificationNote" placeholder="记录设备、操作证据，或描述需要定向返修的问题……">${escapeHTML(ui.verificationNote)}</textarea>${renderFeedbackImageInput("verification")}<span class="hint">文字和图片可以单独或一起提交。退回后只处理这条人工反馈，不会重新执行整份 Plan；上一轮未受影响的测试用例会保留。</span></div></section>
+      <section class="section" data-section-title="验收备注与问题"><div class="field"><label for="verificationNote">验收备注或发现的问题</label><textarea id="verificationNote" placeholder="记录设备、操作证据，或描述需要定向返修的问题……">${escapeHTML(ui.verificationNote)}</textarea>${renderFeedbackImageInput("verification")}<span class="hint">文字和图片可以单独或一起提交。退回后只处理这条人工反馈，不会重新执行整份 Plan；本轮新增或更新的受影响用例会取消勾选，其他已通过用例会保留。</span></div></section>
       <div class="actions"><div class="actions-secondary"><button class="danger" id="returnToExecution" ${ui.verificationNote.trim() || feedbackImageItems("verification").length ? "" : "disabled"}>发现问题，启动定向返修</button></div><div class="actions-primary"><button class="primary" id="approveVerification" ${requiredDone ? "" : "disabled"}>${inBugfix ? "Bug 复验通过" : "P0 / 必测验证通过"}</button></div></div>${reviewPanel(task.execution.review)}${eventLogDetails()}`;
   }
 
@@ -1837,15 +1848,16 @@
         const progressHint = reviewing ? "Bug 修改结果已经保留；当前只复核本轮改动，不会重新执行 Plan。" : "只修改本 Bug 及 Review findings，不重新执行 Plan。";
         return `<section class="section">${cycle.description ? callout(`<strong>本轮 Bug：</strong>${escapeHTML(cycle.description)}`, "warning") : ""}</section>${renderProgress(section, progressTitle)}<div class="actions"><div class="actions-secondary"><span class="hint">${progressHint}</span></div><div class="actions-primary"><button class="danger" id="cancelExecution">${reviewing ? "停止 Code Review" : "停止当前修改"}</button></div></div>`;
       }
-      const interrupted = ["error", "interrupted"].includes(section.status);
+      const interrupted = ["error", "interrupted", "partial"].includes(section.status);
+      const partial = section.status === "partial";
       const needsReviewFix = section.status === "needs_attention" || cycle.status === "review";
       const retryReviewOnly = interrupted && section.phase === "review" && section.result;
       const selectedFast = ui.executionMode !== "standard";
-      return `<section class="section">${interrupted ? callout(`<strong>Bug 修改中断：</strong>${escapeHTML(section.error)}`, "danger") : callout(`<strong>Bug 修复 Review 仍有发现。</strong> 继续只处理本轮 finding，不会重新执行 Plan。`, needsReviewFix ? "danger" : "warning")}</section>
+      return `<section class="section">${interrupted ? callout(`<strong>${partial ? "Bug 修改已部分完成" : "Bug 修改中断"}：</strong>${escapeHTML(section.error)}`, partial ? "warning" : "danger") : callout(`<strong>Bug 修复 Review 仍有发现。</strong> 继续只处理本轮 finding，不会重新执行 Plan。`, needsReviewFix ? "danger" : "warning")}</section>
         ${cycle.description ? `<section class="section"><h3>本轮 Bug</h3><div class="preview"><pre>${escapeHTML(cycle.description)}</pre></div></section>` : ""}
         ${reviewPanel(section.review || section.previousReview)}
         ${renderExecutionModeSelector("bugfix")}
-        <div class="actions"><div class="actions-secondary"><span class="hint">当前阶段始终保持在 Bug 修复模块。</span></div><div class="actions-primary"><button class="primary" id="continueBugfix">${retryReviewOnly && !selectedFast ? "只重试 Code Review" : interrupted ? selectedFast ? "快速重试 Bug 修改" : "重试 Bug 定向修改" : selectedFast ? "快速处理 Review 发现" : "根据 Review 继续修改"}</button></div></div>${eventLogDetails()}`;
+        <div class="actions"><div class="actions-secondary"><span class="hint">当前阶段始终保持在 Bug 修复模块。</span></div><div class="actions-primary"><button class="primary" id="continueBugfix">${partial && selectedFast ? "继续现有 Bug 修改并完成自检" : retryReviewOnly && !selectedFast ? "只重试 Code Review" : interrupted ? selectedFast ? "从断点快速重试 Bug 修改" : "重试 Bug 定向修改" : selectedFast ? "快速处理 Review 发现" : "根据 Review 继续修改"}</button></div></div>${eventLogDetails()}`;
     }
     const pendingEntries = task.git.entries || [];
     const completed = cycle.status === "complete";
@@ -2283,8 +2295,7 @@
     await withAction(async () => {
       const verificationFeedback = task?.stage === "verify" || (task?.stage === "bugfix" && task?.bugfix?.status === "verify");
       const images = verificationFeedback && !resetSession ? feedbackImagesPayload("verification") : [];
-      const result = await post(`/api/tasks/${task.id}/execute`, { feedback, resetSession, images, mode: ui.executionMode });
-      ui.checks = [];
+      const result = await post(`/api/tasks/${task.id}/execute`, { feedback, resetSession, images, mode: ui.executionMode, checks: ui.checks });
       ui.verificationNote = "";
       clearFeedbackImages("verification");
       setTask(result.task, true);
