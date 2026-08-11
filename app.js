@@ -11,7 +11,7 @@
     { id: "discuss", label: "讨论澄清", title: "先讨论，只问会导致返工的问题", description: "Codex 先读取当前 Project Profile 的项目事实，再把高返工决策压缩为 1–3 个问题。" },
     { id: "plan", label: "Plan 验收", title: "验收范围、流程和完成标准", description: "Solution Plan Markdown 是执行契约草案，HTML 是同口径的逻辑验收视图。" },
     { id: "worktree", label: "Worktree", title: "准备隔离执行环境", description: "展示真实 dry-run、分支、基准和路径；只有点击后才创建 Worktree。" },
-    { id: "execute", label: "执行", title: "选择速度后执行 Plan", description: "快速模式复用 Codex App Thread；标准模式保留独立 Code Review。" },
+    { id: "execute", label: "执行", title: "选择速度后执行 Plan", description: "快速模式复用后台执行 Thread；标准模式保留独立 Code Review。" },
     { id: "verify", label: "人工验收", title: "按测试案例完成最终验收", description: "自动验证和人工结果分开记录；全部必测项通过后才进入 Commit。" },
     { id: "commit", label: "Commit", title: "确认真实 Diff 后提交", description: "提交前重新读取 Git 状态；状态摘要变化时会拒绝 Commit。" },
     { id: "bugfix", label: "Bug 修复", title: "提交后发现问题，进入修复循环", description: "填写复现信息后复用当前 Worktree 和任务记忆；可选快速修改或带独立 Review 的标准流程。" },
@@ -782,7 +782,7 @@
         pending: (value.knowledge?.candidates || []).filter((item) => item.status === "pending").length,
         approved: (value.knowledge?.candidates || []).filter((item) => item.status === "approved").length
       },
-      appLinked: Boolean(value.app?.threadId),
+      appLinked: Boolean(value.codexApp?.threadId),
       agent: {
         id: String(value.agentMemory?.logicalAgentId || value.id).slice(0, 8),
         memoryVersion: value.agentMemory?.version || 1,
@@ -1333,28 +1333,26 @@
 
   function renderCodexAppPanel() {
     if (!task || !health?.features?.codexAppLink) return "";
-    const app = task.app || {};
-    const threadId = String(app.threadId || task.sessions?.app || "");
+    const app = task.codexApp || {};
+    const threadId = String(app.threadId || task.sessions?.codexApp || "");
     const deepLink = app.deepLink || (threadId && /^[A-Za-z0-9_-]+$/.test(threadId) ? `codex://threads/${encodeURIComponent(threadId)}` : "");
     const linked = Boolean(threadId && deepLink);
     const status = ({
       idle: "尚未连接",
       ready: "已连接",
-      running: "同一 Thread 正在执行",
-      error: "连接需要处理",
-      interrupted: "服务重启后可恢复"
+      error: "连接需要处理"
     })[app.status] || (linked ? "已连接" : "尚未连接");
-    const switchLocked = busy || Boolean(task.activeJob) || app.status === "running";
+    const switchLocked = busy || Boolean(task.activeJob);
     const switchTitle = switchLocked ? "当前任务正在执行，完成或停止后才能切换聊天" : "";
     const action = task.archivedAt
       ? '<span class="app-link-button disabled">任务已归档</span>'
       : linked
-        ? `<div class="app-thread-actions"><button class="app-link-button primary" id="openCodexApp" type="button" ${busy ? "disabled" : ""}>打开 Codex App</button><div class="app-thread-tools"><button id="newCodexAppChat" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">新建聊天</button><button class="danger" id="disconnectCodexApp" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">断开连接</button></div></div>`
-        : `<button class="primary" id="openCodexApp" type="button" ${busy ? "disabled" : ""}>新建聊天并在 Codex App 打开</button>`;
+        ? `<div class="app-thread-actions"><button class="app-link-button primary" id="openCodexApp" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">打开 Codex App</button><div class="app-thread-tools"><button id="newCodexAppChat" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">新建聊天</button><button class="danger" id="disconnectCodexApp" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">断开连接</button></div></div>`
+        : `<button class="primary" id="openCodexApp" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">新建聊天并在 Codex App 打开</button>`;
     const workspace = app.cwd || (task.worktree?.status === "ready" ? task.worktree.path : health?.paths?.repo);
     return `<section class="codex-app-panel ${linked ? "linked" : ""}">
-      <div class="codex-app-copy"><div class="codex-app-title"><span class="app-status-dot" aria-hidden="true"></span><div><p class="section-kicker">Codex App 联动</p><h3>${escapeHTML(status)}</h3></div></div>
-      <p>${linked ? "这个需求已经绑定持久 Thread。控制台负责流程和验收，Codex App 负责交互式查看与随时补充指令。" : "为这个需求创建一个持久 Codex App Thread；后续快速修改会复用它，不必反复恢复上下文。"}</p>
+      <div class="codex-app-copy"><div class="codex-app-title"><span class="app-status-dot" aria-hidden="true"></span><div><p class="section-kicker">Codex App 人工聊天</p><h3>${escapeHTML(status)}</h3></div></div>
+      <p>${linked ? "这个需求已经绑定独立的人工聊天。它与后台快速执行 Thread 隔离，可安全地在 Codex App 中继续交流。" : "为这个需求创建独立人工聊天；它会连接到当前项目或 Worktree，不占用后台快速执行 Thread。"}</p>
       <div class="codex-app-meta"><span>${linked ? "当前连接目录" : "项目目录"} <code>${escapeHTML(workspace || "尚未绑定")}</code></span>${threadId ? `<span>Thread <code>${escapeHTML(`${threadId.slice(0, 12)}…`)}</code></span>` : ""}</div>
       ${app.error ? `<p class="app-error">${escapeHTML(app.error)}</p>` : ""}</div>
       <div class="codex-app-action">${action}<small>${linked ? "可继续当前聊天，或保留旧聊天后新建一个" : "只建立连接，不会执行 Plan"}</small></div>
@@ -1372,7 +1370,7 @@
         : "两种模式都只写当前 Worktree。";
     return `<section class="section execution-mode-section"><div class="section-heading"><div><p class="section-kicker">执行方式</p><h3>选择本轮速度</h3></div><span class="hint">${contextCopy}</span></div>
       <div class="execution-mode-grid" role="radiogroup" aria-label="选择执行方式">
-        <label class="execution-mode-card ${mode === "fast" ? "selected" : ""}"><input type="radio" name="executionMode" value="fast" data-execution-mode="fast" ${mode === "fast" ? "checked" : ""}><span class="mode-card-head"><strong>快速修改</strong><em>推荐</em></span><span>复用持久 App Thread，一轮完成实现与自检；跳过第二个独立 Review。</span><small>仍保留人工验收与 Commit 门禁</small></label>
+        <label class="execution-mode-card ${mode === "fast" ? "selected" : ""}"><input type="radio" name="executionMode" value="fast" data-execution-mode="fast" ${mode === "fast" ? "checked" : ""}><span class="mode-card-head"><strong>快速修改</strong><em>推荐</em></span><span>复用持久后台执行 Thread，一轮完成实现与自检；跳过第二个独立 Review。</span><small>仍保留人工验收与 Commit 门禁</small></label>
         <label class="execution-mode-card ${mode === "standard" ? "selected" : ""}"><input type="radio" name="executionMode" value="standard" data-execution-mode="standard" ${mode === "standard" ? "checked" : ""}><span class="mode-card-head"><strong>标准流程</strong><em>更完整</em></span><span>继续使用 codex exec，并启动独立 Code Review；更稳但耗时更长。</span><small>适合大改动、共享逻辑和高风险需求</small></label>
       </div>
     </section>`;
@@ -1685,7 +1683,7 @@
       const quickMinutes = Math.ceil(Number(health?.limits?.quickExecutionSeconds || 600) / 60);
       const quickHardMinutes = Math.ceil(Number(health?.limits?.quickExecutionHardSeconds || 1800) / 60);
       const hint = fast
-        ? `复用同一个 App Thread；持续有进度会自动续期，连续 ${quickMinutes} 分钟无进展才停止，绝对上限 ${quickHardMinutes} 分钟；不启动独立 Review。`
+        ? `复用同一个后台执行 Thread；持续有进度会自动续期，连续 ${quickMinutes} 分钟无进展才停止，绝对上限 ${quickHardMinutes} 分钟；不启动独立 Review。`
         : targeted ? `只处理验收备注；返修最长 ${fixMinutes} 分钟，定向 Review 最长 ${reviewMinutes} 分钟。` : "停止后保留已有实施结果与 Worktree 改动。";
       return `${renderProgress(section, title)}<div class="actions"><div class="actions-secondary"><span class="hint">${hint}</span></div><div class="actions-primary"><button class="danger" id="cancelExecution">停止当前执行</button></div></div>`;
     }
@@ -1702,7 +1700,7 @@
       ${checkpoint}
       ${reviewPanel(section.review)}
       ${renderExecutionModeSelector("execution")}
-      <div class="actions"><div class="actions-secondary"><span class="hint">不会 Commit、Push 或 Merge；快速模式不启动独立 Review。</span>${canResetSession ? `<button class="danger" id="resetExecutionSession">放弃旧${fast ? " App Thread" : " execution 会话"}，用任务记忆重建</button>` : ""}</div><div class="actions-primary"><button class="primary" id="executePlan">${partial && fast ? "继续现有修改并完成自检" : needs ? fast ? "快速处理 Review 发现" : "根据 Review 继续执行" : interrupted && section.phase === "review" && section.result && !fast ? "只重试 Code Review" : interrupted ? fast ? "从断点快速重试" : "重试原 execution 会话" : fast ? "快速执行 Plan" : "按标准流程执行 Plan"}</button></div></div>${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><span class="hint">不会 Commit、Push 或 Merge；快速模式不启动独立 Review。</span>${canResetSession ? `<button class="danger" id="resetExecutionSession">放弃旧${fast ? "后台执行 Thread" : " execution 会话"}，用任务记忆重建</button>` : ""}</div><div class="actions-primary"><button class="primary" id="executePlan">${partial && fast ? "继续现有修改并完成自检" : needs ? fast ? "快速处理 Review 发现" : "根据 Review 继续执行" : interrupted && section.phase === "review" && section.result && !fast ? "只重试 Code Review" : interrupted ? fast ? "从断点快速重试" : "重试原 execution 会话" : fast ? "快速执行 Plan" : "按标准流程执行 Plan"}</button></div></div>${eventLogDetails()}`;
   }
 
   function textItems(value) {
@@ -2258,21 +2256,21 @@
   async function openCodexApp() {
     await withAction(async () => {
       const result = await post(`/api/tasks/${task.id}/app/open`, {});
-      const deepLink = result.task?.app?.deepLink;
+      const deepLink = result.task?.codexApp?.deepLink;
       setTask(result.task, false);
-      if (!deepLink) throw new Error("服务已建立 App Thread，但没有返回可打开的链接。");
-      showToast("已同步当前项目目录并打开 Codex App。" );
+      if (!deepLink) throw new Error("服务已建立 Codex App 人工聊天，但没有返回可打开的链接。");
+      showToast("已在当前项目目录打开独立 Codex App 人工聊天。" );
       window.location.href = deepLink;
     });
   }
 
   async function newCodexAppChat() {
-    if (task?.activeJob || task?.app?.status === "running") return showToast("当前任务正在执行，完成或停止后才能新建聊天。", true);
+    if (task?.activeJob) return showToast("当前任务正在执行，完成或停止后才能新建聊天。", true);
     const confirmed = window.confirm("为当前需求新建一个 Codex App 聊天？\n\n旧聊天不会删除，但控制台后续会改为复用新聊天。");
     if (!confirmed) return;
     await withAction(async () => {
       const result = await post(`/api/tasks/${task.id}/app/new`, {});
-      const deepLink = result.task?.app?.deepLink;
+      const deepLink = result.task?.codexApp?.deepLink;
       setTask(result.task, false);
       if (!deepLink) throw new Error("新聊天已创建，但没有返回可打开的链接。");
       showToast("已在当前项目目录新建 Codex App 聊天。" );
@@ -2281,8 +2279,8 @@
   }
 
   async function disconnectCodexApp() {
-    if (task?.activeJob || task?.app?.status === "running") return showToast("当前任务正在执行，完成或停止后才能断开连接。", true);
-    const confirmed = window.confirm("断开当前需求与 Codex App 聊天的连接？\n\n旧聊天不会删除；快速模式下次需要时会自动建立新聊天。");
+    if (task?.activeJob) return showToast("当前任务正在执行，完成或停止后才能断开连接。", true);
+    const confirmed = window.confirm("断开当前需求与 Codex App 人工聊天的连接？\n\n旧聊天不会删除；后台快速执行 Thread 不受影响。");
     if (!confirmed) return;
     await withAction(async () => {
       const result = await post(`/api/tasks/${task.id}/app/disconnect`, {});
