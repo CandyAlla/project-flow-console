@@ -42,8 +42,8 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 - 模糊、跨模块或高风险需求保留只读 discussion / ask-first，再生成完整执行 Plan。
 - 同时输出 Markdown Plan 和自包含的逻辑验收 HTML。
 - 创建 Worktree 前先展示真实 dry-run；也可以接入已有 Worktree。
-- 每个需求可绑定一个持久 Codex App Thread，通过 `codex://threads/<thread-id>` 打开，并可断开连接或切换到新聊天。
-- 快速修改复用同一个 App Thread，一轮完成实现和自检；标准流程保留独立 Code Review。
+- 每个需求可绑定一个独立的 Codex App 人工聊天，通过 `codex://threads/<thread-id>` 打开，并可断开连接或切换到新聊天。
+- 快速修改复用后台执行 Thread，一轮完成实现和自检；人工聊天与后台执行隔离，避免多客户端争用同一个 writer。
 - 在任务绑定的 Worktree 中执行 Codex 和项目 Skills。
 - 将实施与 Code Review 分开，Review 不通过时进入定向修复。
 - 生成人工验收最短路径、详细测试案例和关键日志筛选词。
@@ -240,27 +240,29 @@ My Project · DevConductor: http://127.0.0.1:4318/
 | 标准需求（默认） | discussion + Plan | 完整 Plan Markdown 与逻辑验收 HTML | 链接/文档输入、方案有分支、跨模块或高风险需求 |
 | 轻量直改 | 0 | 根据粘贴内容本地生成最小 Markdown 执行单 | 参数、文案、局部 UI 和边界明确的小改动 |
 
-轻量直改只接受最多 12000 字符的粘贴内容。创建任务时不会启动 Codex，而是直接展示 Worktree dry-run；确认创建 Worktree 后，再用快速执行模式启动一次持久 App Thread 完成修改与自检。它仍保留 Worktree 隔离、人工验收、Commit 指纹校验和不自动 Push/Merge 的边界。
+轻量直改只接受最多 12000 字符的粘贴内容。创建任务时不会启动 Codex，而是直接展示 Worktree dry-run；确认创建 Worktree 后，再用快速执行模式启动一次持久后台执行 Thread 完成修改与自检。它仍保留 Worktree 隔离、人工验收、Commit 指纹校验和不自动 Push/Merge 的边界。
 
 ## Codex App 联动与两种执行模式
 
-任务创建后，页面顶部会出现“Codex App 联动”面板。点击“连接并在 Codex App 打开”后，控制台会通过官方 [Codex App Server](https://learn.chatgpt.com/docs/app-server.md) 协议创建持久 Thread，并记录到当前任务：
+任务创建后，页面顶部会出现“Codex App 人工聊天”面板。点击“新建聊天并在 Codex App 打开”后，控制台会通过官方 [Codex App Server](https://learn.chatgpt.com/docs/app-server.md) 协议创建独立人工聊天，并记录到当前任务：
 
 ```text
-task.sessions.app
-task.app.threadId
-task.app.deepLink
-task.app.cwd
+task.sessions.codexApp
+task.codexApp.threadId
+task.codexApp.deepLink
+task.codexApp.cwd
 ```
 
-每次点击“打开 Codex App”都会先通过本地控制服务恢复同一个 Thread，并同步当前项目目录，然后才跳转到 App，不会重复创建 Thread。Worktree 已准备完成且目录有效时连接该 Worktree；否则连接 Project Profile 的 `repoRoot`。因此即使 Thread 在 Worktree 创建前已经绑定，之后再次打开也会自动切换到对应 Worktree。控制台继续负责流程状态、验收证据和 Git 门禁，Codex App 用于交互式查看与补充指令。
+人工聊天与快速模式使用的后台执行 Thread 相互隔离。创建人工聊天时会启动一次短生命周期 App Server，写入名称和项目目录后等待进程完全退出、释放 thread writer，再跳转到 Codex App；已经绑定的人工聊天再次打开时不会由控制服务 `thread/resume`，因此不会和桌面 App 争用 writer。
+
+Worktree 已准备完成且目录有效时，人工聊天连接该 Worktree；否则连接 Project Profile 的 `repoRoot`。如果绑定后项目目录发生变化，控制台会在新目录创建新的人工聊天并保留旧聊天。后台快速执行仍使用 `task.sessions.app` / `task.app`，不会被人工聊天的“新建”或“断开”操作清空。
 
 已连接后还可以选择：
 
-- **新建聊天**：在同一项目目录创建并绑定新的持久 Thread，随后打开 Codex App；旧聊天保留在 App 中。
-- **断开连接**：解除当前需求与 Thread 的绑定，并取消本地 App Server 对旧 Thread 的订阅；不会归档或删除旧聊天。
+- **新建聊天**：在同一项目目录创建并绑定新的独立人工聊天，确认 writer 已释放后打开 Codex App；旧聊天保留在 App 中。
+- **断开连接**：只解除当前需求与人工聊天的绑定；不会归档或删除旧聊天，也不会清除后台快速执行上下文。
 
-任务或 App Thread 正在执行时，这两个操作会被禁用，避免切换会话影响当前执行。断开后如果再次选择快速模式，控制台会按需创建一个新的持久聊天。
+任务正在执行时，人工聊天的打开、新建和断开会被禁用，避免同时切换目录或会话。断开后再次打开会创建新的独立人工聊天；快速模式仍按需创建或恢复后台执行 Thread。
 
 | 模式 | 执行方式 | 独立 Review | 适合场景 |
 |---|---|---|---|
@@ -384,7 +386,7 @@ python3 server.py
 
 - 状态记录
 - Codex discussion / execution / review / ask 会话槽
-- Codex App 持久 Thread 槽
+- 后台快速执行 Thread 槽与独立 Codex App 人工聊天槽
 - 持久任务记忆
 - Plan、HTML 和 Worktree 绑定信息
 
@@ -464,7 +466,7 @@ python3 -m py_compile \
   skills/project-flow-setup/scripts/configure_project.py
 ```
 
-测试覆盖控制器门禁、任务队列、归档恢复、Git 指纹、人工验收、Commit、返修、App Thread 创建与复用、快速模式、旧任务迁移、Profile 校验、配置脚本，以及通用 Worktree provider。
+测试覆盖控制器门禁、任务队列、归档恢复、Git 指纹、人工验收、Commit、返修、后台执行 Thread 复用、Codex App 人工聊天隔离、快速模式、旧任务迁移、Profile 校验、配置脚本，以及通用 Worktree provider。
 
 ## 常见问题
 
@@ -482,11 +484,11 @@ python3 -m py_compile \
 
 ### 快速模式为什么更快？
 
-平台现在有两层提速：新建时选择“轻量直改”，可省去 discussion 和完整 Plan/HTML 两个前置 Agent 轮次；执行时选择“快速修改”，会复用当前需求的持久 App Thread，把实现和自检合并为一轮，不再等待第二个独立 Review。人工验收和 Commit 门禁仍然保留；共享逻辑或高风险改动建议使用标准需求与标准执行。
+平台现在有两层提速：新建时选择“轻量直改”，可省去 discussion 和完整 Plan/HTML 两个前置 Agent 轮次；执行时选择“快速修改”，会复用当前需求的后台执行 Thread，把实现和自检合并为一轮，不再等待第二个独立 Review。人工验收和 Commit 门禁仍然保留；共享逻辑或高风险改动建议使用标准需求与标准执行。
 
 ### 不打开 Codex App 还能使用吗？
 
-可以。标准流程继续使用原有 `codex exec`。选择快速模式时，服务会自动创建或恢复任务的 App Thread；“打开 Codex App”只是把同一个 Thread 显示到桌面 App，便于交互式跟进。
+可以。标准流程继续使用原有 `codex exec`。选择快速模式时，服务会自动创建或恢复后台执行 Thread；“打开 Codex App”使用另一个独立人工聊天，即使完全不打开也不影响执行流程。
 
 ### 会自动 Push 或合并吗？
 

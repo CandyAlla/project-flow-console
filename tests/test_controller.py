@@ -93,7 +93,7 @@ class ControllerTests(unittest.TestCase):
             "maxStageIndex": server.STAGE_INDEX["execute"],
             "activeJob": None,
             "jobState": "idle",
-            "sessions": {"discussion": None, "execution": None, "review": None, "ask": None, "app": None},
+            "sessions": {"discussion": None, "execution": None, "review": None, "ask": None, "app": None, "codexApp": None},
             "discussion": {"status": "ready", "result": {"summary": "需求已确认"}, "messages": []},
             "plan": {"status": "ready", "approved": True, "finalPath": str(self.repo / "plan.md"), "markdown": "# Plan"},
             "paths": {"planRelative": "plan.md", "htmlRelative": ""},
@@ -101,6 +101,7 @@ class ControllerTests(unittest.TestCase):
             "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
             "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
             "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "cwd": str(self.repo), "logs": [], "error": ""},
+            "codexApp": server.default_codex_app_chat(self.repo),
             "verification": {"approved": False, "checks": [], "note": ""},
             "git": {**status, "committed": False, "commitId": ""},
             "bugfix": {"status": "idle", "description": "", "history": []},
@@ -1973,7 +1974,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(second["sessions"]["app"], "app-thread-123")
         self.assertEqual(second["app"]["deepLink"], "codex://threads/app-thread-123")
         self.assertEqual(second["app"]["cwd"], str(self.repo.resolve()))
-        self.assertEqual(sum("已绑定持久 Codex App Thread" in item["message"] for item in second["events"]), 1)
+        self.assertEqual(sum("已绑定后台快速执行 Thread" in item["message"] for item in second["events"]), 1)
 
     def test_existing_app_thread_rebinds_to_new_ready_worktree_without_duplication(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000056")
@@ -2050,80 +2051,120 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["app"]["turnId"], "turn-running")
         self.assertEqual(task["app"]["cwd"], str(self.repo.resolve()))
 
-    def test_disconnect_app_thread_unsubscribes_without_deleting_chat_or_changing_stage(self) -> None:
+    def test_disconnect_codex_app_chat_preserves_background_thread_and_stage(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000058")
         with server.mutate_task(task_id) as task:
-            task["sessions"]["app"] = "app-thread-old"
+            task["sessions"]["app"] = "background-thread"
             task["app"].update({
                 "status": "ready",
-                "threadId": "app-thread-old",
-                "deepLink": "codex://threads/app-thread-old",
+                "threadId": "background-thread",
+                "deepLink": "codex://threads/background-thread",
                 "cwd": str(self.repo.resolve()),
             })
-        client = mock.Mock()
-        client.running = True
-        client.request.return_value = {"status": "unsubscribed"}
+            task["sessions"]["codexApp"] = "manual-thread-old"
+            task["codexApp"].update({
+                "status": "ready",
+                "threadId": "manual-thread-old",
+                "deepLink": "codex://threads/manual-thread-old",
+                "cwd": str(self.repo.resolve()),
+            })
 
-        with mock.patch.object(server, "APP_SERVER_CLIENT", client):
-            task = server.disconnect_task_app_thread(task_id)
+        task = server.disconnect_task_codex_app_chat(task_id)
 
-        client.request.assert_called_once_with("thread/unsubscribe", {"threadId": "app-thread-old"}, timeout=10)
         self.assertEqual(task["stage"], "execute")
-        self.assertIsNone(task["sessions"]["app"])
-        self.assertEqual(task["app"]["status"], "idle")
-        self.assertIsNone(task["app"]["threadId"])
-        self.assertEqual(task["app"]["deepLink"], "")
-        self.assertEqual(task["app"]["cwd"], str(self.repo.resolve()))
+        self.assertEqual(task["sessions"]["app"], "background-thread")
+        self.assertEqual(task["app"]["threadId"], "background-thread")
+        self.assertIsNone(task["sessions"]["codexApp"])
+        self.assertEqual(task["codexApp"]["status"], "idle")
+        self.assertIsNone(task["codexApp"]["threadId"])
+        self.assertEqual(task["codexApp"]["deepLink"], "")
+        self.assertEqual(task["codexApp"]["cwd"], str(self.repo.resolve()))
         self.assertTrue(any("旧聊天未删除" in item["message"] for item in task["events"]))
 
-    def test_new_app_chat_replaces_binding_and_keeps_old_chat(self) -> None:
+    def test_new_codex_app_chat_uses_isolated_server_and_keeps_background_thread(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000059")
         with server.mutate_task(task_id) as task:
-            task["sessions"]["app"] = "app-thread-old"
+            task["sessions"]["app"] = "background-thread"
             task["app"].update({
                 "status": "ready",
-                "threadId": "app-thread-old",
-                "deepLink": "codex://threads/app-thread-old",
+                "threadId": "background-thread",
+                "deepLink": "codex://threads/background-thread",
+                "cwd": str(self.repo.resolve()),
+            })
+            task["sessions"]["codexApp"] = "manual-thread-old"
+            task["codexApp"].update({
+                "status": "ready",
+                "threadId": "manual-thread-old",
+                "deepLink": "codex://threads/manual-thread-old",
                 "cwd": str(self.repo.resolve()),
             })
         calls: list[tuple[str, dict[str, object]]] = []
         client = mock.Mock()
+        client.process = None
 
         def request(method, params, timeout=30):
             calls.append((method, params))
             if method == "thread/start":
-                return {"thread": {"id": "app-thread-new"}}
-            if method == "thread/unsubscribe":
-                return {"status": "unsubscribed"}
+                return {"thread": {"id": "manual-thread-new"}}
             return {}
 
         client.request.side_effect = request
-        with mock.patch.object(server, "get_app_server_client", return_value=client):
-            task = server.start_new_task_app_thread(task_id)
+        with mock.patch.object(server, "AppServerClient", return_value=client):
+            task = server.start_new_task_codex_app_chat(task_id)
 
         methods = [method for method, _ in calls]
         self.assertEqual(methods.count("thread/start"), 1)
-        self.assertEqual(methods.count("thread/unsubscribe"), 1)
         self.assertNotIn("thread/resume", methods)
-        unsubscribe_params = next(params for method, params in calls if method == "thread/unsubscribe")
-        self.assertEqual(unsubscribe_params["threadId"], "app-thread-old")
-        self.assertEqual(task["sessions"]["app"], "app-thread-new")
-        self.assertEqual(task["app"]["threadId"], "app-thread-new")
-        self.assertEqual(task["app"]["deepLink"], "codex://threads/app-thread-new")
+        client.close.assert_called_once_with()
+        self.assertEqual(task["sessions"]["app"], "background-thread")
+        self.assertEqual(task["app"]["threadId"], "background-thread")
+        self.assertEqual(task["sessions"]["codexApp"], "manual-thread-new")
+        self.assertEqual(task["codexApp"]["threadId"], "manual-thread-new")
+        self.assertEqual(task["codexApp"]["deepLink"], "codex://threads/manual-thread-new")
         self.assertTrue(any("旧聊天仍保留" in item["message"] for item in task["events"]))
+
+    def test_isolated_app_server_waits_for_writer_process_to_exit(self) -> None:
+        events: list[str] = []
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = lambda timeout: events.append(f"wait:{timeout}")
+        client = mock.Mock()
+        client.process = process
+        client.close.side_effect = lambda: events.append("close")
+
+        server.close_isolated_app_server(client)
+
+        self.assertEqual(events, ["close", "wait:5"])
+
+    def test_open_existing_codex_app_chat_does_not_resume_background_writer(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000061")
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["codexApp"] = "manual-thread-existing"
+            task["codexApp"].update({
+                "status": "ready",
+                "threadId": "manual-thread-existing",
+                "deepLink": "codex://threads/manual-thread-existing",
+                "cwd": str(self.repo.resolve()),
+            })
+
+        with mock.patch.object(server, "AppServerClient") as app_server:
+            task = server.ensure_task_codex_app_chat(task_id)
+
+        app_server.assert_not_called()
+        self.assertEqual(task["codexApp"]["deepLink"], "codex://threads/manual-thread-existing")
 
     def test_app_chat_switching_is_blocked_while_task_runs(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000060")
         server.TASKS[task_id]["activeJob"] = "execution"
         server.TASKS[task_id]["jobState"] = "running"
 
-        with mock.patch.object(server, "get_app_server_client") as get_client:
-            with self.assertRaisesRegex(server.WorkflowError, "切换 Codex App 聊天"):
-                server.start_new_task_app_thread(task_id)
-            with self.assertRaisesRegex(server.WorkflowError, "断开 Codex App 聊天"):
-                server.disconnect_task_app_thread(task_id)
+        with mock.patch.object(server, "AppServerClient") as app_server:
+            with self.assertRaisesRegex(server.WorkflowError, "切换 Codex App 人工聊天"):
+                server.start_new_task_codex_app_chat(task_id)
+            with self.assertRaisesRegex(server.WorkflowError, "切换 Codex App 人工聊天"):
+                server.disconnect_task_codex_app_chat(task_id)
 
-        get_client.assert_not_called()
+        app_server.assert_not_called()
 
     def test_codex_app_panel_exposes_disconnect_and_new_chat_actions(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
@@ -2131,6 +2172,8 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('id="disconnectCodexApp"', app_js)
         self.assertIn('post(`/api/tasks/${task.id}/app/new`, {})', app_js)
         self.assertIn('post(`/api/tasks/${task.id}/app/disconnect`, {})', app_js)
+        self.assertIn('const app = task.codexApp || {}', app_js)
+        self.assertIn('result.task?.codexApp?.deepLink', app_js)
 
     def test_app_server_initialization_is_shared_by_concurrent_first_requests(self) -> None:
         client = server.AppServerClient("/mock/codex")
@@ -2514,6 +2557,9 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["app"]["status"], "ready")
         self.assertEqual(task["app"]["deepLink"], "codex://threads/legacy-app-thread")
         self.assertEqual(task["app"]["cwd"], "")
+        self.assertIsNone(task["sessions"]["codexApp"])
+        self.assertEqual(task["codexApp"]["status"], "idle")
+        self.assertEqual(task["codexApp"]["deepLink"], "")
         self.assertEqual(task["knowledge"]["status"], "idle")
         self.assertEqual(task["knowledge"]["candidates"], [])
 

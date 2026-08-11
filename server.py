@@ -1291,7 +1291,7 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
             "approved": sum(1 for item in task.get("knowledge", {}).get("candidates", []) if isinstance(item, dict) and item.get("status") == "approved"),
         },
         "intakeMode": task.get("intake", {}).get("mode", "new"),
-        "appLinked": bool(task.get("app", {}).get("threadId")),
+        "appLinked": bool(task.get("codexApp", {}).get("threadId")),
         "agent": {
             "id": str(memory.get("logicalAgentId") or task.get("id", ""))[:8],
             "memoryVersion": memory.get("version", 1),
@@ -1405,6 +1405,7 @@ def load_tasks() -> None:
                 task["sessions"].setdefault("review", task.get("execution", {}).get("reviewThreadId"))
                 task["sessions"].setdefault("ask", task.get("ask", {}).get("threadId"))
                 task["sessions"].setdefault("app", task.get("app", {}).get("threadId"))
+                task["sessions"].setdefault("codexApp", task.get("codexApp", {}).get("threadId"))
                 task.setdefault("ask", {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""})
                 knowledge = task.setdefault("knowledge", default_knowledge())
                 for key, value in default_knowledge().items():
@@ -1420,6 +1421,13 @@ def load_tasks() -> None:
                 app.setdefault("cwd", "")
                 app.setdefault("logs", [])
                 app.setdefault("error", "")
+                codex_app = task.setdefault("codexApp", default_codex_app_chat())
+                codex_app["threadId"] = codex_app.get("threadId") or task["sessions"].get("codexApp")
+                if not codex_app.get("status") or (codex_app.get("status") == "idle" and codex_app.get("threadId")):
+                    codex_app["status"] = "ready" if codex_app.get("threadId") else "idle"
+                codex_app["deepLink"] = codex_app.get("deepLink") or codex_app_deep_link(codex_app.get("threadId"))
+                codex_app.setdefault("cwd", "")
+                codex_app.setdefault("error", "")
                 for key in ("discussion", "plan", "worktree", "execution", "ask", "app", "knowledge"):
                     section = task.get(key)
                     if isinstance(section, dict) and section.get("status") == "running":
@@ -1470,6 +1478,16 @@ def task_app_cwd(task: dict[str, Any]) -> Path:
     return REPO_ROOT.resolve()
 
 
+def default_codex_app_chat(cwd: Any = "") -> dict[str, Any]:
+    return {
+        "status": "idle",
+        "threadId": None,
+        "deepLink": "",
+        "cwd": str(cwd or ""),
+        "error": "",
+    }
+
+
 def get_app_server_client() -> AppServerClient:
     global APP_SERVER_CLIENT
     with APP_SERVER_CLIENT_LOCK:
@@ -1489,35 +1507,137 @@ def shutdown_app_server() -> None:
         client.close()
 
 
-def unsubscribe_app_thread(client: AppServerClient, thread_id: str) -> str:
+def close_isolated_app_server(client: AppServerClient) -> None:
+    """Stop a one-shot app-server and wait until its thread writer locks are gone."""
+    process = client.process
+    client.close()
+    if process is None or process.poll() is not None:
+        return
     try:
-        client.request("thread/unsubscribe", {"threadId": thread_id}, timeout=10)
-        return ""
-    except WorkflowError as exc:
-        return safe_log(exc, 1200)
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        stop_codex_process(process, force=True)
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired as exc:
+            raise WorkflowError("Codex App 人工聊天已创建，但 writer 未能及时释放，请稍后重试。") from exc
 
 
-def _ensure_task_app_thread(task_id: str, *, allow_active: bool, force_new: bool = False) -> dict[str, Any]:
+def create_isolated_codex_app_chat(task: dict[str, Any], cwd: Path, *, force_new: bool) -> str:
+    """Create a desktop-owned chat without sharing the automation app-server writer."""
+    if not CODEX_BIN:
+        raise WorkflowError(CODEX_MISSING_MESSAGE)
+    client = AppServerClient(CODEX_BIN)
+    thread_id = ""
+    try:
+        response = client.request(
+            "thread/start",
+            {
+                "cwd": str(cwd),
+                "approvalPolicy": "never",
+                "sandbox": "workspace-write",
+                "serviceName": "project_flow_console_desktop_handoff",
+                "ephemeral": False,
+            },
+            timeout=20,
+        )
+        thread_id = str((response.get("thread") or {}).get("id") or "")
+        if not thread_id:
+            raise WorkflowError("Codex App Server 未返回人工聊天 Thread ID。")
+        try:
+            suffix = f" · 新聊天 {datetime.now().strftime('%m-%d %H:%M')}" if force_new else ""
+            client.request(
+                "thread/name/set",
+                {"threadId": thread_id, "name": f"{PRODUCT_NAME} · {safe_log(task.get('title'), 60)}{suffix}"},
+                timeout=10,
+            )
+        except WorkflowError:
+            pass
+    finally:
+        close_isolated_app_server(client)
+    return thread_id
+
+
+def _ensure_codex_app_chat_switch_allowed(task_id: str) -> dict[str, Any]:
     task = get_task_copy(task_id)
-    if task.get("activeJob") and (not allow_active or force_new):
-        raise WorkflowError("任务正在执行，请等待完成后再切换 Codex App 聊天。")
+    if task.get("activeJob"):
+        raise WorkflowError("任务正在执行，请等待完成后再切换 Codex App 人工聊天。")
+    with LOCK:
+        if ACTIVE_APP_TURNS.get(task_id):
+            raise WorkflowError("后台快速执行 Thread 正在运行，完成或停止后才能切换人工聊天。")
+    return task
+
+
+def _prepare_task_codex_app_chat(task_id: str, *, force_new: bool) -> dict[str, Any]:
+    task = _ensure_codex_app_chat_switch_allowed(task_id)
+    cwd = task_app_cwd(task)
+    section = task.get("codexApp") if isinstance(task.get("codexApp"), dict) else {}
+    existing = str(task.get("sessions", {}).get("codexApp") or section.get("threadId") or "")
+    previous_cwd = str(section.get("cwd") or "")
+    if existing and not force_new and previous_cwd == str(cwd):
+        return task
+
+    thread_id = create_isolated_codex_app_chat(task, cwd, force_new=force_new)
+    deep_link = codex_app_deep_link(thread_id)
+    if not deep_link:
+        raise WorkflowError("Codex App 人工聊天已创建，但 Thread ID 无法生成安全链接。")
+    with mutate_task(task_id) as live:
+        live.setdefault("sessions", {})["codexApp"] = thread_id
+        live.setdefault("codexApp", default_codex_app_chat()).update({
+            "status": "ready",
+            "threadId": thread_id,
+            "deepLink": deep_link,
+            "cwd": str(cwd),
+            "error": "",
+        })
+        if force_new:
+            add_event(live, f"已新建 Codex App 人工聊天；项目目录：{cwd}；旧聊天仍保留。", "ok")
+        elif existing and previous_cwd != str(cwd):
+            add_event(live, f"项目目录已变化，已新建对应目录的 Codex App 人工聊天：{cwd}。", "ok")
+        else:
+            add_event(live, f"已创建独立 Codex App 人工聊天；项目目录：{cwd}。", "ok")
+    return get_task_copy(task_id)
+
+
+def ensure_task_codex_app_chat(task_id: str) -> dict[str, Any]:
+    return _prepare_task_codex_app_chat(task_id, force_new=False)
+
+
+def start_new_task_codex_app_chat(task_id: str) -> dict[str, Any]:
+    return _prepare_task_codex_app_chat(task_id, force_new=True)
+
+
+def disconnect_task_codex_app_chat(task_id: str) -> dict[str, Any]:
+    task = _ensure_codex_app_chat_switch_allowed(task_id)
+    section = task.get("codexApp") if isinstance(task.get("codexApp"), dict) else {}
+    existing = str(task.get("sessions", {}).get("codexApp") or section.get("threadId") or "")
+    cwd = task_app_cwd(task)
+    with mutate_task(task_id) as live:
+        live.setdefault("sessions", {})["codexApp"] = None
+        live["codexApp"] = default_codex_app_chat(cwd)
+        if existing:
+            add_event(live, "已断开当前需求与 Codex App 人工聊天的绑定；旧聊天未删除。", "warning")
+    return get_task_copy(task_id)
+
+
+def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, Any]:
+    task = get_task_copy(task_id)
+    if task.get("activeJob") and not allow_active:
+        raise WorkflowError("任务正在执行，请等待完成后再准备后台快速执行 Thread。")
     cwd = task_app_cwd(task)
     previous_cwd = str(task.get("app", {}).get("cwd") or "")
     existing = task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId")
     with LOCK:
         active_app_turn = ACTIVE_APP_TURNS.get(task_id)
-    if force_new and active_app_turn:
-        raise WorkflowError("当前 Codex App Thread 正在执行，完成或停止后才能新建聊天。")
     if (
-        not force_new
-        and existing
+        existing
         and active_app_turn
         and active_app_turn[0] == str(existing)
         and previous_cwd == str(cwd)
     ):
         return task
     client = get_app_server_client()
-    thread_id: str | None = None if force_new else (str(existing) if existing else None)
+    thread_id: str | None = str(existing) if existing else None
     if thread_id:
         try:
             response = client.request("thread/resume", {"threadId": thread_id, "cwd": str(cwd)}, timeout=20)
@@ -1540,17 +1660,13 @@ def _ensure_task_app_thread(task_id: str, *, allow_active: bool, force_new: bool
     if not thread_id:
         raise WorkflowError("Codex App Server 未返回 Thread ID。")
     try:
-        suffix = f" · 新聊天 {datetime.now().strftime('%m-%d %H:%M')}" if force_new else ""
         client.request(
             "thread/name/set",
-            {"threadId": thread_id, "name": f"{PRODUCT_NAME} · {safe_log(task.get('title'), 60)}{suffix}"},
+            {"threadId": thread_id, "name": f"{PRODUCT_NAME} · {safe_log(task.get('title'), 60)} · 后台执行"},
             timeout=10,
         )
     except WorkflowError:
         pass
-    unsubscribe_error = ""
-    if force_new and existing and str(existing) != thread_id:
-        unsubscribe_error = unsubscribe_app_thread(client, str(existing))
     deep_link = codex_app_deep_link(thread_id)
     thread_changed = str(existing or "") != thread_id
     cwd_changed = previous_cwd != str(cwd)
@@ -1565,56 +1681,15 @@ def _ensure_task_app_thread(task_id: str, *, allow_active: bool, force_new: bool
             "error": "",
         })
         live["app"].setdefault("logs", [])
-        if force_new:
-            add_event(live, f"已新建并绑定 Codex App 聊天；项目目录：{cwd}；旧聊天仍保留。", "ok")
-        elif thread_changed:
-            add_event(live, f"已绑定持久 Codex App Thread；项目目录：{cwd}；任务阶段未改变。", "ok")
+        if thread_changed:
+            add_event(live, f"已绑定后台快速执行 Thread；项目目录：{cwd}；任务阶段未改变。", "ok")
         elif cwd_changed:
-            add_event(live, f"Codex App Thread 已切换到当前项目目录：{cwd}。", "ok")
-        if unsubscribe_error:
-            add_event(live, f"新聊天已绑定，但旧聊天取消订阅未确认：{unsubscribe_error}", "warning")
+            add_event(live, f"后台快速执行 Thread 已切换到当前项目目录：{cwd}。", "ok")
     return get_task_copy(task_id)
 
 
 def ensure_task_app_thread(task_id: str) -> dict[str, Any]:
     return _ensure_task_app_thread(task_id, allow_active=True)
-
-
-def start_new_task_app_thread(task_id: str) -> dict[str, Any]:
-    return _ensure_task_app_thread(task_id, allow_active=False, force_new=True)
-
-
-def disconnect_task_app_thread(task_id: str) -> dict[str, Any]:
-    task = get_task_copy(task_id)
-    if task.get("activeJob"):
-        raise WorkflowError("任务正在执行，完成或停止后才能断开 Codex App 聊天。")
-    with LOCK:
-        if ACTIVE_APP_TURNS.get(task_id):
-            raise WorkflowError("当前 Codex App Thread 正在执行，完成或停止后才能断开。")
-        client = APP_SERVER_CLIENT if APP_SERVER_CLIENT and APP_SERVER_CLIENT.running else None
-    existing = str(task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId") or "")
-    cwd = task_app_cwd(task)
-    with mutate_task(task_id) as live:
-        if live.get("activeJob"):
-            raise WorkflowError("任务正在执行，完成或停止后才能断开 Codex App 聊天。")
-        live.setdefault("sessions", {})["app"] = None
-        live.setdefault("app", {}).update({
-            "status": "idle",
-            "threadId": None,
-            "turnId": None,
-            "deepLink": "",
-            "cwd": str(cwd),
-            "error": "",
-        })
-        live["app"].setdefault("logs", [])
-        if existing:
-            add_event(live, "已断开当前需求与 Codex App 聊天的绑定；旧聊天未删除。", "warning")
-    if existing and client:
-        unsubscribe_error = unsubscribe_app_thread(client, existing)
-        if unsubscribe_error:
-            with mutate_task(task_id) as live:
-                add_event(live, f"本地绑定已解除，但 App Server 取消订阅未确认：{unsubscribe_error}", "warning")
-    return get_task_copy(task_id)
 
 
 def cancel_task(task_id: str) -> dict[str, Any]:
@@ -2227,11 +2302,11 @@ def record_app_server_event(task_id: str, operation: str, event: dict[str, Any])
     method = str(event.get("method") or "")
     params = event.get("params") if isinstance(event.get("params"), dict) else {}
     if method == "turn/started":
-        add_job_log(task_id, operation, "Codex App Thread 已开始本轮处理。")
+        add_job_log(task_id, operation, "后台执行 Thread 已开始本轮处理。")
     elif method == "turn/completed":
         turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
         status = turn.get("status", "completed")
-        add_job_log(task_id, operation, f"Codex App Thread 本轮结束：{status}。", "ok" if status == "completed" else "warning")
+        add_job_log(task_id, operation, f"后台执行 Thread 本轮结束：{status}。", "ok" if status == "completed" else "warning")
     elif method == "warning":
         add_job_log(task_id, operation, params.get("message") or "Codex App Server 返回警告。", "warning")
     elif method == "error":
@@ -2241,18 +2316,18 @@ def record_app_server_event(task_id: str, operation: str, event: dict[str, Any])
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
         item_type = item.get("type")
         if item_type == "commandExecution":
-            add_job_log(task_id, operation, f"App Thread 执行检查：{safe_log(item.get('command'), 300)}")
+            add_job_log(task_id, operation, f"后台执行 Thread 检查：{safe_log(item.get('command'), 300)}")
         elif item_type == "fileChange":
-            add_job_log(task_id, operation, "App Thread 正在应用文件改动。")
+            add_job_log(task_id, operation, "后台执行 Thread 正在应用文件改动。")
     elif method == "item/completed":
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
         item_type = item.get("type")
         if item_type == "commandExecution":
-            add_job_log(task_id, operation, f"App Thread 检查结束，退出码 {item.get('exitCode', item.get('status', '未知'))}。")
+            add_job_log(task_id, operation, f"后台执行 Thread 检查结束，退出码 {item.get('exitCode', item.get('status', '未知'))}。")
         elif item_type == "fileChange":
-            add_job_log(task_id, operation, "App Thread 已完成文件改动。")
+            add_job_log(task_id, operation, "后台执行 Thread 已完成文件改动。")
         elif item_type == "agentMessage":
-            add_job_log(task_id, operation, "App Thread 已返回阶段消息。", "ok")
+            add_job_log(task_id, operation, "后台执行 Thread 已返回阶段消息。", "ok")
 
 
 def app_server_event_has_progress(event: Any) -> bool:
@@ -2280,7 +2355,7 @@ def run_app_server_structured(
     task = _ensure_task_app_thread(task_id, allow_active=True)
     thread_id = str(task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId") or "")
     if not thread_id:
-        raise WorkflowError("当前任务没有可用的 Codex App Thread。")
+        raise WorkflowError("当前任务没有可用的后台执行 Thread。")
     try:
         output_schema = json.loads(schema_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -2297,7 +2372,7 @@ def run_app_server_structured(
     turn_id = ""
     last_agent_message = ""
     completed: dict[str, Any] | None = None
-    add_job_log(task_id, operation, "通过持久 Codex App Thread 启动快速模式。")
+    add_job_log(task_id, operation, "通过持久后台执行 Thread 启动快速模式。")
     try:
         response = client.request(
             "turn/start",
@@ -2367,15 +2442,15 @@ def run_app_server_structured(
             raise WorkflowError("用户已停止当前任务。")
         if completed.get("status") != "completed":
             error = completed.get("error") if isinstance(completed.get("error"), dict) else {}
-            raise WorkflowError(safe_log(error.get("message") or "Codex App Thread 执行失败。", 2400))
+            raise WorkflowError(safe_log(error.get("message") or "后台执行 Thread 执行失败。", 2400))
         if not last_agent_message.strip():
-            raise WorkflowError("Codex App Thread 没有返回结构化结果。")
+            raise WorkflowError("后台执行 Thread 没有返回结构化结果。")
         try:
             payload = json.loads(last_agent_message)
         except json.JSONDecodeError as exc:
-            raise WorkflowError("Codex App Thread 最终消息不是有效 JSON。") from exc
+            raise WorkflowError("后台执行 Thread 最终消息不是有效 JSON。") from exc
         if not isinstance(payload, dict):
-            raise WorkflowError("Codex App Thread 的结构化结果不是对象。")
+            raise WorkflowError("后台执行 Thread 的结构化结果不是对象。")
         with mutate_task(task_id) as live:
             live.setdefault("app", {}).update({
                 "status": "ready", "threadId": thread_id, "turnId": turn_id,
@@ -3094,7 +3169,7 @@ def execution_job(
 
 def quick_mode_prompt(base_prompt: str) -> str:
     return f"""
-{PRODUCT_NAME} 快速轮次：复用当前 App Thread，本轮不启动独立 Review；其他稳定规则按 Profile、Skills、静态契约和输出 Schema 执行。
+{PRODUCT_NAME} 快速轮次：复用当前后台执行 Thread，本轮不启动独立 Review；其他稳定规则按 Profile、Skills、静态契约和输出 Schema 执行。
 <round-request>
 {base_prompt}
 </round-request>
@@ -3196,7 +3271,7 @@ def quick_execution_job(
             execution["feedback"] = acceptance_feedback
             execution["attachments"] = copy.deepcopy(attachments or [])
         live["stage"] = "bugfix" if bugfix_active else "execute"
-        message = "从已有 Worktree Diff 断点续跑；只补齐未完成修改、自检和结构化结果。" if resume_files else "使用持久 Codex App Thread 启动快速模式；本轮不运行独立 Code Review。"
+        message = "从已有 Worktree Diff 断点续跑；只补齐未完成修改、自检和结构化结果。" if resume_files else "使用持久后台执行 Thread 启动快速模式；本轮不运行独立 Code Review。"
         add_event(live, message, "ok")
     try:
         payload, thread_id = run_app_server_structured(
@@ -3259,7 +3334,7 @@ def quick_execution_job(
     ) if acceptance_fix else None
     review = {
         "verdict": "skipped",
-        "summary": "快速模式已由同一 App Thread 完成自检；未启动第二个独立 Code Review。",
+        "summary": "快速模式已由同一后台执行 Thread 完成自检；未启动第二个独立 Code Review。",
         "findings": [],
         "verification_gaps": ["独立 Code Review 未运行；人工验收仍是 Commit 门禁。"],
     }
@@ -3943,7 +4018,7 @@ workflow: quick-change
         "maxStageIndex": STAGE_INDEX["worktree" if quick_mode else "discuss"],
         "activeJob": None,
         "jobState": "idle",
-        "sessions": {"discussion": None, "execution": None, "review": None, "ask": None, "app": None},
+        "sessions": {"discussion": None, "execution": None, "review": None, "ask": None, "app": None, "codexApp": None},
         "intake": {"mode": "quick_change" if quick_mode else "new"},
         "source": source,
         "paths": {
@@ -3982,6 +4057,7 @@ workflow: quick-change
         "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
         "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
         "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "cwd": str(REPO_ROOT.resolve()), "logs": [], "error": ""},
+        "codexApp": default_codex_app_chat(REPO_ROOT.resolve()),
         "verification": {"approved": False, "checks": [], "note": "", "revision": 0},
         "git": {"entries": [], "digest": "", "committed": False, "commitId": ""},
         "bugfix": {"status": "idle", "description": "", "history": []},
@@ -4062,7 +4138,7 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
         "maxStageIndex": STAGE_INDEX["execute" if imported_plan else "discuss"],
         "activeJob": None,
         "jobState": "idle",
-        "sessions": {"discussion": None, "execution": None, "review": None, "ask": None, "app": None},
+        "sessions": {"discussion": None, "execution": None, "review": None, "ask": None, "app": None, "codexApp": None},
         "intake": {
             "mode": mode,
             "documentPath": str(document_path),
@@ -4110,6 +4186,9 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
             "cwd": str(worktree_path.resolve()) if imported_plan else str(REPO_ROOT.resolve()),
             "logs": [], "error": "",
         },
+        "codexApp": default_codex_app_chat(
+            worktree_path.resolve() if imported_plan else REPO_ROOT.resolve()
+        ),
         "verification": {"approved": False, "checks": [], "note": "", "revision": 0},
         "git": {**status, "committed": False, "commitId": ""},
         "bugfix": {"status": "idle", "description": "", "history": []},
@@ -4368,13 +4447,13 @@ class WorkflowHandler(BaseHTTPRequestHandler):
             if task.get("archivedAt"):
                 raise WorkflowError("任务已归档，请先恢复后再继续执行。")
             if action == "app/open":
-                self.send_json({"ok": True, "task": ensure_task_app_thread(task_id)})
+                self.send_json({"ok": True, "task": ensure_task_codex_app_chat(task_id)})
                 return
             if action == "app/disconnect":
-                self.send_json({"ok": True, "task": disconnect_task_app_thread(task_id)})
+                self.send_json({"ok": True, "task": disconnect_task_codex_app_chat(task_id)})
                 return
             if action == "app/new":
-                self.send_json({"ok": True, "task": start_new_task_app_thread(task_id)})
+                self.send_json({"ok": True, "task": start_new_task_codex_app_chat(task_id)})
                 return
             if action == "ask":
                 message_id = prepare_ask_request(task_id, str(payload.get("question") or ""))
