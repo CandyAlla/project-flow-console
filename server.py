@@ -4185,9 +4185,10 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
     uploaded_plan = False
     document_path: Path
     if mode == "existing_plan" and payload.get("documentFileBase64"):
-        file_name = Path(str(payload.get("documentFileName") or "")).name
+        raw_file_name = str(payload.get("documentFileName") or "")
+        file_name = Path(raw_file_name).name
         encoded = str(payload.get("documentFileBase64") or "")
-        if not file_name:
+        if not file_name or file_name != raw_file_name:
             raise WorkflowError("已有执行 Plan 文件名无效。")
         if Path(file_name).suffix.lower() != ".md":
             raise WorkflowError("已有执行 Plan 只能是 Markdown（.md）文件。")
