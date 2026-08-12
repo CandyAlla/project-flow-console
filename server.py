@@ -2655,7 +2655,8 @@ Markdown 标题与正文必须使用明确的需求名称，不得出现 UUID、
     ]
     payload, _ = run_codex_structured(task_id, "plan", command, REPO_ROOT, output, "discussion")
     markdown = payload.get("markdown", "").strip()
-    html = payload.get("html", "").strip()
+    html = normalize_generated_html(payload.get("html", ""))
+    payload["html"] = html
     if not markdown or "<html" not in html.lower():
         raise WorkflowError("Plan 结果缺少 Markdown 或完整 HTML。")
     draft_path = task_dir(task_id) / "plan-draft.md"
@@ -2669,6 +2670,17 @@ Markdown 标题与正文必须使用明确的需求名称，不得出现 UUID、
             "htmlPath": str(html_path), "htmlUrl": paths["htmlUrl"], "error": "",
         })
         add_event(live, "Plan Markdown 草案与逻辑验收 HTML 已生成。", "ok")
+
+
+def normalize_generated_html(value: Any) -> str:
+    """Repair a fully escaped HTML document without touching escapes inside tags or scripts."""
+    html = str(value or "").strip()
+    if "\\n" not in html:
+        return html
+    head = html.lstrip().lower()
+    if not (head.startswith("<!doctype html") or head.startswith("<html")):
+        return html
+    return re.sub(r"(?<=>)\\n|\\n(?=<)", "\n", html)
 
 
 def worktree_preview(task: dict[str, Any]) -> str:

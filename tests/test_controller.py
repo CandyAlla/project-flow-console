@@ -1042,6 +1042,20 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('larkReader: ui.larkReader', app_js)
         self.assertIn("官方 Lark CLI 正在只读获取飞书需求", app_js)
 
+    def test_generated_html_normalizes_escaped_tag_newlines_only(self) -> None:
+        html = '<!doctype html>\\n<html>\\n<head><script>const line = "\\\\n";</script>\\n</head>\\n<body>ok</body>\\n</html>'
+        normalized = server.normalize_generated_html(html)
+        self.assertEqual(
+            normalized,
+            '<!doctype html>\n<html>\n<head><script>const line = "\\\\n";</script>\n</head>\n<body>ok</body>\n</html>',
+        )
+
+    def test_generated_html_normalization_does_not_touch_non_html_or_existing_newlines(self) -> None:
+        markdown = "line one\\nline two"
+        normal_html = "<!doctype html>\n<html><body>ok</body></html>"
+        self.assertEqual(server.normalize_generated_html(markdown), markdown)
+        self.assertEqual(server.normalize_generated_html(normal_html), normal_html)
+
     def test_import_existing_plan_enters_execute_without_codex_job(self) -> None:
         worktree = self.create_linked_worktree()
         plan = worktree / "Doc" / "plans" / "active" / "existing.md"
