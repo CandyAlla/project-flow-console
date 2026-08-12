@@ -710,6 +710,24 @@
     .image-drop-zone strong, .image-drop-zone span { display: block; }
     .image-drop-zone span { margin-top: 2px; color: var(--muted); font-size: .84rem; font-weight: 400; }
 
+    .document-drop-zone {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      min-height: 78px;
+      padding: 14px 15px;
+      border: 1px dashed #9aa8b8;
+      border-radius: 7px;
+      background: #fbfcfe;
+      cursor: pointer;
+    }
+
+    .document-drop-zone:hover, .document-drop-zone.is-dragging { border-color: var(--accent); background: var(--accent-soft); }
+    .document-drop-zone > div { min-width: 0; }
+    .document-drop-zone strong, .document-drop-zone span { display: block; }
+    .document-drop-zone span { margin-top: 2px; color: var(--muted); font-size: .84rem; font-weight: 400; }
+
     .feedback-image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
 
     .feedback-image-card {

@@ -49,6 +49,7 @@
     baseBranch: "main",
     existingDocumentPath: "",
     existingWorktreePath: "",
+    existingPlanFileName: "",
     answers: {},
     customAnswers: {},
     discussionNote: "",
@@ -86,8 +87,11 @@
   let health = null;
   let projectBranches = [];
   let branchLoadError = "";
+  let projectWorktrees = [];
+  let worktreeLoadError = "";
   let token = "";
   let selectedFile = null;
+  let selectedPlanFile = null;
   const feedbackImages = new Map();
   let feedbackImageSequence = 0;
   let busy = false;
@@ -185,7 +189,7 @@
 
   const taskViewKeys = [
     "module", "viewStage", "knowledgeFilter", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
-    "existingDocumentPath", "existingWorktreePath",
+    "existingDocumentPath", "existingWorktreePath", "existingPlanFileName",
     "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationRevision", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
   ];
 
@@ -843,12 +847,27 @@
     }
   }
 
+  async function refreshProjectWorktrees() {
+    try {
+      const result = await api("/api/worktrees");
+      projectWorktrees = Array.isArray(result.worktrees) ? result.worktrees : [];
+      worktreeLoadError = "";
+      return result;
+    } catch (error) {
+      projectWorktrees = [];
+      worktreeLoadError = error.message || "无法读取已有 Worktree。";
+      throw error;
+    }
+  }
+
   async function bootProject(preferredTaskId = "") {
     try {
       const response = await fetch(projectApiPath("/api/health"), { cache: "no-store" });
       applyHealth(await response.json());
       try { await refreshProjectBranches(); }
       catch (_) { /* 输入页保留 Profile 默认分支，并展示读取错误。 */ }
+      try { await refreshProjectWorktrees(); }
+      catch (_) { /* 已有资产页保留手动路径输入，并展示读取错误。 */ }
       await refreshTaskSummaries();
       if (ui.module === "knowledge-center") await refreshKnowledgeCenter();
       const taskId = preferredTaskId || ui.taskId;
@@ -1538,11 +1557,20 @@
     const newFields = `${workflowSelector}<div class="field"><div class="field-label-row"><label for="baseBranch">Worktree 基准</label><button class="small" id="refreshBranches" type="button" ${busy ? "disabled" : ""}>刷新分支</button></div><select id="baseBranch" class="mono">${branchOptions}</select><span class="hint">${branchHint}</span></div>
       ${quickWorkflow ? quickSource : standardSource}`;
     const isPlan = ui.intakeMode === "existing_plan";
+    const selectedExistingWorktree = ui.existingWorktreePath;
+    const selectedKnownWorktree = projectWorktrees.some((item) => item.path === selectedExistingWorktree);
+    const worktreeOptions = projectWorktrees.map((item) => `<option value="${escapeHTML(item.path)}" ${item.path === selectedExistingWorktree ? "selected" : ""}>${escapeHTML(item.name)} · ${escapeHTML(item.branch)}</option>`).join("");
+    const worktreeHint = worktreeLoadError
+      ? `读取已有 Worktree 失败：${escapeHTML(worktreeLoadError)} 仍可手动填写绝对路径。`
+      : projectWorktrees.length
+        ? `来自主仓库 ${escapeHTML(health?.paths?.repo || "repoRoot")}：${projectWorktrees.length} 个可用 linked Worktree。`
+        : "当前主仓库没有可用 linked Worktree，可手动填写绝对路径。";
+    const existingPlanDrop = isPlan ? `<div class="field"><label>拖入或选择执行 Plan</label><div class="document-drop-zone" data-document-drop-zone role="button" tabindex="0" aria-label="选择或拖入已有执行 Plan"><input class="feedback-file-input" id="existingPlanFile" type="file" accept=".md,text/markdown"><div><strong>${selectedPlanFile ? `已选择：${escapeHTML(selectedPlanFile.name)}` : "拖入 .md Plan 文件"}</strong><span>也可以点击选择；文件最大 240 KB，上传内容只进入任务运行目录。</span></div><button class="small" type="button" id="pickExistingPlan">选择文件</button></div><span class="hint">${selectedPlanFile ? "已选择的文件提交时优先于下面的路径。" : ui.existingPlanFileName ? `刷新后需重新选择：${escapeHTML(ui.existingPlanFileName)}；也可改用下面的绝对路径。` : "如果不上传文件，继续使用下面的绝对路径输入。"}</span></div>` : "";
     const existingFields = `${callout(isPlan
       ? `<strong>直接进入执行。</strong> Plan 必须是 Worktree 内或配置的文档目录 <code>${escapeHTML(health?.paths?.docs || "docsRoot")}</code> 内的 UTF-8 Markdown；本步只校验，不运行 Codex。`
       : "<strong>继续需求梳理。</strong> 将读取已有文档完成 discussion、ask-first、Plan 和 HTML；已有 Worktree 只做接入，不创建新目录。", "warning")}
-      <div class="field"><label for="existingDocumentPath">${isPlan ? "执行 Plan 绝对路径" : "需求文档绝对路径"}</label><input id="existingDocumentPath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.workspace || "/absolute/project/path")}/${isPlan ? "plan.md" : "requirement.md"}" value="${escapeHTML(ui.existingDocumentPath)}"><span class="hint">${isPlan ? "仅支持 .md，最大 240 KB。" : "支持 md、txt、pdf、doc、docx、html，文件需位于 Profile 允许的项目路径。"}</span></div>
-      <div class="field"><label for="existingWorktreePath">已有 Worktree 绝对路径</label><input id="existingWorktreePath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.worktrees || "/absolute/worktrees")}/${escapeHTML(health?.project?.worktreeNamePrefix || "Project")}_feature" value="${escapeHTML(ui.existingWorktreePath)}"><span class="hint">必须是当前 Profile 主仓库的独立 linked worktree；会校验 Git 根目录、分支和未完成操作，不切换分支。</span></div>`;
+      ${existingPlanDrop}<div class="field"><label for="existingDocumentPath">${isPlan ? "执行 Plan 绝对路径" : "需求文档绝对路径"}</label><input id="existingDocumentPath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.workspace || "/absolute/project/path")}/${isPlan ? "plan.md" : "requirement.md"}" value="${escapeHTML(ui.existingDocumentPath)}"><span class="hint">${isPlan ? "仅支持 .md，最大 240 KB；也可以直接拖入上方文件。" : "支持 md、txt、pdf、doc、docx、html，文件需位于 Profile 允许的项目路径。"}</span></div>
+      <div class="field"><div class="field-label-row"><label for="existingWorktreeSelect">已有 Worktree</label><button class="small" id="refreshWorktrees" type="button" ${busy ? "disabled" : ""}>刷新 Worktree</button></div><select id="existingWorktreeSelect" class="mono"><option value="">手动填写绝对路径</option>${worktreeOptions}</select><span class="hint">${worktreeHint}</span><input id="existingWorktreePath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.worktrees || "/absolute/worktrees")}/${escapeHTML(health?.project?.worktreeNamePrefix || "Project")}_feature" value="${escapeHTML(ui.existingWorktreePath)}" ${selectedKnownWorktree ? "hidden" : ""}><span class="hint" id="existingWorktreeManualHint" ${selectedKnownWorktree ? "hidden" : ""}>必须是当前 Profile 主仓库的独立 linked worktree；也可以继续手动填写绝对路径。</span></div>`;
     const intro = ui.intakeMode === "new"
       ? quickWorkflow
         ? "<strong>轻量直改。</strong> 提交后不运行 discussion 或完整 Plan Agent，只生成最小执行单并展示 Worktree dry-run。"
@@ -1956,6 +1984,30 @@
     saveUi();
   }
 
+  function attachExistingPlanHandlers() {
+    const input = document.querySelector("#existingPlanFile");
+    const dropZone = document.querySelector("[data-document-drop-zone]");
+    const picker = document.querySelector("#pickExistingPlan");
+    if (!input || !dropZone) return;
+    const choose = (files) => {
+      const file = Array.from(files || [])[0];
+      if (!file) return;
+      if (!/\.md$/i.test(file.name || "")) return showToast("已有执行 Plan 只能选择 .md 文件。", true);
+      if (file.size > 240_000) return showToast("已有执行 Plan 不能超过 240 KB。", true);
+      selectedPlanFile = file;
+      ui.existingPlanFileName = file.name;
+      saveUi();
+      render();
+    };
+    picker?.addEventListener("click", (event) => { event.stopPropagation(); input.click(); });
+    input.addEventListener("change", () => choose(input.files));
+    dropZone.addEventListener("click", (event) => { if (!event.target.closest("button")) input.click(); });
+    dropZone.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); input.click(); } });
+    ["dragenter", "dragover"].forEach((name) => dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.add("is-dragging"); }));
+    dropZone.addEventListener("dragleave", (event) => { if (!dropZone.contains(event.relatedTarget)) dropZone.classList.remove("is-dragging"); });
+    dropZone.addEventListener("drop", (event) => { event.preventDefault(); dropZone.classList.remove("is-dragging"); choose(event.dataTransfer?.files); });
+  }
+
   function attachHandlers(stageId) {
     document.querySelectorAll("[data-source-type]").forEach((button) => button.addEventListener("click", () => {
       captureVisibleFields();
@@ -2049,6 +2101,19 @@
       ui.sourceFileName = selectedFile?.name || "";
       saveUi();
       render();
+    });
+    attachExistingPlanHandlers();
+    on("existingWorktreeSelect", "change", (event) => {
+      ui.existingWorktreePath = event.target.value || "";
+      saveUi();
+      render();
+    });
+    on("refreshWorktrees", "click", () => {
+      captureVisibleFields();
+      withAction(async () => {
+        await refreshProjectWorktrees();
+        showToast(`已从主仓库刷新 ${projectWorktrees.length} 个 Worktree。`);
+      });
     });
     on("startDiscussion", "click", startDiscussion);
     on("sendDiscussionNote", "click", () => submitDiscussion(false));
@@ -2180,18 +2245,28 @@
     captureVisibleFields();
     if (!ui.title.trim()) return showToast("请先填写需求名称。", true);
     if (ui.intakeMode !== "new") {
-      if (!ui.existingDocumentPath.trim()) return showToast("请填写已有文档的绝对路径。", true);
+      if (ui.intakeMode === "existing_plan" && !ui.existingDocumentPath.trim() && !selectedPlanFile) return showToast("请拖入已有 Plan，或填写其绝对路径。", true);
+      if (ui.intakeMode === "existing_requirement" && !ui.existingDocumentPath.trim()) return showToast("请填写已有文档的绝对路径。", true);
       if (!ui.existingWorktreePath.trim()) return showToast("请填写已有 Worktree 的绝对路径。", true);
       await withAction(async () => {
-        const result = await post("/api/tasks/import", {
+        const body = {
           title: ui.title.trim(),
           intakeMode: ui.intakeMode,
           documentPath: ui.existingDocumentPath.trim(),
           worktreePath: ui.existingWorktreePath.trim()
-        });
+        };
+        if (selectedPlanFile) {
+          if (!/\.md$/i.test(selectedPlanFile.name || "")) throw new Error("已有执行 Plan 只能选择 .md 文件。");
+          if (selectedPlanFile.size > 240_000) throw new Error("已有执行 Plan 不能超过 240 KB。");
+          body.documentFileName = selectedPlanFile.name;
+          body.documentFileBase64 = await fileBase64(selectedPlanFile);
+        }
+        const result = await post("/api/tasks/import", body);
         ui.answers = {};
         ui.customAnswers = {};
         ui.discussionNote = "";
+        selectedPlanFile = null;
+        ui.existingPlanFileName = "";
         setTask(result.task, true);
         showToast(ui.intakeMode === "existing_plan" ? "已有 Plan 与 Worktree 已接入，等待执行授权。" : "已有需求文档与 Worktree 已接入，开始只读讨论。" );
       });
@@ -2425,6 +2500,7 @@
     await withAction(async () => {
       const result = await api(`/api/tasks/${taskId}`);
       selectedFile = null;
+      selectedPlanFile = null;
       setTask(result.task, false);
       ui.module = "flow";
       ui.viewStage = result.task.stage;
@@ -2455,6 +2531,7 @@
       } else if (selected) {
         task = null;
         selectedFile = null;
+        selectedPlanFile = null;
         activateTaskView("__new__");
       }
       saveUi();
@@ -2470,6 +2547,7 @@
     await withAction(async () => {
       const result = await api(`/api/tasks/${taskId}`);
       selectedFile = null;
+      selectedPlanFile = null;
       setTask(result.task, false);
     });
   }
@@ -2511,6 +2589,7 @@
     saveUi();
     task = null;
     selectedFile = null;
+    selectedPlanFile = null;
     const taskViews = ui.taskViews || {};
     delete taskViews.__new__;
     ui.showArchived = false;

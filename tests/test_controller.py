@@ -1070,6 +1070,58 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(server.get_task_copy(task["id"])["paths"]["planRelative"], str(plan.relative_to(worktree)))
         self.assertIn("已有执行 Plan 接入", task["agentMemory"]["completedSteps"])
 
+    def test_import_existing_plan_from_uploaded_markdown_enters_execute(self) -> None:
+        worktree = self.create_linked_worktree()
+        patches = self.imported_paths()
+        encoded = base64.b64encode("# Uploaded Plan\n\nRun the change.\n".encode("utf-8")).decode("ascii")
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(server, "launch_job") as launch_job:
+            task = server.create_imported_task({
+                "title": "上传 Plan 接入",
+                "intakeMode": "existing_plan",
+                "documentFileName": "uploaded-plan.md",
+                "documentFileBase64": encoded,
+                "worktreePath": str(worktree),
+            })
+        launch_job.assert_not_called()
+        plan_path = Path(task["plan"]["finalPath"])
+        self.assertTrue(plan_path.is_file())
+        self.assertTrue(plan_path.resolve().is_relative_to((server.TASK_ROOT / task["id"]).resolve()))
+        self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Uploaded Plan\n\nRun the change.\n")
+        self.assertEqual(task["stage"], "execute")
+
+    def test_import_uploaded_plan_rejects_extension_size_encoding_and_utf8(self) -> None:
+        worktree = self.create_linked_worktree()
+        patches = self.imported_paths()
+        base = {"title": "上传校验", "intakeMode": "existing_plan", "worktreePath": str(worktree)}
+        with patches[0], patches[1], patches[2], patches[3]:
+            with self.assertRaisesRegex(server.WorkflowError, "Markdown"):
+                server.create_imported_task({**base, "documentFileName": "plan.txt", "documentFileBase64": base64.b64encode(b"# plan").decode()})
+            with self.assertRaisesRegex(server.WorkflowError, "240 KB"):
+                server.create_imported_task({**base, "documentFileName": "plan.md", "documentFileBase64": base64.b64encode(b"x" * (server.MAX_SOURCE_TEXT + 1)).decode()})
+            with self.assertRaisesRegex(server.WorkflowError, "编码无效"):
+                server.create_imported_task({**base, "documentFileName": "plan.md", "documentFileBase64": "not-base64"})
+            with self.assertRaisesRegex(server.WorkflowError, "UTF-8"):
+                server.create_imported_task({**base, "documentFileName": "plan.md", "documentFileBase64": base64.b64encode(b"\xff\xfe").decode()})
+
+    def test_project_worktrees_payload_excludes_main_and_detached(self) -> None:
+        linked = self.create_linked_worktree()
+        detached = self.root / "worktrees" / "detached"
+        detached.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "worktree", "add", "--detach", str(detached)], self.repo)
+        with mock.patch.object(server, "REPO_ROOT", self.repo):
+            payload = server.project_worktrees_payload()
+        self.assertEqual([item["path"] for item in payload["worktrees"]], [str(linked.resolve())])
+        self.assertEqual(payload["worktrees"][0]["branch"], "worktree/existing-task")
+
+    def test_existing_asset_intake_ui_supports_plan_drop_and_worktree_select(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-document-drop-zone', app_js)
+        self.assertIn('id="existingPlanFile"', app_js)
+        self.assertIn('id="existingWorktreeSelect"', app_js)
+        self.assertIn('id="existingWorktreePath"', app_js)
+        self.assertIn('api("/api/worktrees")', app_js)
+        self.assertIn('documentFileBase64', app_js)
+
     def test_import_existing_requirement_starts_discussion_and_reuses_worktree(self) -> None:
         worktree = self.create_linked_worktree()
         requirement = self.root / "ProjectDocs" / "requirement.md"
