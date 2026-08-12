@@ -1772,6 +1772,45 @@ def project_branches_payload() -> dict[str, Any]:
     }
 
 
+def project_worktrees_payload() -> dict[str, Any]:
+    """Return selectable linked worktrees owned by the configured repository."""
+    result = run_command(["git", "-C", str(REPO_ROOT), "worktree", "list", "--porcelain"], REPO_ROOT, timeout=15)
+    if result.returncode != 0:
+        raise WorkflowError(safe_log(result.stderr or result.stdout or "无法读取已有 Worktree。", 2000))
+    worktrees: list[dict[str, Any]] = []
+    current_repo = REPO_ROOT.resolve()
+    block: dict[str, str] = {}
+
+    def flush() -> None:
+        path_value = block.get("worktree", "")
+        branch_ref = block.get("branch", "")
+        head = block.get("HEAD", "")
+        block.clear()
+        if not path_value or not branch_ref.startswith("refs/heads/"):
+            return
+        path = Path(path_value).expanduser().resolve(strict=False)
+        if path == current_repo or not path.is_dir():
+            return
+        branch = branch_ref.removeprefix("refs/heads/")
+        worktrees.append({
+            "path": str(path),
+            "name": path.name,
+            "branch": branch,
+            "head": head,
+        })
+
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            flush()
+            continue
+        key, _, value = line.partition(" ")
+        if key in {"worktree", "HEAD", "branch"}:
+            block[key] = value.strip()
+    flush()
+    worktrees.sort(key=lambda item: (str(item["name"]).casefold(), str(item["path"]).casefold()))
+    return {"worktrees": worktrees, "repo": str(REPO_ROOT)}
+
+
 def command_ok(command: list[str], cwd: Path, timeout: int = 30) -> str:
     result = run_command(command, cwd, timeout)
     if result.returncode != 0:
@@ -2889,6 +2928,9 @@ def run_implementation(
         ]
         if allow_docs_root:
             command.extend(["--add-dir", str(DOCS_ROOT)])
+        plan_path = Path(str(task.get("plan", {}).get("finalPath") or "")).expanduser()
+        if plan_path.is_file() and not path_within(plan_path.resolve(), worktree.resolve()) and not path_within(plan_path.resolve(), DOCS_ROOT.resolve()):
+            command.extend(["--add-dir", str(plan_path.resolve().parent)])
         for image_path in image_paths:
             command.extend(["--image", str(image_path)])
         command.extend(["--output-schema", str(schema), "-o", str(output), prompt])
@@ -2948,6 +2990,9 @@ def run_review(
         "--add-dir", str(DOCS_ROOT), "--output-schema", str(SCHEMA_ROOT / "review.schema.json"),
         "-o", str(output), prompt,
     ]
+    plan_path = Path(str(task.get("plan", {}).get("finalPath") or "")).expanduser()
+    if plan_path.is_file() and not path_within(plan_path.resolve(), worktree.resolve()) and not path_within(plan_path.resolve(), DOCS_ROOT.resolve()):
+        command[command.index("--output-schema"):command.index("--output-schema")] = ["--add-dir", str(plan_path.resolve().parent)]
     payload, _ = run_codex_structured(
         task_id, "execution", command, worktree, output, "review",
         timeout_seconds=timeout_seconds or REVIEW_TIMEOUT_SECONDS, timeout_label="Code Review",
@@ -4087,9 +4132,34 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
 
     worktree_info = validate_existing_worktree(str(payload.get("worktreePath") or ""))
     worktree_path = Path(worktree_info["path"])
-    document_path = resolve_existing_document(str(payload.get("documentPath") or ""), mode, worktree_path)
-    status = git_status(worktree_path)
     task_id = str(uuid.uuid4())
+    uploaded_plan = False
+    document_path: Path
+    if mode == "existing_plan" and payload.get("documentFileBase64"):
+        file_name = Path(str(payload.get("documentFileName") or "")).name
+        encoded = str(payload.get("documentFileBase64") or "")
+        if not file_name:
+            raise WorkflowError("已有执行 Plan 文件名无效。")
+        if Path(file_name).suffix.lower() != ".md":
+            raise WorkflowError("已有执行 Plan 只能是 Markdown（.md）文件。")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise WorkflowError("已有执行 Plan 文件编码无效。") from exc
+        if len(content) > MAX_SOURCE_TEXT:
+            raise WorkflowError("已有执行 Plan 不能超过 240 KB。")
+        try:
+            content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise WorkflowError("已有执行 Plan 不是有效的 UTF-8 Markdown。") from exc
+        upload_path = task_dir(task_id) / "uploads" / file_name
+        upload_path.parent.mkdir(parents=True, exist_ok=True)
+        upload_path.write_bytes(content)
+        document_path = upload_path.resolve()
+        uploaded_plan = True
+    else:
+        document_path = resolve_existing_document(str(payload.get("documentPath") or ""), mode, worktree_path)
+    status = git_status(worktree_path)
     short_id = task_id.split("-")[0]
     date = datetime.now().strftime("%Y-%m-%d")
     display = safe_display_name(title, "")
@@ -4110,7 +4180,7 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             plan_reference = str(document_path.relative_to(worktree_path))
         except ValueError:
-            plan_reference = str(document_path)
+            plan_reference = f"{PLAN_RELATIVE_DIR}/{plan_name}"
         discussion_result = {
             "summary": f"用户已接入现有执行 Plan 与 {PROJECT_NAME} Worktree。",
             "confirmed_facts": [f"执行 Plan：{document_path}", f"Worktree：{worktree_path}", f"分支：{worktree_info['branch']}"],
@@ -4195,6 +4265,9 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
         "knowledge": default_knowledge(),
         "events": [],
     }
+    if imported_plan and uploaded_plan:
+        task["intake"]["documentPath"] = str(document_path)
+        task["source"].update({"uploaded": True, "filePath": str(document_path)})
     if imported_plan:
         add_event(task, "已有执行 Plan 与 Worktree 校验通过，等待用户授权执行。", "ok")
     else:
@@ -4370,6 +4443,9 @@ class WorkflowHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/branches":
                 self.send_json({"ok": True, **project_branches_payload()})
+                return
+            if path == "/api/worktrees":
+                self.send_json({"ok": True, **project_worktrees_payload()})
                 return
             if path == "/api/tasks":
                 self.send_json({"ok": True, "tasks": list_task_summaries(), "scheduler": scheduler_payload()})
