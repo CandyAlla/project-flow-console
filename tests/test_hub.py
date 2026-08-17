@@ -120,6 +120,8 @@ class ProjectHubTests(unittest.TestCase):
         self.assertIn('id="projectRail"', html)
         self.assertIn('id="hubDashboard"', html)
         self.assertIn('id="addProjectDialog"', html)
+        self.assertIn('id="addProjectRepositoryUrl"', html)
+        self.assertIn('data-knowledge-publish', app)
         self.assertIn('"$SCRIPT_DIR/hub.py"', start)
 
 

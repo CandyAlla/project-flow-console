@@ -144,6 +144,9 @@ class ProjectRegistry:
                         "name": profile["name"],
                         "profilePath": str(path),
                         "repoRoot": profile["repoRoot"],
+                        "repositoryUrl": profile.get("repositoryUrl", ""),
+                        "repositoryKey": profile.get("repositoryKey", ""),
+                        "memory": profile.get("memory", {}),
                         "docsRoot": profile["docsRoot"],
                         "worktreesRoot": profile["worktreesRoot"],
                         "defaultBaseBranch": profile["defaultBaseBranch"],
@@ -203,10 +206,13 @@ class ProjectRegistry:
         ]
         name = str(payload.get("name") or "").strip()
         project_id = str(payload.get("id") or "").strip()
+        repository_url = str(payload.get("repositoryUrl") or "").strip()
         if name:
             command.extend(["--name", name])
         if project_id:
             command.extend(["--id", project_id])
+        if repository_url:
+            command.extend(["--repository-url", repository_url])
         if dry_run:
             command.append("--dry-run")
         result = subprocess.run(command, cwd=TOOL_DIR, text=True, capture_output=True, check=False, timeout=30)

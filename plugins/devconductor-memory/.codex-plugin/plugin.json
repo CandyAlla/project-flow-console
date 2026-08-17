@@ -1,0 +1,24 @@
+{
+  "name": "devconductor-memory",
+  "version": "0.1.0",
+  "description": "Shared, Git-identified memory for DevConductor and Codex projects.",
+  "author": {
+    "name": "CandyAlla"
+  },
+  "repository": "https://github.com/CandyAlla/project-flow-console",
+  "keywords": ["memory", "devconductor", "cross-project", "team"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Devconductor Memory",
+    "shortDescription": "Recall shared project and team memory.",
+    "longDescription": "Connect Codex to the same lightweight Memory Hub used by DevConductor, using Git origin instead of local paths as project identity.",
+    "developerName": "CandyAlla",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Search shared memory for this project.",
+      "Capture this decision as reviewed project memory."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

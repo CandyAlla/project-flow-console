@@ -378,7 +378,7 @@
     } else if (hubSection === "tasks") {
       content = hubTasks.length ? `<div class="hub-list">${hubTasks.map((item) => `<article class="hub-list-item"><div><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(formatDateTime(item.updatedAt))} · ${escapeHTML(item.projectName)}</span></div><span class="hub-list-state">${escapeHTML(hubTaskStateLabel(item))}</span><button class="small" type="button" data-hub-task="${escapeHTML(item.id)}" data-project-id="${escapeHTML(item.projectId)}">查看任务</button></article>`).join("")}</div>${errorList}` : `<p class="task-empty">所有项目都还没有任务。</p>${errorList}`;
     } else {
-      content = hubKnowledge.length ? `<div class="knowledge-grid">${hubKnowledge.map((item) => `<article class="knowledge-card" data-status="${escapeHTML(item.status || "pending")}"><div class="knowledge-card-head"><div><p class="section-kicker">${escapeHTML(item.projectName)} · ${escapeHTML(item.type || "经验")}</p><h3>${escapeHTML(item.title || "未命名沉淀")}</h3></div><div class="knowledge-badges"><span class="knowledge-badge">${escapeHTML(item.status || "pending")}</span><span class="knowledge-badge scope">${escapeHTML(item.scope || "project")}</span></div></div><p class="knowledge-card-content">${escapeHTML(item.content || "")}</p><div class="knowledge-card-actions"><button class="small" type="button" data-hub-task="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">查看任务</button>${item.status === "pending" ? `<button class="small" type="button" data-hub-knowledge-action="ignore" data-candidate-id="${escapeHTML(item.id)}" data-task-id="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">忽略</button><button class="small primary" type="button" data-hub-knowledge-action="approve" data-candidate-id="${escapeHTML(item.id)}" data-task-id="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">保留</button>` : ""}</div></article>`).join("")}</div>${errorList}` : `<p class="task-empty">当前没有跨项目沉淀候选。</p>${errorList}`;
+      content = hubKnowledge.length ? `<div class="knowledge-grid">${hubKnowledge.map((item) => `<article class="knowledge-card" data-status="${escapeHTML(item.status || "pending")}"><div class="knowledge-card-head"><div><p class="section-kicker">${escapeHTML(item.projectName)} · ${escapeHTML(item.type || "经验")}</p><h3>${escapeHTML(item.title || "未命名沉淀")}</h3></div><div class="knowledge-badges"><span class="knowledge-badge">${escapeHTML(item.status || "pending")}</span><span class="knowledge-badge scope">${escapeHTML(item.scope || "project")}</span>${item.publishedMemoryId ? '<span class="knowledge-badge">已共享</span>' : item.lastUnsharedMemoryId ? '<span class="knowledge-badge">已取消共享</span>' : ""}</div></div><p class="knowledge-card-content">${escapeHTML(item.content || "")}</p><div class="knowledge-card-actions"><button class="small" type="button" data-hub-task="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">查看任务</button>${item.status === "pending" ? `<button class="small" type="button" data-hub-knowledge-action="ignored" data-candidate-id="${escapeHTML(item.id)}" data-task-id="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">忽略</button><button class="small primary" type="button" data-hub-knowledge-action="approved" data-candidate-id="${escapeHTML(item.id)}" data-task-id="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">保留</button>` : item.status === "approved" && item.publishedMemoryId ? `<button class="small" type="button" data-hub-knowledge-action="unpublish" data-candidate-id="${escapeHTML(item.id)}" data-task-id="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">取消共享</button>` : item.status === "approved" ? `<button class="small primary" type="button" data-hub-knowledge-action="publish" data-candidate-id="${escapeHTML(item.id)}" data-task-id="${escapeHTML(item.sourceTaskId || item.taskId || "")}" data-project-id="${escapeHTML(item.projectId)}">发布到共享记忆</button>` : ""}</div></article>`).join("")}</div>${errorList}` : `<p class="task-empty">当前没有跨项目沉淀候选。</p>${errorList}`;
     }
     hubDashboardEl.innerHTML = `<div class="hub-dashboard-shell"><div class="hub-dashboard-head"><div><p class="eyebrow">Project Hub</p><h2>所有项目</h2><p>切换项目只改变当前查看内容；后台任务继续在各自 Worker、Profile、Git 仓库和任务记忆中运行。</p></div><button class="primary" type="button" data-hub-add-project>＋ 添加项目</button></div><div class="hub-tabs">${tabs}</div><div class="hub-dashboard-body">${summary}${content}</div></div>`;
   }
@@ -429,9 +429,15 @@
     }
     const action = event.target.closest("[data-hub-knowledge-action]");
     if (action) {
+      if (action.dataset.hubKnowledgeAction === "unpublish") {
+        const confirmed = window.confirm("取消共享这条记忆？\n\n远端条目会被标记为 deprecated，之后不再参与召回。");
+        if (!confirmed) return;
+      }
       await withAction(async () => {
-        await apiForProject(action.dataset.projectId, `/api/tasks/${action.dataset.taskId}/knowledge/${action.dataset.candidateId}/review`, {
-          method: "POST", body: JSON.stringify({ decision: action.dataset.hubKnowledgeAction })
+        const command = action.dataset.hubKnowledgeAction;
+        const suffix = command === "publish" || command === "unpublish" ? command : "review";
+        await apiForProject(action.dataset.projectId, `/api/tasks/${action.dataset.taskId}/knowledge/${action.dataset.candidateId}/${suffix}`, {
+          method: "POST", body: command === "publish" || command === "unpublish" ? "{}" : JSON.stringify({ decision: command })
         });
         await loadHubSection("knowledge");
       });
@@ -454,6 +460,7 @@
     if (mode === "profile") return { profilePath: document.querySelector("#addProjectProfilePath").value.trim() };
     return {
       repoRoot: document.querySelector("#addProjectRepoRoot").value.trim(),
+      repositoryUrl: document.querySelector("#addProjectRepositoryUrl").value.trim(),
       name: document.querySelector("#addProjectName").value.trim(),
       id: document.querySelector("#addProjectId").value.trim()
     };
@@ -468,6 +475,9 @@
         id: result.profile.id,
         name: result.profile.name,
         repoRoot: result.profile.repoRoot,
+        repositoryUrl: result.profile.repositoryUrl || "未检测到（共享记忆关闭）",
+        repositoryKey: result.profile.repositoryKey || "",
+        memory: result.profile.memory || {},
         docsRoot: result.profile.docsRoot,
         worktreesRoot: result.profile.worktreesRoot,
         defaultBaseBranch: result.profile.defaultBaseBranch,
@@ -1909,16 +1919,21 @@
     const statusLabel = ({ pending: "待审核", approved: "已保留", ignored: "已忽略" })[status];
     const scopeLabel = candidate.scope === "global-candidate" ? "跨项目候选" : "当前项目";
     const archived = Boolean(candidate.taskArchivedAt);
+    const published = Boolean(candidate.publishedMemoryId);
+    const previouslyShared = Boolean(candidate.lastUnsharedMemoryId);
     const evidence = (candidate.evidence || []).map((item) => `<li><strong>${escapeHTML(item.source)}</strong> · <span class="mono">${escapeHTML(item.reference)}</span>${item.detail ? ` — ${escapeHTML(item.detail)}` : ""}</li>`).join("");
     const appliesTo = (candidate.appliesTo || []).join("、") || "未限定";
     const nonScope = (candidate.nonScope || []).join("、") || "无";
     const locked = busy || archived;
+    const reviewLocked = locked || published;
     return `<article class="knowledge-card" data-status="${escapeHTML(status)}">
-      <div class="knowledge-card-head"><div><div class="knowledge-badges"><span class="knowledge-badge">${escapeHTML(knowledgeTypeLabels[candidate.type] || candidate.type)}</span><span class="knowledge-badge scope">${escapeHTML(scopeLabel)}</span><span class="knowledge-badge">${escapeHTML(statusLabel)}</span></div><h3>${escapeHTML(candidate.title)}</h3>${center ? `<p class="knowledge-source">来源：${escapeHTML(candidate.taskTitle || "未命名需求")} · ${escapeHTML(formatDateTime(candidate.generatedAt))}${archived ? " · 已归档" : ""}</p>` : ""}</div>${center ? `<button type="button" data-knowledge-task="${escapeHTML(candidate.taskId)}">查看任务</button>` : ""}</div>
+      <div class="knowledge-card-head"><div><div class="knowledge-badges"><span class="knowledge-badge">${escapeHTML(knowledgeTypeLabels[candidate.type] || candidate.type)}</span><span class="knowledge-badge scope">${escapeHTML(scopeLabel)}</span><span class="knowledge-badge">${escapeHTML(statusLabel)}</span>${published ? '<span class="knowledge-badge">已共享</span>' : previouslyShared ? '<span class="knowledge-badge">已取消共享</span>' : ""}</div><h3>${escapeHTML(candidate.title)}</h3>${center ? `<p class="knowledge-source">来源：${escapeHTML(candidate.taskTitle || "未命名需求")} · ${escapeHTML(formatDateTime(candidate.generatedAt))}${archived ? " · 已归档" : ""}</p>` : ""}</div>${center ? `<button type="button" data-knowledge-task="${escapeHTML(candidate.taskId)}">查看任务</button>` : ""}</div>
       <p class="knowledge-card-content">${escapeHTML(candidate.content)}</p>
       <div class="knowledge-meta"><span><strong>适用：</strong>${escapeHTML(appliesTo)}</span><span><strong>不适用：</strong>${escapeHTML(nonScope)}</span><span><strong>建议去向：</strong>${escapeHTML(candidate.suggestedTarget || "待审核时决定")}</span>${candidate.novelty ? `<span><strong>为何值得沉淀：</strong>${escapeHTML(candidate.novelty)}</span>` : ""}</div>
       ${evidence ? `<details><summary>核验证据 · ${(candidate.evidence || []).length}</summary><ul class="knowledge-evidence">${evidence}</ul></details>` : callout("这条候选没有足够的直接证据，建议忽略。", "warning")}
-      <div class="knowledge-card-actions"><button type="button" data-knowledge-review="ignored" data-knowledge-task-id="${escapeHTML(candidate.taskId || task?.id || "")}" data-knowledge-candidate-id="${escapeHTML(candidate.id)}" ${locked || status === "ignored" ? "disabled" : ""}>${status === "ignored" ? "已忽略" : "忽略"}</button><button class="primary" type="button" data-knowledge-review="approved" data-knowledge-task-id="${escapeHTML(candidate.taskId || task?.id || "")}" data-knowledge-candidate-id="${escapeHTML(candidate.id)}" ${locked || status === "approved" ? "disabled" : ""}>${status === "approved" ? "已保留候选" : "保留候选"}</button></div>
+      <div class="knowledge-card-actions"><button type="button" data-knowledge-review="ignored" data-knowledge-task-id="${escapeHTML(candidate.taskId || task?.id || "")}" data-knowledge-candidate-id="${escapeHTML(candidate.id)}" ${reviewLocked || status === "ignored" ? "disabled" : ""}>${status === "ignored" ? "已忽略" : "忽略"}</button><button class="primary" type="button" data-knowledge-review="approved" data-knowledge-task-id="${escapeHTML(candidate.taskId || task?.id || "")}" data-knowledge-candidate-id="${escapeHTML(candidate.id)}" ${reviewLocked || status === "approved" ? "disabled" : ""}>${status === "approved" ? "已保留候选" : "保留候选"}</button>${status === "approved" && published ? `<button type="button" data-knowledge-unpublish data-knowledge-task-id="${escapeHTML(candidate.taskId || task?.id || "")}" data-knowledge-candidate-id="${escapeHTML(candidate.id)}" ${locked || !health?.memory?.configured ? "disabled" : ""}>取消共享</button>` : status === "approved" ? `<button class="primary" type="button" data-knowledge-publish data-knowledge-task-id="${escapeHTML(candidate.taskId || task?.id || "")}" data-knowledge-candidate-id="${escapeHTML(candidate.id)}" ${locked || !health?.memory?.configured ? "disabled" : ""} title="${escapeHTML(!health?.memory?.configured ? "Memory Hub API Key 尚未配置" : "")}">发布到共享记忆</button>` : ""}</div>
+      ${published ? `<p class="hint">Memory ID：<code>${escapeHTML(candidate.publishedMemoryId)}</code> · ${escapeHTML(formatDateTime(candidate.publishedAt))}</p>` : ""}
+      ${!published && previouslyShared ? `<p class="hint">已于 ${escapeHTML(formatDateTime(candidate.unsharedAt))} 取消共享；原 Memory ID：<code>${escapeHTML(candidate.lastUnsharedMemoryId)}</code>。需要时可以重新发布。</p>` : ""}
       ${archived ? '<p class="hint">任务已归档；恢复后才能修改审核状态。</p>' : ""}
     </article>`;
   }
@@ -2153,6 +2168,12 @@
         button.dataset.knowledgeCandidateId,
         button.dataset.knowledgeReview
       );
+    }));
+    document.querySelectorAll("[data-knowledge-publish]").forEach((button) => button.addEventListener("click", () => {
+      publishKnowledge(button.dataset.knowledgeTaskId, button.dataset.knowledgeCandidateId);
+    }));
+    document.querySelectorAll("[data-knowledge-unpublish]").forEach((button) => button.addEventListener("click", () => {
+      unpublishKnowledge(button.dataset.knowledgeTaskId, button.dataset.knowledgeCandidateId);
     }));
     document.querySelectorAll("[data-knowledge-task]").forEach((button) => button.addEventListener("click", () => openKnowledgeTask(button.dataset.knowledgeTask)));
     on("submitAsk", "click", submitAsk);
@@ -2483,6 +2504,36 @@
       const centerActive = ui.module === "knowledge-center";
       if (centerActive) await refreshKnowledgeCenter();
       showToast(decision === "approved" ? "候选已保留在本地审核清单；尚未发布到项目。" : "候选已忽略。" );
+    });
+  }
+
+  async function publishKnowledge(taskId, candidateId) {
+    if (!taskId || !candidateId) return;
+    const confirmed = window.confirm("发布这条已审核候选到共享 Memory Hub？\n\n同一团队成员和其他项目会按范围召回；完整聊天、绝对路径和 API Key 不会上传。");
+    if (!confirmed) return;
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${taskId}/knowledge/${candidateId}/publish`, {});
+      if (task?.id === taskId) {
+        task = result.task;
+        upsertTaskSummary(task);
+      }
+      if (ui.module === "knowledge-center") await refreshKnowledgeCenter();
+      showToast("候选已发布到共享记忆。" );
+    });
+  }
+
+  async function unpublishKnowledge(taskId, candidateId) {
+    if (!taskId || !candidateId) return;
+    const confirmed = window.confirm("取消共享这条记忆？\n\nMemory Hub 会将远端条目标记为 deprecated，后续 DevConductor 和 Codex 不再召回；本地候选仍会保留。\n\n之后可以重新发布。");
+    if (!confirmed) return;
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${taskId}/knowledge/${candidateId}/unpublish`, {});
+      if (task?.id === taskId) {
+        task = result.task;
+        upsertTaskSummary(task);
+      }
+      if (ui.module === "knowledge-center") await refreshKnowledgeCenter();
+      showToast("已取消共享；远端记忆不会再参与召回。" );
     });
   }
 

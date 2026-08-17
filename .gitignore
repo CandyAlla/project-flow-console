@@ -1,5 +1,8 @@
 # Local-only task state: task.json, task-memory.json, attachments, logs, and structured outputs.
 .runtime/
+# Shared Memory Hub database, WAL files, API key, and task memories are runtime-only.
+*.db-wal
+*.db-shm
 __pycache__/
 *.py[cod]
 .DS_Store

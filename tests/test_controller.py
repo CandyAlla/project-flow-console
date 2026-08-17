@@ -2760,6 +2760,92 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(server.WorkflowError, "先恢复"):
             server.review_knowledge_candidate(task_id, candidates[0]["id"], "ignored")
 
+    def test_shared_memory_publish_requires_approval_and_redacts_local_roots(self) -> None:
+        task_id = self.seed_committed_knowledge_task("00000000-0000-0000-0000-000000000077")
+        candidate = {
+            "id": "approved-candidate",
+            "type": "runbook",
+            "title": "Inspect local output",
+            "content": f"Read {self.repo}/Logs/output.log before retrying.",
+            "scope": "project",
+            "appliesTo": [f"files under {self.repo}"],
+            "evidence": [{"source": "file", "reference": f"{self.repo}/Logs/output.log", "detail": f"created in {self.repo}"}],
+            "status": "approved",
+            "reviewedAt": "2026-08-10T12:00:00+08:00",
+        }
+        with server.mutate_task(task_id) as task:
+            task["knowledge"].update({"status": "ready", "candidates": [candidate]})
+        client = mock.Mock()
+        client.create.return_value = {"id": "memory-1"}
+        client.set_status.return_value = {"id": "memory-1", "status": "deprecated"}
+        settings = {"enabled": True, "teamId": "studio", "apiKeyEnv": "MEMORY_KEY"}
+        with (
+            mock.patch.object(server, "MEMORY_SETTINGS", settings),
+            mock.patch.object(server, "PROJECT_KEY", "github.com/example/repo"),
+            mock.patch.object(server, "REPOSITORY_URL", "https://github.com/example/repo.git"),
+            mock.patch.object(server, "REPO_ROOT", self.repo),
+            mock.patch.object(server, "WORKSPACE_ROOT", self.root),
+            mock.patch.object(server, "MemoryClient", return_value=client),
+        ):
+            published = server.publish_knowledge_candidate(task_id, candidate["id"])
+            with self.assertRaisesRegex(server.WorkflowError, "已发布"):
+                server.review_knowledge_candidate(task_id, candidate["id"], "ignored")
+            unpublished = server.unpublish_knowledge_candidate(task_id, candidate["id"])
+            republished = server.publish_knowledge_candidate(task_id, candidate["id"])
+            unpublished_again = server.unpublish_knowledge_candidate(task_id, candidate["id"])
+
+        payload = client.create.call_args.args[0]
+        self.assertNotIn(str(self.root), json.dumps(payload))
+        self.assertIn("<worktree>/Logs/output.log", payload["content"])
+        self.assertEqual(published["knowledge"]["candidates"][0]["publishedMemoryId"], "memory-1")
+        self.assertEqual(client.create.call_count, 2)
+        self.assertEqual(client.create.call_args_list[0].args[0]["sourceKey"], client.create.call_args_list[1].args[0]["sourceKey"])
+        self.assertEqual(client.set_status.call_args_list, [mock.call("memory-1", "deprecated"), mock.call("memory-1", "deprecated")])
+        unpublished_candidate = unpublished["knowledge"]["candidates"][0]
+        self.assertEqual(unpublished_candidate["publishedMemoryId"], "")
+        self.assertEqual(unpublished_candidate["publishedAt"], "")
+        self.assertEqual(unpublished_candidate["lastUnsharedMemoryId"], "memory-1")
+        self.assertTrue(unpublished_candidate["unsharedAt"])
+        republished_candidate = republished["knowledge"]["candidates"][0]
+        self.assertEqual(republished_candidate["publishedMemoryId"], "memory-1")
+        self.assertEqual(republished_candidate["lastUnsharedMemoryId"], "")
+        self.assertEqual(republished_candidate["unsharedAt"], "")
+        self.assertEqual(unpublished_again["knowledge"]["candidates"][0]["lastUnsharedMemoryId"], "memory-1")
+        ignored = server.review_knowledge_candidate(task_id, candidate["id"], "ignored")
+        self.assertEqual(ignored["knowledge"]["candidates"][0]["status"], "ignored")
+
+    def test_shared_memory_unpublish_keeps_local_state_when_remote_update_fails(self) -> None:
+        task_id = self.seed_committed_knowledge_task("00000000-0000-0000-0000-000000000078")
+        candidate = {
+            "id": "published-candidate",
+            "type": "decision",
+            "title": "Keep remote and local state aligned",
+            "content": "Only clear local publication metadata after the Memory Hub confirms deprecation.",
+            "scope": "project",
+            "status": "approved",
+            "reviewedAt": "2026-08-10T12:00:00+08:00",
+            "publishedMemoryId": "memory-2",
+            "publishedAt": "2026-08-10T12:05:00+08:00",
+        }
+        with server.mutate_task(task_id) as task:
+            task["knowledge"].update({"status": "ready", "candidates": [candidate]})
+        client = mock.Mock()
+        client.set_status.side_effect = server.MemoryClientError("hub offline")
+        settings = {"enabled": True, "teamId": "studio", "apiKeyEnv": "MEMORY_KEY"}
+        with (
+            mock.patch.object(server, "MEMORY_SETTINGS", settings),
+            mock.patch.object(server, "PROJECT_KEY", "github.com/example/repo"),
+            mock.patch.object(server, "MemoryClient", return_value=client),
+        ):
+            with self.assertRaisesRegex(server.WorkflowError, "取消共享失败"):
+                server.unpublish_knowledge_candidate(task_id, candidate["id"])
+
+        current = server.get_task_copy(task_id)["knowledge"]["candidates"][0]
+        self.assertEqual(current["publishedMemoryId"], "memory-2")
+        self.assertEqual(current["publishedAt"], "2026-08-10T12:05:00+08:00")
+        self.assertFalse(current.get("lastUnsharedMemoryId"))
+        self.assertFalse(current.get("unsharedAt"))
+
     def test_new_bugfix_withdraws_candidates_from_the_previous_commit(self) -> None:
         task_id = self.seed_committed_knowledge_task("00000000-0000-0000-0000-000000000076")
         with server.mutate_task(task_id) as task:
@@ -2788,6 +2874,9 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('id="generateKnowledge"', app_js)
         self.assertIn('/api/knowledge', app_js)
         self.assertIn('data-knowledge-review', app_js)
+        self.assertIn('data-knowledge-unpublish', app_js)
+        self.assertIn('/unpublish', app_js)
+        self.assertIn('取消共享', app_js)
         self.assertIn("不会自动修改项目文档、Skill 或 Git", app_js)
         self.assertIn('id="knowledgeCenterButton"', index_html)
 

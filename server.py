@@ -30,6 +30,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import quote, unquote, urlparse
 
+from memory_client import (
+    MemoryClient,
+    MemoryClientError,
+    normalize_repository_url,
+    resolve_repository_identity,
+    validate_memory_settings,
+)
+
 try:
     import fcntl
 except ImportError:  # Windows keeps single-project compatibility; Hub global slots require POSIX file locks.
@@ -38,7 +46,7 @@ except ImportError:  # Windows keeps single-project compatibility; Hub global sl
 
 TOOL_DIR = Path(__file__).resolve().parent
 PRODUCT_NAME = "DevConductor"
-PRODUCT_VERSION = "2.6.0"
+PRODUCT_VERSION = "2.7.0"
 SCHEMA_ROOT = TOOL_DIR / "schemas"
 TASK_RUNTIME_CONTRACT = TOOL_DIR / "skills" / "project-flow-setup" / "references" / "task-runtime-contract.md"
 WORKTREE_SCRIPT = TOOL_DIR / "scripts" / "create_git_worktree.py"
@@ -69,6 +77,9 @@ SKILL_CHAINS: dict[str, list[str]] = {}
 VERIFICATION_SOURCES: list[str] = ["应用日志"]
 VERIFICATION_POLICY = "按项目规则完成逻辑验证，并明确区分自动验证与人工验证。"
 INITIALIZE_SUBMODULES = False
+REPOSITORY_URL = ""
+PROJECT_KEY = ""
+MEMORY_SETTINGS: dict[str, Any] = {"enabled": False}
 MAX_BODY_BYTES = 12 * 1024 * 1024
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_SOURCE_TEXT = 240_000
@@ -510,6 +521,17 @@ def validate_project_profile(value: Any, *, require_repo: bool = True) -> dict[s
         if top_level != repo:
             raise WorkflowError(f"repoRoot 必须指向 Git 根目录，实际根目录是：{top_level}")
 
+    try:
+        if require_repo:
+            identity = resolve_repository_identity(repo, profile.get("repositoryUrl"))
+        elif str(profile.get("repositoryUrl") or "").strip():
+            identity = normalize_repository_url(profile.get("repositoryUrl"))
+        else:
+            identity = {"repositoryUrl": "", "projectKey": ""}
+        memory = validate_memory_settings(profile.get("memory"), project_key=identity["projectKey"])
+    except MemoryClientError as exc:
+        raise WorkflowError(f"Project Profile 的共享记忆配置无效：{exc}") from exc
+
     base = str(profile.get("defaultBaseBranch") or "").strip()
     if not base or base.startswith("-") or re.search(r"[\s~^:?*\[\\]", base):
         raise WorkflowError("defaultBaseBranch 不是安全的本地 Git ref。")
@@ -568,6 +590,9 @@ def validate_project_profile(value: Any, *, require_repo: bool = True) -> dict[s
         "skills": normalized_skills,
         "verification": {"sources": normalized_sources, "policy": policy},
         "capabilities": {"initializeSubmodules": bool(capabilities.get("initializeSubmodules", False))},
+        "repositoryUrl": identity["repositoryUrl"],
+        "repositoryKey": identity["projectKey"],
+        "memory": memory,
         "port": port,
     })
     return profile
@@ -594,6 +619,7 @@ def apply_project_profile(
     global RUNTIME_ROOT, TASK_ROOT, PLAN_RELATIVE_DIR, DEFAULT_BASE_BRANCH
     global WORKTREE_NAME_PREFIX, PROJECT_FACTS, SKILL_CHAINS
     global VERIFICATION_SOURCES, VERIFICATION_POLICY, INITIALIZE_SUBMODULES
+    global REPOSITORY_URL, PROJECT_KEY, MEMORY_SETTINGS
 
     validated = validate_project_profile(profile, require_repo=require_repo)
     PROJECT_PROFILE = validated
@@ -615,6 +641,9 @@ def apply_project_profile(
     VERIFICATION_SOURCES = list(validated["verification"]["sources"])
     VERIFICATION_POLICY = validated["verification"]["policy"]
     INITIALIZE_SUBMODULES = validated["capabilities"]["initializeSubmodules"]
+    REPOSITORY_URL = validated["repositoryUrl"]
+    PROJECT_KEY = validated["repositoryKey"]
+    MEMORY_SETTINGS = copy.deepcopy(validated["memory"])
 
 
 def skill_chain_text(stage: str) -> str:
@@ -626,6 +655,35 @@ def project_facts_text() -> str:
     if not PROJECT_FACTS:
         return "先读取仓库根目录的 AGENTS.md（如有）与需求直接相关的最小代码/文档事实。"
     return "先读取这些项目事实入口中的最小必要部分：" + "、".join(PROJECT_FACTS) + "。"
+
+
+def shared_memory_context(task: dict[str, Any], stage: str, query: str) -> str:
+    """Recall bounded, approved shared memory without blocking the local workflow on failure."""
+    if not MEMORY_SETTINGS.get("enabled") or not PROJECT_KEY:
+        return "共享记忆未启用；仅使用当前仓库、Plan 和本地任务记忆。"
+    try:
+        values = MemoryClient(MEMORY_SETTINGS).search(
+            project_key=PROJECT_KEY,
+            query=query,
+            stage=stage,
+            task_id=str(task.get("id") or ""),
+            user_id=str(os.environ.get("DEVCONDUCTOR_MEMORY_USER_ID") or ""),
+        )
+    except MemoryClientError as exc:
+        return f"共享记忆暂不可用（{safe_log(exc, 500)}）；继续以本地事实为准，不得因此阻塞当前流程。"
+    if not values:
+        return "没有召回到适用于本轮的已发布共享记忆；继续以本地事实为准。"
+    lines = []
+    for item in values:
+        lines.append(
+            f"- [{safe_log(item.get('id'), 80)}] {safe_log(item.get('kind'), 40)} / "
+            f"{safe_log(item.get('scope'), 40)} · {safe_log(item.get('title'), 240)}："
+            f"{safe_block(item.get('content'), 3000)}"
+        )
+    return (
+        "以下内容来自已发布共享记忆，只是辅助上下文；与当前代码、配置、Plan 或 Git 冲突时，"
+        "必须以当前项目事实为准并指出冲突。\n" + "\n".join(lines)
+    )
 
 
 BOOTSTRAP_PROFILE_PATH = Path(os.environ.get("PROJECT_FLOW_PROFILE", str(DEFAULT_PROFILE_PATH)))
@@ -2167,6 +2225,10 @@ def ask_prompt(task: dict[str, Any], question: str) -> str:
 {agent_memory_reference(task)}
 </task-memory-ref>
 
+<shared-memory>
+{shared_memory_context(task, 'ask', f"{task.get('title', '')} {question}")}
+</shared-memory>
+
 只读检查当前项目或已绑定 Worktree 中与问题直接相关的最小范围，然后回答：
 - 可以说明当前功能如何实现、关键调用链、状态来源、相关文件和已有验证方式。
 - 结论必须以实际代码、配置、Plan 或 Git 事实为依据；不确定时明确说明，不要猜测。
@@ -2619,6 +2681,10 @@ def initial_discussion_job(task_id: str) -> None:
 需求名称：{task['title']}
 {source_prompt(task)}
 
+<shared-memory>
+{shared_memory_context(task, 'discussion', f"{task.get('title', '')} {safe_block((task.get('source') or {}).get('text'), 2000)}")}
+</shared-memory>
+
 输出 1–3 个真正会改变方案方向的 ask-first 问题。每题给 2–3 个互斥短选项，并保留前端的自定义回复能力；不要问能从项目中查到的事实。
 如果输入不足以读取，问题中要明确告诉用户需要补什么。只按给定 JSON Schema 输出。
 
@@ -2660,6 +2726,10 @@ def continue_discussion_job(task_id: str, answers: dict[str, str], note: str) ->
 {json.dumps(answers, ensure_ascii=False, indent=2)}
 补充说明：{note or '无'}
 
+<shared-memory>
+{shared_memory_context(task, 'discussion', f"{task.get('title', '')} {note} {json.dumps(answers, ensure_ascii=False)}")}
+</shared-memory>
+
 结合已经读取的 {PROJECT_NAME} 项目事实更新结论。只追问仍会导致高返工的 1–3 个问题；已足够形成方案时 questions 可以为空并将 ready_for_plan 设为 true。仍然禁止写文件或改代码。只按 JSON Schema 输出。
 保留首次讨论中已经生成的 worktree_slug，不要因为措辞变化而改名。
 """.strip()
@@ -2688,6 +2758,10 @@ def plan_job(task_id: str, answers: dict[str, str], note: str) -> None:
 用户已结束 discussion-only，并授权生成 Plan 草案。最终回答如下：
 {json.dumps(answers, ensure_ascii=False, indent=2)}
 补充说明：{note or '无'}
+
+<shared-memory>
+{shared_memory_context(task, 'plan', f"{task.get('title', '')} {note} {json.dumps(answers, ensure_ascii=False)}")}
+</shared-memory>
 
 使用 {skill_chain_text('plan')} 生成 {PROJECT_NAME} 的 Solution Plan 与同口径的自包含逻辑验收 HTML。{'读取 ' + PROJECT_PROFILE['planTemplate'] + '；' if PROJECT_PROFILE.get('planTemplate') else ''}此时只产出分析层，不直接实施。
 这是控制台草案阶段，当前 Codex 会话保持 read-only；不要自行写文件。服务端会在结构化结果返回后落地草案，并在用户批准、创建 Worktree 后把 Markdown 写入执行仓库。
@@ -2890,6 +2964,10 @@ Plan：{task['plan']['finalPath']}
 {agent_memory_reference(task)}
 </task-memory-ref>
 
+<shared-memory>
+{shared_memory_context(task, 'execution', f"{task.get('title', '')} {feedback}")}
+</shared-memory>
+
 <static-contract-ref>
 {static_contract_reference()}
 </static-contract-ref>
@@ -2920,6 +2998,10 @@ Plan 仅作为边界参考：{task['plan']['finalPath']}
 <task-memory-ref>
 {agent_memory_reference(task)}
 </task-memory-ref>
+
+<shared-memory>
+{shared_memory_context(task, 'acceptance-fix', f"{task.get('title', '')} {feedback}")}
+</shared-memory>
 
 <static-contract-ref>
 {static_contract_reference()}
@@ -3042,6 +3124,9 @@ def run_review(
     prompt = f"""
 使用 {skill_chain_text('review')} 审查当前 Worktree 的未提交改动是否满足计划：{task['plan']['finalPath']}。
 严格只读，不修文件、不暂存、不提交。按 {PROJECT_NAME} 的需求匹配、owner、生命周期、验证证据和 Git hygiene 审查。
+<shared-memory>
+{shared_memory_context(task, 'review', f"{task.get('title', '')} {' '.join(review_files)} {acceptance_feedback}")}
+</shared-memory>
 {changed_file_scope}
 {focus}
 没有可执行 finding 时 verdict=pass；只要存在 P0-P3 finding 就 verdict=needs_fix。只按 JSON Schema 输出。
@@ -3693,6 +3778,10 @@ Bug 描述：
 {agent_memory_reference(task)}
 </task-memory-ref>
 
+<shared-memory>
+{shared_memory_context(task, 'bugfix', f"{task.get('title', '')} {description}")}
+</shared-memory>
+
 <static-contract-ref>
 {static_contract_reference()}
 </static-contract-ref>
@@ -3947,6 +4036,10 @@ def normalize_knowledge_payload(task: dict[str, Any], payload: dict[str, Any]) -
             "novelty": safe_log(raw.get("novelty"), 1600),
             "status": old_status,
             "reviewedAt": old.get("reviewedAt", "") if old_status != "pending" else "",
+            "publishedMemoryId": old.get("publishedMemoryId", ""),
+            "publishedAt": old.get("publishedAt", ""),
+            "lastUnsharedMemoryId": old.get("lastUnsharedMemoryId", ""),
+            "unsharedAt": old.get("unsharedAt", ""),
         })
     summary = safe_log(payload.get("summary"), 2000)
     if not candidates and not summary:
@@ -4008,9 +4101,131 @@ def review_knowledge_candidate(task_id: str, candidate_id: str, decision: str) -
         candidate = next((item for item in candidates if isinstance(item, dict) and item.get("id") == candidate_id), None)
         if not candidate:
             raise WorkflowError("找不到该沉淀候选，可能已重新生成。")
+        if candidate.get("publishedMemoryId") and decision != "approved":
+            raise WorkflowError("该候选已发布到共享记忆；请先在 Memory Hub 废弃远端条目，不能只改本地审核状态。")
         candidate.update({"status": decision, "reviewedAt": now_iso()})
         label = "保留" if decision == "approved" else "忽略"
         add_event(task, f"沉淀候选已{label}：{safe_log(candidate.get('title'), 240)}。", "ok" if decision == "approved" else "info")
+    return get_task_copy(task_id)
+
+
+def shared_memory_safe_text(task: dict[str, Any], value: Any, limit: int = 20_000) -> str:
+    """Remove this machine's configured roots before content leaves DevConductor."""
+    text = str(value or "")
+    replacements: list[tuple[str, str]] = []
+    worktree = str((task.get("worktree") or {}).get("path") or "").strip()
+    for raw, label in (
+        (worktree, "<worktree>"),
+        (str(REPO_ROOT), "<repo>"),
+        (str(DOCS_ROOT), "<docs>"),
+        (str(WORKSPACE_ROOT), "<workspace>"),
+    ):
+        if raw and Path(raw).is_absolute():
+            replacements.append((raw.rstrip("/"), label))
+    unique = list(dict.fromkeys(replacements))
+    for raw, label in sorted(unique, key=lambda item: len(item[0]), reverse=True):
+        text = text.replace(raw, label)
+    return text[:limit]
+
+
+def publish_knowledge_candidate(task_id: str, candidate_id: str) -> dict[str, Any]:
+    task = get_task_copy(task_id)
+    if task.get("archivedAt"):
+        raise WorkflowError("任务已归档，请先恢复后再发布共享记忆。")
+    if task.get("activeJob"):
+        raise WorkflowError("任务正在执行，完成后再发布共享记忆。")
+    candidates = task.get("knowledge", {}).get("candidates") or []
+    candidate = next((item for item in candidates if isinstance(item, dict) and item.get("id") == candidate_id), None)
+    if not candidate:
+        raise WorkflowError("找不到该沉淀候选，可能已重新生成。")
+    if candidate.get("status") != "approved":
+        raise WorkflowError("只有人工保留后的候选才能发布到共享记忆。")
+    if candidate.get("publishedMemoryId"):
+        return task
+    if not MEMORY_SETTINGS.get("enabled") or not PROJECT_KEY:
+        raise WorkflowError("当前项目没有启用共享记忆，或缺少可共享的 Git repositoryUrl。")
+    scope = "project" if candidate.get("scope") == "project" else "team"
+    shared_evidence = []
+    for item in (candidate.get("evidence") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        shared_evidence.append({
+            "source": safe_log(item.get("source"), 80),
+            "reference": shared_memory_safe_text(task, item.get("reference"), 1200),
+            "detail": shared_memory_safe_text(task, item.get("detail"), 1600),
+        })
+    try:
+        memory = MemoryClient(MEMORY_SETTINGS).create({
+            "teamId": MEMORY_SETTINGS["teamId"],
+            "projectKey": PROJECT_KEY,
+            "repositoryUrl": REPOSITORY_URL,
+            "taskId": task_id,
+            "userId": str(os.environ.get("DEVCONDUCTOR_MEMORY_USER_ID") or ""),
+            "scope": scope,
+            "kind": candidate.get("type") or "note",
+            "title": shared_memory_safe_text(task, candidate.get("title"), 240),
+            "content": shared_memory_safe_text(task, candidate.get("content")),
+            "tags": [shared_memory_safe_text(task, item, 300) for item in (candidate.get("appliesTo") or [])[:20]],
+            "evidence": shared_evidence,
+            "status": "active",
+            "source": "devconductor",
+            "sourceKey": f"devconductor:{PROJECT_KEY}:{task_id}:{candidate_id}",
+            "createdBy": str(os.environ.get("DEVCONDUCTOR_MEMORY_USER_ID") or "devconductor"),
+        })
+    except MemoryClientError as exc:
+        raise WorkflowError(f"共享记忆发布失败：{safe_log(exc, 1200)}") from exc
+    memory_id = safe_log(memory.get("id"), 160)
+    if not memory_id:
+        raise WorkflowError("Memory Hub 未返回有效的 Memory ID。")
+    with mutate_task(task_id) as live:
+        values = live.get("knowledge", {}).get("candidates") or []
+        target = next((item for item in values if isinstance(item, dict) and item.get("id") == candidate_id), None)
+        if not target or target.get("status") != "approved":
+            raise WorkflowError("候选状态已变化，停止记录发布结果。")
+        target.update({
+            "publishedMemoryId": memory_id,
+            "publishedAt": now_iso(),
+            "lastUnsharedMemoryId": "",
+            "unsharedAt": "",
+        })
+        add_event(live, f"沉淀候选已发布到共享记忆：{safe_log(target.get('title'), 240)}。", "ok")
+    return get_task_copy(task_id)
+
+
+def unpublish_knowledge_candidate(task_id: str, candidate_id: str) -> dict[str, Any]:
+    task = get_task_copy(task_id)
+    if task.get("archivedAt"):
+        raise WorkflowError("任务已归档，请先恢复后再取消共享。")
+    if task.get("activeJob"):
+        raise WorkflowError("任务正在执行，完成后再取消共享。")
+    candidates = task.get("knowledge", {}).get("candidates") or []
+    candidate = next((item for item in candidates if isinstance(item, dict) and item.get("id") == candidate_id), None)
+    if not candidate:
+        raise WorkflowError("找不到该沉淀候选，可能已重新生成。")
+    memory_id = safe_log(candidate.get("publishedMemoryId"), 160)
+    if not memory_id:
+        return task
+    if not MEMORY_SETTINGS.get("enabled") or not PROJECT_KEY:
+        raise WorkflowError("当前项目没有启用共享记忆，无法确认远端条目已停止召回。")
+    try:
+        memory = MemoryClient(MEMORY_SETTINGS).set_status(memory_id, "deprecated")
+    except MemoryClientError as exc:
+        raise WorkflowError(f"取消共享失败：{safe_log(exc, 1200)}") from exc
+    if memory.get("status") != "deprecated":
+        raise WorkflowError("Memory Hub 没有确认远端条目已废弃，本地状态保持不变。")
+    stamp = now_iso()
+    with mutate_task(task_id) as live:
+        values = live.get("knowledge", {}).get("candidates") or []
+        target = next((item for item in values if isinstance(item, dict) and item.get("id") == candidate_id), None)
+        if not target or target.get("publishedMemoryId") != memory_id:
+            raise WorkflowError("候选共享状态已变化，停止记录取消结果。")
+        target.update({
+            "publishedMemoryId": "",
+            "publishedAt": "",
+            "lastUnsharedMemoryId": memory_id,
+            "unsharedAt": stamp,
+        })
+        add_event(live, f"已取消共享并废弃远端记忆：{safe_log(target.get('title'), 240)}。", "warning")
     return get_task_copy(task_id)
 
 
@@ -4359,6 +4574,10 @@ def health_payload() -> dict[str, Any]:
     missing_facts = [relative for relative in PROJECT_FACTS if not (REPO_ROOT / relative).exists()]
     if missing_facts:
         warnings.append("Project Profile 中这些事实入口当前不存在：" + "、".join(missing_facts))
+    memory_client = MemoryClient(MEMORY_SETTINGS)
+    memory_configured = bool(memory_client.enabled and memory_client.api_key())
+    if MEMORY_SETTINGS.get("enabled") and not memory_configured:
+        warnings.append(f"共享记忆已启用，但缺少 {MEMORY_SETTINGS.get('apiKeyEnv')}；本地工作流仍可继续。")
     return {
         "ok": REPO_ROOT.is_dir() and WORKTREE_SCRIPT.is_file() and codex_ready,
         "service": f"{PRODUCT_NAME} Controller",
@@ -4381,6 +4600,7 @@ def health_payload() -> dict[str, Any]:
             "quickMode": True,
             "larkCliReader": True,
             "knowledge": True,
+            "sharedMemory": bool(MEMORY_SETTINGS.get("enabled")),
         },
         "readers": {
             "chromeMcp": {
@@ -4408,6 +4628,15 @@ def health_payload() -> dict[str, Any]:
             "name": PROJECT_NAME,
             "defaultBaseBranch": DEFAULT_BASE_BRANCH,
             "worktreeNamePrefix": WORKTREE_NAME_PREFIX,
+            "repositoryUrl": REPOSITORY_URL,
+            "repositoryKey": PROJECT_KEY,
+        },
+        "memory": {
+            "enabled": bool(MEMORY_SETTINGS.get("enabled")),
+            "configured": memory_configured,
+            "endpoint": MEMORY_SETTINGS.get("endpoint", ""),
+            "teamId": MEMORY_SETTINGS.get("teamId", ""),
+            "apiKeyEnv": MEMORY_SETTINGS.get("apiKeyEnv", ""),
         },
         "profile": {"path": str(PROFILE_PATH), "schemaVersion": PROJECT_PROFILE["schemaVersion"]},
         "paths": {
@@ -4427,7 +4656,7 @@ def health_payload() -> dict[str, Any]:
 
 
 class WorkflowHandler(BaseHTTPRequestHandler):
-    server_version = "DevConductor/2.6"
+    server_version = "DevConductor/2.7"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(f"[{now_iso()}] {self.client_address[0]} {fmt % args}\n")
@@ -4575,6 +4804,16 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "task": review_knowledge_candidate(task_id, candidate_id, str(payload.get("decision") or "")),
                 })
+                return
+            knowledge_publish = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/knowledge/([A-Za-z0-9-]+)/publish", path)
+            if knowledge_publish:
+                task_id, candidate_id = knowledge_publish.groups()
+                self.send_json({"ok": True, "task": publish_knowledge_candidate(task_id, candidate_id)})
+                return
+            knowledge_unpublish = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/knowledge/([A-Za-z0-9-]+)/unpublish", path)
+            if knowledge_unpublish:
+                task_id, candidate_id = knowledge_unpublish.groups()
+                self.send_json({"ok": True, "task": unpublish_knowledge_candidate(task_id, candidate_id)})
                 return
             match = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/(discussion|plan|plan/approve|worktree|execute|cancel|verification|commit/confirm-manual|commit|bugfix|knowledge|ask|app/open|app/disconnect|app/new)", path)
             if not match:

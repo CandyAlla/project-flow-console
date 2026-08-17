@@ -4,6 +4,7 @@
   "name": "Example Project",
   "workspaceRoot": "/absolute/path/to/example-workspace",
   "repoRoot": "/absolute/path/to/example-workspace/repository",
+  "repositoryUrl": "https://github.com/example/example-project.git",
   "docsRoot": "/absolute/path/to/example-workspace/project-docs",
   "worktreesRoot": "/absolute/path/to/example-workspace/worktrees",
   "htmlTaskRoot": "/absolute/path/to/example-workspace/project-docs/tasks/active",
@@ -43,6 +44,15 @@
   },
   "capabilities": {
     "initializeSubmodules": false
+  },
+  "memory": {
+    "enabled": false,
+    "endpoint": "http://127.0.0.1:4328",
+    "teamId": "default",
+    "apiKeyEnv": "DEVCONDUCTOR_MEMORY_API_KEY",
+    "maxItems": 8,
+    "maxChars": 6000,
+    "timeoutMs": 1500
   },
   "port": 4318
 }

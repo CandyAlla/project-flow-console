@@ -148,6 +148,39 @@ class ProjectProfileTests(unittest.TestCase):
         self.assertEqual(detached.returncode, 2)
         self.assertIn("detached HEAD", detached.stderr)
 
+    def test_setup_reads_origin_and_allows_repository_identity_override(self) -> None:
+        self.assertEqual(run(["git", "remote", "add", "origin", "git@github.com:Example/Sample.git"], self.repo).returncode, 0)
+        command = [
+            "python3", str(SETUP_SCRIPT), str(self.repo), "--profiles-dir", str(self.root / "profiles"),
+            "--id", "sample-project", "--managed-root", str(self.root / "managed"), "--dry-run",
+        ]
+        automatic = self.profile_from_output(run(command))
+        self.assertEqual(automatic["repositoryUrl"], "https://github.com/Example/Sample.git")
+        self.assertTrue(automatic["memory"]["enabled"])
+
+        override = self.profile_from_output(run([*command, "--repository-url", "https://git.example.test/Studio/Shared.git"]))
+        self.assertEqual(override["repositoryUrl"], "https://git.example.test/Studio/Shared.git")
+
+    def test_local_origin_disables_shared_identity_without_blocking_setup(self) -> None:
+        local_mirror = self.root / "local-mirror.git"
+        self.assertEqual(run(["git", "remote", "add", "origin", str(local_mirror)], self.repo).returncode, 0)
+        result = run([
+            "python3", str(SETUP_SCRIPT), str(self.repo), "--profiles-dir", str(self.root / "profiles"),
+            "--id", "sample-project", "--managed-root", str(self.root / "managed"), "--dry-run",
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        profile = self.profile_from_output(result)
+        self.assertEqual(profile["repositoryUrl"], "")
+        self.assertFalse(profile["memory"]["enabled"])
+        self.assertIn("shared memory stays disabled", result.stderr)
+
+        rejected = run([
+            "python3", str(SETUP_SCRIPT), str(self.repo), "--profiles-dir", str(self.root / "profiles"),
+            "--id", "sample-project", "--repository-url", str(local_mirror), "--dry-run",
+        ])
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("Invalid repository URL", rejected.stderr)
+
     def test_generic_worktree_provider_dry_run_and_create(self) -> None:
         parent = self.root / "worktrees"
         command = [

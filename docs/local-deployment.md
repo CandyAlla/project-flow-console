@@ -6,6 +6,8 @@
 
 推荐模式是：共享同一个 GitHub 工具仓库，但每个人分别维护自己的 Project Profile、任务状态、项目仓库和 Worktree。不要把控制台部署成一台多人共用的远程服务。
 
+需要跨电脑、跨成员共享稳定工程记忆时，只共享独立的 Memory Hub，不共享控制台本身。Memory Hub 的部署、API Key、SQLite 备份和 Codex Plugin 配置见 [共享 Memory Hub 与 Codex Plugin](memory-hub.md)。
+
 ## 一、部署模型
 
 每位使用者的电脑上包含四类内容：
@@ -333,8 +335,10 @@ git pull --ff-only
 - `.runtime/hub/projects.json`
 - `.runtime/hub/logs/`
 - `.runtime/hub/job-slots/`
+- `.runtime/memory/memory.db`
+- `.runtime/memory/api-key`
 
-如需备份任务状态，可在停止服务后备份 `.runtime/<project-id>`。不要把其中的需求文档、日志、截图或绝对路径提交到公共 GitHub 仓库。
+如需备份任务状态，可在停止服务后备份 `.runtime/<project-id>`。本机 Memory Hub 则备份 `.runtime/memory`。不要把其中的需求文档、日志、截图、记忆数据库、API Key 或绝对路径提交到公共 GitHub 仓库。
 
 ## 十一、分享给同事时应提供什么
 

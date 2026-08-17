@@ -15,6 +15,11 @@ from typing import Any
 
 
 TOOL_DIR = Path(__file__).resolve().parents[3]
+if str(TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOL_DIR))
+
+from memory_client import MemoryClientError, resolve_repository_identity, validate_memory_settings  # noqa: E402
+
 DEFAULT_PROFILES_DIR = TOOL_DIR / "profiles"
 PROFILE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 PREFIX_PATTERN = re.compile(r"^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
@@ -210,6 +215,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--html-task-root", help="Absolute HTML task root inside docsRoot")
     parser.add_argument("--base", help="Existing local base branch/ref; defaults to current branch")
     parser.add_argument("--worktree-prefix", help="Safe Worktree directory prefix")
+    parser.add_argument("--repository-url", help="Shared project identity override; defaults to Git origin")
+    parser.add_argument("--memory-endpoint", default="http://127.0.0.1:4328", help="Shared Memory Hub origin")
+    parser.add_argument("--memory-team", default="default", help="Shared Memory Hub team id")
+    parser.add_argument("--disable-memory", action="store_true", help="Keep shared memory disabled for this Profile")
     parser.add_argument("--plan-dir", help="Plan destination relative to Worktree; defaults from existing Docs/Doc layout")
     parser.add_argument("--fact", action="append", help="Repository-relative fact entrypoint; repeatable")
     parser.add_argument("--plan-template", help="Optional repository-relative planning template")
@@ -235,6 +244,10 @@ def build_parser() -> argparse.ArgumentParser:
 def configure(args: argparse.Namespace) -> tuple[dict[str, Any], Path, list[str]]:
     input_path = require_absolute(args.project, "project")
     repo = resolve_repo(input_path)
+    try:
+        repository_identity = resolve_repository_identity(repo, args.repository_url)
+    except MemoryClientError as exc:
+        raise SetupError(f"Invalid repository URL: {exc}") from exc
     current_branch = run_git(repo, ["branch", "--show-current"]).stdout.strip()
     project_name = (args.name or repo.name).strip()
     if not project_name or len(project_name) > 80:
@@ -294,12 +307,28 @@ def configure(args: argparse.Namespace) -> tuple[dict[str, Any], Path, list[str]
         warnings.append(f"docsRoot does not exist yet; the console will create it on startup: {docs}")
     if not args.worktrees_root and detected_worktrees is None:
         warnings.append(f"No existing Worktree root detected; using managed fallback: {worktrees}")
+    memory_enabled = bool(repository_identity["projectKey"] and not args.disable_memory)
+    if not repository_identity["projectKey"]:
+        warnings.append("No shareable Git origin was detected; shared memory stays disabled until repositoryUrl is configured.")
+    try:
+        memory = validate_memory_settings({
+            "enabled": memory_enabled,
+            "endpoint": args.memory_endpoint,
+            "teamId": args.memory_team,
+            "apiKeyEnv": "DEVCONDUCTOR_MEMORY_API_KEY",
+            "maxItems": 8,
+            "maxChars": 6000,
+            "timeoutMs": 1500,
+        }, project_key=repository_identity["projectKey"])
+    except MemoryClientError as exc:
+        raise SetupError(f"Invalid memory configuration: {exc}") from exc
     profile = {
         "schemaVersion": 1,
         "id": project_id,
         "name": project_name,
         "workspaceRoot": str(workspace),
         "repoRoot": str(repo),
+        "repositoryUrl": repository_identity["repositoryUrl"],
         "docsRoot": str(docs),
         "worktreesRoot": str(worktrees),
         "htmlTaskRoot": str(html_root),
@@ -311,6 +340,7 @@ def configure(args: argparse.Namespace) -> tuple[dict[str, Any], Path, list[str]
         "skills": skills,
         "verification": {"sources": sources, "policy": args.verification_policy.strip()},
         "capabilities": {"initializeSubmodules": bool(init_submodules)},
+        "memory": memory,
         "port": args.port,
     }
     return profile, profile_path, warnings

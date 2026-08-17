@@ -1394,6 +1394,7 @@
         </div>
         <div id="addProjectRepoFields">
           <div class="field"><label for="addProjectRepoRoot">Git 项目根目录</label><input class="mono" id="addProjectRepoRoot" type="text" placeholder="/absolute/path/to/project"><span class="hint">只读扫描 Git、项目规则和目录惯例；确认后仅生成 Profile，不创建 Worktree。</span></div>
+          <div class="field"><label for="addProjectRepositoryUrl">共享项目 Git 地址（可选覆盖）</label><input class="mono" id="addProjectRepositoryUrl" type="url" placeholder="默认自动读取 git remote origin"><span class="hint">用于跨电脑识别同一项目；不会使用本机绝对路径。SSH、HTTPS 和 scp 风格地址会规范化为同一个项目身份。</span></div>
           <div class="field"><label for="addProjectName">显示名称（可选）</label><input id="addProjectName" type="text" placeholder="默认使用仓库目录名"></div>
           <div class="field"><label for="addProjectId">项目 ID（可选）</label><input class="mono" id="addProjectId" type="text" placeholder="lowercase-kebab-case"></div>
         </div>
@@ -1410,7 +1411,7 @@
   </dialog>
 
   <footer>
-    本页只连接 127.0.0.1 本地服务和本机 Codex App Server。生成文档、创建 Worktree、执行、Commit、Bug 修复与沉淀提炼均需单独点击；沉淀候选仅保存在本地运行目录，不会自动发布；不会自动 Push 或 Merge。
+    本页只连接配置的 DevConductor 服务和本机 Codex App Server。生成文档、创建 Worktree、执行、Commit、Bug 修复与沉淀提炼均需单独点击；沉淀候选经过“保留”与“发布”两次确认后才会进入共享 Memory Hub；不会自动 Push 或 Merge。
   </footer>
 
   <div class="toast" id="toast" role="status" hidden></div>

@@ -2,7 +2,7 @@
 
 > **AI 开发指挥台 · 从需求到可信提交**
 
-> [本机部署指南与目录选择策略](docs/local-deployment.md)
+> [本机部署指南与目录选择策略](docs/local-deployment.md) · [共享 Memory Hub 与 Codex Plugin](docs/memory-hub.md)
 
 DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 
@@ -51,7 +51,9 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 - Commit 前重新校验真实 Git 状态，防止确认后文件又发生变化。
 - Commit 后发现问题时，复用当前 Worktree 和任务记忆，在 Bug 修复模块内完成定向修改、Review、复验和新 Commit，不重新执行 Plan。
 - Commit 与 Bug 修复闭环后，可只读生成最多 5 条 AI 沉淀候选；候选按稳定事实、决策、手册、踩坑、验收规律、Skill 或自动化分类，并保留直接证据。
-- 任务级“沉淀”阶段和跨任务“沉淀中心”支持保留或忽略候选；审核只更新 `.runtime`，不会自动修改项目文档、Skill、代码或 Git。
+- 任务级“沉淀”阶段和跨任务“沉淀中心”支持保留、忽略、二次确认发布和取消共享；候选审核只更新 `.runtime`，只有单独点击“发布到共享记忆”才写入 Memory Hub。
+- 已共享候选可以随时取消共享：远端记忆会转为 `deprecated` 并停止召回，本地保留原 Memory ID 与取消时间，之后仍可重新发布。
+- 内置轻量 SQLite Memory Hub；DevConductor 工作流和可独立安装的 Codex Plugin 共用同一后端，按 Git `origin` 识别项目并支持手动覆盖，不使用本机路径作为共享身份。
 - 每个任务提供独立 Ask 只读问答，可询问当前实现、状态来源、相关文件和修改影响范围，不改变任务阶段。
 - 多需求队列可切换查看，支持归档、删除、恢复和有限并行。
 - Project Hub 统一展示所有项目、全部任务和跨项目沉淀；左侧项目轨道可随时切换，后台任务不会因切换视图而停止。
@@ -82,6 +84,8 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 DevConductor/
 ├── hub.py                         # 多项目 Hub、Worker 路由与全局并发门禁
 ├── server.py
+├── memory_hub.py                  # 可独立部署的共享记忆 HTTP 服务
+├── memory_client.py               # 工作流侧 Memory Hub 客户端
 ├── app.js
 ├── index.html
 ├── start.command
@@ -92,6 +96,8 @@ DevConductor/
 │   └── create_git_worktree.py        # 通用 Git Worktree provider
 ├── skills/
 │   └── project-flow-setup/            # 为新项目生成 Profile 的 Skill
+├── plugins/
+│   └── devconductor-memory/       # 可独立安装的 Codex Memory Plugin
 └── tests/
 ```
 
@@ -102,6 +108,8 @@ DevConductor/
 .runtime/hub/projects.json         # 工具目录外 Profile 的本机路径引用
 .runtime/hub/logs/                 # 各项目 Worker 日志
 .runtime/hub/job-slots/            # 跨项目并发锁
+.runtime/memory/memory.db          # 本机 Memory Hub 数据库
+.runtime/memory/api-key            # 自动生成的本机 API Key
 ```
 
 不同 Profile 的任务队列和任务记忆互相隔离，`.runtime/` 已加入 `.gitignore`。
@@ -395,6 +403,7 @@ Profile 是控制台与项目之间唯一的配置协议。核心示例：
   "name": "My Project",
   "workspaceRoot": "/absolute/path/to/workspace",
   "repoRoot": "/absolute/path/to/workspace/my-project",
+  "repositoryUrl": "https://github.com/team/my-project.git",
   "docsRoot": "/absolute/path/to/workspace/MyProjectDocs",
   "worktreesRoot": "/absolute/path/to/workspace/worktrees",
   "htmlTaskRoot": "/absolute/path/to/workspace/MyProjectDocs/Tasks/进行中",
@@ -421,6 +430,15 @@ Profile 是控制台与项目之间唯一的配置协议。核心示例：
   "capabilities": {
     "initializeSubmodules": false
   },
+  "memory": {
+    "enabled": true,
+    "endpoint": "http://127.0.0.1:4328",
+    "teamId": "my-team",
+    "apiKeyEnv": "DEVCONDUCTOR_MEMORY_API_KEY",
+    "maxItems": 8,
+    "maxChars": 6000,
+    "timeoutMs": 1500
+  },
   "port": 4318
 }
 ```
@@ -429,6 +447,7 @@ Profile 是控制台与项目之间唯一的配置协议。核心示例：
 
 - 所有根目录必须使用绝对路径。
 - `repoRoot` 必须是准确的 Git 根目录。
+- `repositoryUrl` 默认从 Git `origin` 自动读取，也可手动覆盖；SSH、HTTPS 和 scp 风格地址会规范化为同一个项目 key，本机绝对路径不会参与共享身份。
 - `worktreesRoot` 不能等于或位于 `repoRoot` 内部。
 - `htmlTaskRoot` 必须位于 `docsRoot` 内。
 - `planRelativeDir`、`projectFacts` 和 `planTemplate` 必须是仓库内相对路径，不能包含 `..`。
@@ -462,6 +481,14 @@ python3 server.py
 它不是“每个需求常驻一个一直运行的 Agent”。后台 Worker 只在阶段执行时占用资源，任务上下文通过结构化状态、Codex session id、Plan 和 Git 指纹恢复。
 
 为避免每轮反复发送完整上下文，DevConductor 使用增量 Prompt：稳定执行规则保存在工具 Skill 的版本化契约中；持久任务事实写入任务目录下的 `task-memory.json`，Prompt 只传绝对路径和 SHA-256；每轮只补充新增要求、Review findings、受影响文件和需要重新确认的验收项。旧任务会在服务启动时自动生成记忆引用，不需要迁移。
+
+## 共享 Memory Hub
+
+`start.command` 默认在 `127.0.0.1:4328` 启动本机 Memory Hub。各工作流阶段会限量召回当前 Task、Project、Team 与已批准全局记忆；后端不可用时自动退化到当前代码、Plan、Git 和本地 `task-memory.json`，不会卡住任务。
+
+已共享记忆可在任务沉淀卡片或跨项目沉淀中心点击“取消共享”。DevConductor 会先要求 Memory Hub 将远端状态改为 `deprecated`，确认成功后才清空本地发布标记；取消后不会再参与正常召回，并可使用同一候选重新发布。
+
+真实记忆、SQLite 数据库、API Key、任务状态、聊天和日志都不提交到本仓库。GitHub 中只包含 Memory Hub 功能代码、Profile Schema、Codex Plugin 与部署说明。团队共享部署、权限边界、备份和 Plugin 配置见 [共享 Memory Hub 与 Codex Plugin](docs/memory-hub.md)。
 
 ## 飞书 / Lark 文档
 

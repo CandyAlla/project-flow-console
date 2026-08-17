@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "devconductor-memory": {
+      "command": "python3",
+      "args": ["./scripts/memory_mcp.py"],
+      "cwd": "${PLUGIN_ROOT}",
+      "env_vars": [
+        "DEVCONDUCTOR_MEMORY_ENDPOINT",
+        "DEVCONDUCTOR_MEMORY_API_KEY",
+        "DEVCONDUCTOR_MEMORY_API_KEY_FILE",
+        "DEVCONDUCTOR_MEMORY_TEAM_ID",
+        "DEVCONDUCTOR_MEMORY_USER_ID",
+        "DEVCONDUCTOR_REPOSITORY_URL"
+      ]
+    }
+  }
+}
