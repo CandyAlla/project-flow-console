@@ -242,8 +242,18 @@
     .project-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
     .project-card-head h3 { font-size: 1.05rem; }
     .project-card-head p { margin: 3px 0 0; color: var(--muted); font-size: .76rem; overflow-wrap: anywhere; }
-    .project-worker-state { padding: 2px 7px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: .7rem; font-weight: 800; }
+    .project-worker-state { padding: 2px 7px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: .7rem; font-weight: 800; white-space: nowrap; }
     .project-worker-state.running { background: var(--ok-soft); color: var(--ok); }
+    .project-worker-state.pending { background: var(--warning-soft); color: var(--warning); }
+    .project-card-paths { display: grid; gap: 9px; padding: 11px 12px; border: 1px solid var(--line); background: #fbfcfe; }
+    .project-card-path { min-width: 0; }
+    .project-card-path > span { display: block; margin-bottom: 3px; color: var(--muted); font-size: .7rem; font-weight: 750; }
+    .project-card-path > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .project-card-path a, .project-card-path code { min-width: 0; overflow: hidden; color: var(--accent-strong); font-size: .74rem; text-overflow: ellipsis; white-space: nowrap; }
+    .project-card-path code { flex: 1; color: var(--ink); }
+    .project-card-path a:hover { text-decoration: underline; }
+    .project-card-path button { flex: 0 0 auto; padding: 4px 7px; font-size: .7rem; }
+    .project-path-empty { color: var(--muted); font-size: .74rem; }
     .project-card-counts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); background: var(--line); }
     .project-card-counts div { padding: 9px 8px; background: #fbfcfe; text-align: center; }
     .project-card-counts strong, .project-card-counts span { display: block; }
@@ -273,6 +283,11 @@
     .project-dialog-body { padding: 20px 22px; }
     .project-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px 20px; border-top: 1px solid var(--line); }
     .project-preview { max-height: 240px; margin: 18px 0 0; padding: 12px; overflow: auto; border: 1px solid var(--line); background: var(--code); color: #354252; font-size: .78rem; white-space: pre-wrap; }
+    .project-config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; }
+    .project-config-grid .field.full { grid-column: 1 / -1; }
+    .project-config-grid .field { min-width: 0; }
+    .project-config-grid input { min-width: 0; }
+    .project-config-notice { margin: 0 0 16px; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); color: #40527d; font-size: .8rem; line-height: 1.55; }
 
     .task-sidebar,
     .workflow-sidebar {
@@ -1201,6 +1216,303 @@
 
     footer { padding: 22px 0 44px; color: var(--muted); font-size: .86rem; }
 
+    /* Visual polish: preserve the existing layout and interaction structure. */
+    :root {
+      --ink: #1d2939;
+      --muted: #667085;
+      --line: #e4e7ec;
+      --line-strong: #cfd5de;
+      --surface: #ffffff;
+      --soft: #f6f8fb;
+      --accent: #3f5fc4;
+      --accent-strong: #30499a;
+      --accent-soft: #eef2ff;
+      --ok: #18794e;
+      --ok-soft: #ecfdf3;
+      --warning: #9a6700;
+      --warning-soft: #fff8e6;
+      --danger: #b42318;
+      --danger-soft: #fff1f0;
+      --code: #f1f4f8;
+    }
+
+    html { background: #f3f5f8; }
+
+    body {
+      color: var(--ink);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    header {
+      border-bottom-color: #dde2ea;
+      background: rgb(255 255 255 / 96%);
+      box-shadow: 0 1px 0 rgb(16 24 40 / 3%);
+    }
+
+    h1, h2, h3, .eyebrow, .section-kicker { letter-spacing: 0; }
+    h1 { color: #162033; font-weight: 780; }
+    h2 { color: #1b2638; font-weight: 760; }
+    h3 { color: #263247; }
+    .eyebrow { color: #4b62a8; }
+    .lede { color: #536174; }
+
+    .prototype-badge {
+      border-color: #b8d8c7;
+      background: #f0faf5;
+      color: #286849;
+      box-shadow: 0 1px 2px rgb(16 24 40 / 5%);
+    }
+
+    .prototype-badge::before { background: #2f9e69; box-shadow: 0 0 0 3px #d9f2e5; }
+
+    button,
+    .app-link-button {
+      border-color: var(--line-strong);
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgb(16 24 40 / 4%);
+      font-weight: 620;
+      transition: border-color .16s ease, background-color .16s ease, color .16s ease, box-shadow .16s ease, transform .16s ease;
+    }
+
+    button:hover:not(:disabled),
+    .app-link-button:hover {
+      border-color: #aeb7c4;
+      background: #f8fafc;
+      box-shadow: 0 3px 8px rgb(16 24 40 / 7%);
+      transform: translateY(-1px);
+    }
+
+    button:active:not(:disabled), .app-link-button:active { transform: translateY(0); }
+
+    button.primary,
+    .app-link-button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      box-shadow: 0 2px 5px rgb(63 95 196 / 22%);
+    }
+
+    button.primary:hover:not(:disabled),
+    .app-link-button.primary:hover {
+      border-color: var(--accent-strong);
+      background: var(--accent-strong);
+      box-shadow: 0 5px 12px rgb(48 73 154 / 24%);
+    }
+
+    button.ghost { box-shadow: none; }
+    button.danger { border-color: #efc1bd; background: #fffafa; color: var(--danger); }
+
+    button:focus-visible,
+    .app-link-button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible,
+    .image-drop-zone:focus-visible,
+    summary:focus-visible {
+      outline: 0;
+      box-shadow: 0 0 0 3px rgb(63 95 196 / 20%);
+    }
+
+    input[type="text"],
+    input[type="url"],
+    select,
+    textarea {
+      border-color: #cfd6e0;
+      border-radius: 8px;
+      box-shadow: inset 0 1px 2px rgb(16 24 40 / 3%);
+      transition: border-color .16s ease, box-shadow .16s ease, background-color .16s ease;
+    }
+
+    input[type="text"]:hover,
+    input[type="url"]:hover,
+    select:hover,
+    textarea:hover { border-color: #aeb8c6; }
+
+    input[type="text"]:focus,
+    input[type="url"]:focus,
+    select:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgb(63 95 196 / 12%);
+    }
+
+    code { color: #334155; }
+
+    .project-rail {
+      border-color: #263345;
+      border-radius: 12px;
+      background: #182230;
+      box-shadow: 0 8px 24px rgb(16 24 40 / 16%);
+    }
+
+    .project-rail-button {
+      border-radius: 10px;
+      background: #2a3749;
+      box-shadow: none;
+    }
+
+    .project-rail-button:hover:not(:disabled) { background: #35455b; transform: none; }
+    .project-rail-button.active { border-color: #9eb0f2; background: var(--accent); box-shadow: 0 4px 12px rgb(12 20 34 / 30%); }
+
+    .task-sidebar,
+    .workflow-sidebar,
+    .workspace,
+    .hub-dashboard-shell {
+      border-color: #dfe4eb;
+      border-radius: 12px;
+      box-shadow: 0 4px 16px rgb(16 24 40 / 5%);
+    }
+
+    .task-sidebar-head,
+    .sidebar-head,
+    .workspace-header,
+    .hub-dashboard-head { background: #fbfcfe; }
+
+    .task-filters,
+    .hub-tabs { background: #f5f7fa; }
+
+    .task-filter,
+    .hub-tab { box-shadow: none; }
+
+    .task-filter.active,
+    .hub-tab.active {
+      border-color: #d5dae3;
+      box-shadow: 0 1px 3px rgb(16 24 40 / 7%);
+    }
+
+    .task-card { transition: border-color .16s ease, background-color .16s ease, box-shadow .16s ease; }
+    .task-card:hover { background: #f7f9fc; }
+    .task-card.active { border-color: #bdc9ee; background: #f0f3ff; box-shadow: inset 3px 0 0 var(--accent); }
+    .task-card[data-state="running"] { animation: none; box-shadow: inset 3px 0 0 var(--accent); }
+    .task-card-action { box-shadow: none; }
+
+    .step { border-radius: 8px; transition: background-color .16s ease, color .16s ease, box-shadow .16s ease; }
+    .step.current { background: #eef2ff; box-shadow: inset 3px 0 0 var(--accent); }
+    .step-number { border-color: #cbd3de; box-shadow: 0 1px 2px rgb(16 24 40 / 5%); }
+    .step-state { border-color: #a7d7bf; background: var(--ok-soft); color: var(--ok); }
+
+    .status-dot { box-shadow: 0 0 0 4px var(--accent-soft); }
+
+    .workspace-header { border-bottom-color: #e5e9ef; }
+    .workspace-body { background: var(--surface); }
+
+    .codex-app-panel,
+    .verification-minimum,
+    .execution-mode-section {
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgb(16 24 40 / 4%);
+    }
+
+    .codex-app-panel { border-color: #c4cff0; background: #f5f7ff; }
+    .codex-app-panel.linked { border-color: #b6dac8; background: #f2fbf6; }
+
+    .source-tabs,
+    .view-tabs {
+      border-color: #e0e4ea;
+      background: #f3f5f8;
+    }
+
+    .source-tabs button,
+    .view-tabs button { box-shadow: none; }
+
+    .source-tabs button.active,
+    .view-tabs button.active {
+      border-color: #d5dae2;
+      box-shadow: 0 1px 3px rgb(16 24 40 / 7%);
+    }
+
+    .image-drop-zone,
+    .document-drop-zone {
+      border-color: #aeb9c8;
+      border-radius: 10px;
+      background: #fafbfd;
+    }
+
+    .callout {
+      border-radius: 0 9px 9px 0;
+      background: #f1f4ff;
+      color: #35466d;
+    }
+
+    fieldset.question,
+    .conversation,
+    .summary-grid,
+    .logic-node,
+    .preview,
+    .check-row,
+    .manual-case-nav,
+    .test-case,
+    .acceptance-log,
+    .run-list,
+    .execution-mode-section,
+    .execution-mode-card,
+    .knowledge-card,
+    details,
+    .agent-memory-meta {
+      border-color: #dfe4eb;
+      border-radius: 9px;
+    }
+
+    fieldset.question,
+    .logic-node,
+    .check-row,
+    .test-case,
+    .acceptance-log,
+    .knowledge-card,
+    details { box-shadow: 0 1px 3px rgb(16 24 40 / 4%); }
+
+    .message { border-radius: 10px 10px 10px 3px; }
+    .message.user { border-radius: 10px 10px 3px 10px; }
+
+    .summary-grid,
+    .agent-memory-meta { gap: 0; background: #e8ebf0; }
+
+    .summary-item { background: #fbfcfe; }
+    .logic-node.current { border-top-color: var(--accent); background: #f8f9ff; }
+    .preview { background: #fafbfd; }
+
+    .verification-minimum { border-color: #aebdeb; background: #f6f8ff; }
+    .manual-case-nav { box-shadow: 0 4px 14px rgb(16 24 40 / 6%); }
+    .manual-case-nav-item { box-shadow: none; }
+    .manual-case-nav-item.is-active { border-color: #c5cff0; background: #f0f3ff; }
+
+    .test-case-head,
+    .acceptance-log-head { background: #f8fafc; }
+
+    .priority { border-radius: 999px; }
+    .priority-p0 { border-color: #c1cbef; background: #eef2ff; }
+
+    .run-step.running { background: #f7f8ff; }
+    .progress-track { background: #e7eaf0; box-shadow: inset 0 1px 2px rgb(16 24 40 / 7%); }
+    .progress-track > span { background: var(--accent); }
+
+    .diff-table,
+    .diff-table th,
+    .diff-table td { border-color: #e2e6ec; }
+    .diff-table th { background: #f6f8fa; color: #475467; }
+
+    .execution-mode-section { background: #f8f9fb; }
+    .execution-mode-card:hover { border-color: #9ba9d7; box-shadow: 0 3px 9px rgb(16 24 40 / 6%); }
+    .execution-mode-card.selected { border-color: var(--accent); background: #f3f5ff; box-shadow: inset 0 0 0 1px var(--accent), 0 3px 10px rgb(63 95 196 / 8%); }
+
+    .knowledge-card { background: #fbfcfe; transition: border-color .16s ease, box-shadow .16s ease; }
+    .knowledge-card:hover { border-color: #cbd3df; box-shadow: 0 5px 14px rgb(16 24 40 / 7%); }
+    .knowledge-badge { border: 1px solid #d8def5; background: #f0f3ff; }
+    .knowledge-badge.scope { border-color: #ead9ad; background: #fff9e9; }
+
+    details.agent-memory { border-radius: 9px; background: #fafbfe; }
+
+    .toast {
+      border-color: #a9d3bd;
+      border-radius: 9px;
+      background: #f1fbf6;
+      box-shadow: 0 14px 36px rgb(16 24 40 / 16%);
+    }
+
+    footer { color: #788596; }
+
+    * { scrollbar-color: #c1c8d2 transparent; scrollbar-width: thin; }
+
     @media (max-width: 1080px) {
       .app-shell { grid-template-columns: 226px minmax(0, 1fr); }
       .app-shell.hub-enabled { grid-template-columns: 58px 226px minmax(0, 1fr); }
@@ -1230,7 +1542,8 @@
     @media (max-width: 760px) {
       .topbar { flex-direction: column; padding-top: 26px; }
       .app-shell, .app-shell.verification-layout-active { grid-template-columns: 1fr; gap: 18px; padding-top: 20px; }
-      .app-shell.hub-enabled { grid-template-columns: 1fr; }
+      .app-shell.hub-enabled,
+      .app-shell.hub-enabled.verification-layout-active { grid-template-columns: 1fr; }
       .project-rail { position: static; flex-direction: row; grid-column: 1; max-height: none; overflow-x: auto; overflow-y: hidden; }
       .project-rail-list { display: flex; width: auto; }
       .project-rail-divider { width: 1px; height: 30px; }
@@ -1239,8 +1552,11 @@
       .hub-dashboard-head { flex-direction: column; padding-inline: 19px; }
       .hub-dashboard-body { padding-inline: 19px; }
       .hub-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .project-config-grid { grid-template-columns: 1fr; }
+      .project-config-grid .field.full { grid-column: auto; }
       .hub-list-item { grid-template-columns: 1fr; }
       .task-sidebar, .workflow-sidebar { position: static; }
+      .hub-enabled.verification-layout-active .task-sidebar { grid-column: 1; }
       .sidebar-head { padding-block: 12px 10px; }
       .sidebar-head span, .sidebar-note { display: none; }
       .steps { display: flex; overflow-x: auto; padding: 7px; }
@@ -1406,6 +1722,38 @@
       <div class="project-dialog-actions">
         <button id="previewProjectButton" value="preview" type="button">先扫描预览</button>
         <button class="primary" id="confirmAddProjectButton" value="confirm" type="button" disabled>确认添加</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="project-dialog" id="projectConfigDialog">
+    <form method="dialog" id="projectConfigForm">
+      <div class="project-dialog-head">
+        <div>
+          <h2>项目配置</h2>
+          <p>修改当前项目的 Project Profile；项目 ID 和 Profile 文件位置保持不变。</p>
+        </div>
+        <button class="small ghost" value="cancel" type="submit" aria-label="关闭">关闭</button>
+      </div>
+      <div class="project-dialog-body">
+        <p class="project-config-notice" id="projectConfigRuntimeNotice"></p>
+        <div class="project-config-grid">
+          <div class="field"><label for="projectConfigId">项目 ID</label><input class="mono" id="projectConfigId" type="text" readonly></div>
+          <div class="field"><label for="projectConfigName">显示名称</label><input id="projectConfigName" type="text" maxlength="80"></div>
+          <div class="field full"><label for="projectConfigRepositoryUrl">Git 仓库地址</label><input class="mono" id="projectConfigRepositoryUrl" type="text" placeholder="https://github.com/example/project.git"><span class="hint">支持 HTTPS、SSH 和 scp 风格 Git 地址；保存后会规范化为共享项目身份。</span></div>
+          <div class="field full"><label for="projectConfigRepoRoot">本地 Git 仓库根目录</label><input class="mono" id="projectConfigRepoRoot" type="text"></div>
+          <div class="field full"><label for="projectConfigWorkspaceRoot">工作区根目录</label><input class="mono" id="projectConfigWorkspaceRoot" type="text"></div>
+          <div class="field full"><label for="projectConfigDocsRoot">文档根目录</label><input class="mono" id="projectConfigDocsRoot" type="text"></div>
+          <div class="field full"><label for="projectConfigWorktreesRoot">Worktree 根目录</label><input class="mono" id="projectConfigWorktreesRoot" type="text"></div>
+          <div class="field full"><label for="projectConfigHtmlTaskRoot">HTML 任务目录</label><input class="mono" id="projectConfigHtmlTaskRoot" type="text"></div>
+          <div class="field"><label for="projectConfigDefaultBaseBranch">默认基准分支</label><input class="mono" id="projectConfigDefaultBaseBranch" type="text"></div>
+          <div class="field"><label for="projectConfigWorktreeNamePrefix">Worktree 名称前缀</label><input class="mono" id="projectConfigWorktreeNamePrefix" type="text" maxlength="40"></div>
+          <div class="field full"><label for="projectConfigProfilePath">Profile 文件</label><input class="mono" id="projectConfigProfilePath" type="text" readonly></div>
+        </div>
+      </div>
+      <div class="project-dialog-actions">
+        <button value="cancel" type="submit">取消</button>
+        <button class="primary" id="saveProjectConfigButton" value="save" type="button">保存配置</button>
       </div>
     </form>
   </dialog>

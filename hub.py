@@ -36,6 +36,20 @@ MAX_BODY_BYTES = 12 * 1024 * 1024
 HUB_TOKEN = secrets.token_urlsafe(32)
 PROJECT_ROUTE = re.compile(r"/api/projects/([a-z0-9]+(?:-[a-z0-9]+)*)(/.*)?")
 PROJECT_HTML_ROUTE = re.compile(r"/projects/([a-z0-9]+(?:-[a-z0-9]+)*)/task-html/(.+)")
+HUB_PROJECT_ACTION_ROUTE = re.compile(
+    r"/api/hub/projects/([a-z0-9]+(?:-[a-z0-9]+)*)/(config|open)"
+)
+PROJECT_CONFIG_FIELDS = (
+    "name",
+    "repositoryUrl",
+    "workspaceRoot",
+    "repoRoot",
+    "docsRoot",
+    "worktreesRoot",
+    "htmlTaskRoot",
+    "defaultBaseBranch",
+    "worktreeNamePrefix",
+)
 
 
 def now_iso() -> str:
@@ -143,13 +157,16 @@ class ProjectRegistry:
                         "id": project_id,
                         "name": profile["name"],
                         "profilePath": str(path),
+                        "workspaceRoot": profile["workspaceRoot"],
                         "repoRoot": profile["repoRoot"],
                         "repositoryUrl": profile.get("repositoryUrl", ""),
                         "repositoryKey": profile.get("repositoryKey", ""),
                         "memory": profile.get("memory", {}),
                         "docsRoot": profile["docsRoot"],
                         "worktreesRoot": profile["worktreesRoot"],
+                        "htmlTaskRoot": profile["htmlTaskRoot"],
                         "defaultBaseBranch": profile["defaultBaseBranch"],
+                        "worktreeNamePrefix": profile["worktreeNamePrefix"],
                         "counts": runtime_summary(project_id, self.runtime_base),
                     })
                 except (controller.WorkflowError, OSError) as exc:
@@ -184,6 +201,58 @@ class ProjectRegistry:
                 registered.append(path)
                 self._write_registered_paths(registered)
         return {**profile, "profilePath": str(path)}
+
+    def update_project(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        project = self.get(project_id)
+        profile_path = Path(project["profilePath"])
+        try:
+            original = json.loads(profile_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise controller.WorkflowError(f"Project Profile 不是有效 JSON：{exc}") from exc
+        if not isinstance(original, dict):
+            raise controller.WorkflowError("Project Profile 顶层必须是 JSON 对象。")
+        if str(original.get("id") or "") != project_id:
+            raise controller.WorkflowError("项目 ID 与注册的 Project Profile 不一致。")
+
+        updated = dict(original)
+        for field in PROJECT_CONFIG_FIELDS:
+            if field in payload:
+                updated[field] = payload[field]
+        updated["id"] = project_id
+        validated = controller.validate_project_profile(updated)
+
+        with self._lock:
+            temporary = profile_path.with_name(f".{profile_path.name}.tmp")
+            try:
+                temporary.write_text(
+                    json.dumps(validated, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                temporary.replace(profile_path)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+        return {**validated, "profilePath": str(profile_path)}
+
+    def open_project_directory(self, project_id: str, target: str = "repo") -> Path:
+        if target != "repo":
+            raise controller.WorkflowError("只允许打开项目 Profile 中配置的本地仓库目录。")
+        directory = Path(self.get(project_id)["repoRoot"]).resolve(strict=False)
+        if not directory.is_dir():
+            raise controller.WorkflowError(f"本地仓库目录不存在：{directory}")
+        if sys.platform == "darwin":
+            command = ["open", str(directory)]
+        elif sys.platform == "win32":
+            command = ["explorer", str(directory)]
+        else:
+            command = ["xdg-open", str(directory)]
+        subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return directory
 
     def setup_project(self, payload: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
         profile_path = str(payload.get("profilePath") or "").strip()
@@ -335,6 +404,13 @@ class WorkerManager:
                 return "stopped"
             return "running" if worker.running else "error"
 
+    def configuration_pending(self, project: dict[str, Any]) -> bool:
+        with self._lock:
+            worker = self._workers.get(project["id"])
+            if not worker or not worker.running:
+                return False
+            return any(worker.project.get(field) != project.get(field) for field in PROJECT_CONFIG_FIELDS)
+
     def _raw_request(
         self, worker: ProjectWorker, method: str, path: str, body: bytes, headers: dict[str, str]
     ) -> tuple[int, dict[str, str], bytes]:
@@ -395,6 +471,7 @@ def projects_payload() -> dict[str, Any]:
     projects, errors = REGISTRY.discover()
     for project in projects:
         project["workerState"] = WORKERS.status(project["id"])
+        project["configurationPending"] = WORKERS.configuration_pending(project)
     return {
         "ok": True,
         "service": "DevConductor Project Hub",
@@ -580,6 +657,16 @@ class HubHandler(BaseHTTPRequestHandler):
             if path == "/api/hub/projects":
                 result = REGISTRY.setup_project(payload, dry_run=False)
                 self.send_json({"ok": True, **result, **projects_payload()}, HTTPStatus.CREATED)
+                return
+            hub_project_match = HUB_PROJECT_ACTION_ROUTE.fullmatch(path)
+            if hub_project_match:
+                project_id, action = hub_project_match.groups()
+                if action == "config":
+                    result = REGISTRY.update_project(project_id, payload)
+                    self.send_json({"ok": True, "profile": result, **projects_payload()})
+                else:
+                    opened = REGISTRY.open_project_directory(project_id, str(payload.get("target") or "repo"))
+                    self.send_json({"ok": True, "openedPath": str(opened)})
                 return
             project_match = PROJECT_ROUTE.fullmatch(path)
             if project_match:

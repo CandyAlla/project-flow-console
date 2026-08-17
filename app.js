@@ -77,6 +77,7 @@
   let hubKnowledge = [];
   let hubDataLoading = false;
   let pendingProjectDraft = null;
+  let configuringProjectId = "";
   let task = null;
   let taskSummaries = [];
   let knowledgeCandidates = [];
@@ -122,6 +123,7 @@
   const hubHomeButtonEl = document.querySelector("#hubHomeButton");
   const addProjectButtonEl = document.querySelector("#addProjectButton");
   const addProjectDialogEl = document.querySelector("#addProjectDialog");
+  const projectConfigDialogEl = document.querySelector("#projectConfigDialog");
   document.querySelector("#resetButton").addEventListener("click", newTask);
   createTaskButtonEl.addEventListener("click", newTask);
   archiveViewButtonEl.addEventListener("click", () => {
@@ -186,6 +188,7 @@
   });
   document.querySelector("#previewProjectButton")?.addEventListener("click", previewProject);
   document.querySelector("#confirmAddProjectButton")?.addEventListener("click", confirmAddProject);
+  document.querySelector("#saveProjectConfigButton")?.addEventListener("click", saveProjectConfig);
 
   const taskViewKeys = [
     "module", "viewStage", "knowledgeFilter", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
@@ -366,11 +369,19 @@
     if (hubSection === "projects") {
       content = `<div class="project-card-grid">${hubProjects.map((project) => {
         const counts = project.counts || {};
-        const state = project.workerState === "running" ? "Worker 已连接" : "按需启动";
+        const state = project.configurationPending ? "配置待重启" : project.workerState === "running" ? "Worker 已连接" : "按需启动";
+        const stateClass = project.configurationPending ? "pending" : project.workerState === "running" ? "running" : "";
+        const repository = project.repositoryUrl
+          ? `<a href="${escapeHTML(project.repositoryUrl)}" target="_blank" rel="noreferrer noopener">${escapeHTML(project.repositoryUrl)}</a>`
+          : `<span class="project-path-empty">未配置</span>`;
         return `<article class="project-card">
-          <div class="project-card-head"><div><h3>${escapeHTML(project.name)}</h3><p>${escapeHTML(project.repoRoot)}</p></div><span class="project-worker-state ${project.workerState === "running" ? "running" : ""}">${state}</span></div>
+          <div class="project-card-head"><div><h3>${escapeHTML(project.name)}</h3><p>${escapeHTML(project.id)}</p></div><span class="project-worker-state ${stateClass}">${state}</span></div>
+          <div class="project-card-paths">
+            <div class="project-card-path"><span>Git 仓库</span><div>${repository}</div></div>
+            <div class="project-card-path"><span>本地目录</span><div><code title="${escapeHTML(project.repoRoot)}">${escapeHTML(project.repoRoot)}</code><button class="small" type="button" data-hub-open-local="${escapeHTML(project.id)}">打开目录</button></div></div>
+          </div>
           <div class="project-card-counts"><div><strong>${counts.active || 0}</strong><span>活动</span></div><div><strong>${counts.running || 0}</strong><span>运行</span></div><div><strong>${counts.attention || 0}</strong><span>待处理</span></div><div><strong>${counts.done || 0}</strong><span>完成</span></div></div>
-          <div class="project-card-actions"><button class="small" type="button" data-hub-project="${escapeHTML(project.id)}">进入项目</button><button class="small primary" type="button" data-hub-new-task="${escapeHTML(project.id)}">新建需求</button></div>
+          <div class="project-card-actions"><button class="small" type="button" data-hub-config="${escapeHTML(project.id)}">配置</button><button class="small" type="button" data-hub-project="${escapeHTML(project.id)}">进入项目</button><button class="small primary" type="button" data-hub-new-task="${escapeHTML(project.id)}">新建需求</button></div>
         </article>`;
       }).join("")}</div>${errorList}`;
     } else if (hubDataLoading) {
@@ -422,6 +433,22 @@
       openAddProjectDialog();
       return;
     }
+    const openLocalButton = event.target.closest("[data-hub-open-local]");
+    if (openLocalButton) {
+      await withAction(async () => {
+        const projectId = openLocalButton.dataset.hubOpenLocal;
+        const result = await api(`/api/hub/projects/${encodeURIComponent(projectId)}/open`, {
+          method: "POST", body: JSON.stringify({ target: "repo" })
+        });
+        showToast(`已打开本地目录：${result.openedPath}`);
+      });
+      return;
+    }
+    const configButton = event.target.closest("[data-hub-config]");
+    if (configButton) {
+      openProjectConfigDialog(configButton.dataset.hubConfig);
+      return;
+    }
     const taskButton = event.target.closest("[data-hub-task]");
     if (taskButton) {
       await switchProject(taskButton.dataset.projectId, taskButton.dataset.hubTask);
@@ -453,6 +480,71 @@
     document.querySelector("#addProjectPreview").hidden = true;
     document.querySelector("#confirmAddProjectButton").disabled = true;
     addProjectDialogEl.showModal();
+  }
+
+  function openProjectConfigDialog(projectId) {
+    const project = hubProjects.find((item) => item.id === projectId);
+    if (!project || !projectConfigDialogEl) return;
+    configuringProjectId = projectId;
+    const values = {
+      projectConfigId: project.id,
+      projectConfigName: project.name,
+      projectConfigRepositoryUrl: project.repositoryUrl || "",
+      projectConfigWorkspaceRoot: project.workspaceRoot,
+      projectConfigRepoRoot: project.repoRoot,
+      projectConfigDocsRoot: project.docsRoot,
+      projectConfigWorktreesRoot: project.worktreesRoot,
+      projectConfigHtmlTaskRoot: project.htmlTaskRoot,
+      projectConfigDefaultBaseBranch: project.defaultBaseBranch,
+      projectConfigWorktreeNamePrefix: project.worktreeNamePrefix,
+      projectConfigProfilePath: project.profilePath
+    };
+    Object.entries(values).forEach(([id, value]) => {
+      const field = document.querySelector(`#${id}`);
+      if (field) field.value = value || "";
+    });
+    const notice = document.querySelector("#projectConfigRuntimeNotice");
+    if (notice) {
+      notice.textContent = project.workerState === "running"
+        ? "当前 Worker 继续使用启动时配置；保存不会停止正在执行的任务。新配置将在重启 DevConductor 后应用到 Worker。"
+        : "保存后，下次按需启动 Worker 时会直接使用新配置。";
+    }
+    projectConfigDialogEl.showModal();
+  }
+
+  function projectConfigPayload() {
+    return {
+      name: document.querySelector("#projectConfigName").value.trim(),
+      repositoryUrl: document.querySelector("#projectConfigRepositoryUrl").value.trim(),
+      workspaceRoot: document.querySelector("#projectConfigWorkspaceRoot").value.trim(),
+      repoRoot: document.querySelector("#projectConfigRepoRoot").value.trim(),
+      docsRoot: document.querySelector("#projectConfigDocsRoot").value.trim(),
+      worktreesRoot: document.querySelector("#projectConfigWorktreesRoot").value.trim(),
+      htmlTaskRoot: document.querySelector("#projectConfigHtmlTaskRoot").value.trim(),
+      defaultBaseBranch: document.querySelector("#projectConfigDefaultBaseBranch").value.trim(),
+      worktreeNamePrefix: document.querySelector("#projectConfigWorktreeNamePrefix").value.trim()
+    };
+  }
+
+  async function saveProjectConfig() {
+    if (!configuringProjectId) return;
+    const projectId = configuringProjectId;
+    await withAction(async () => {
+      const result = await api(`/api/hub/projects/${encodeURIComponent(projectId)}/config`, {
+        method: "POST", body: JSON.stringify(projectConfigPayload())
+      });
+      hubProjects = result.projects || hubProjects;
+      hubErrors = result.errors || [];
+      hubScheduler = result.scheduler || hubScheduler;
+      const updated = hubProjects.find((project) => project.id === projectId);
+      projectConfigDialogEl.close();
+      configuringProjectId = "";
+      renderProjectRail();
+      renderHubWorkspace();
+      showToast(updated?.configurationPending
+        ? "配置已保存，当前任务不受影响；重启 DevConductor 后应用到 Worker。"
+        : "项目配置已保存。下次启动 Worker 时会使用新配置。");
+    });
   }
 
   function projectDraftPayload() {

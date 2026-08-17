@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 TOOL_DIR = Path(__file__).resolve().parents[1]
@@ -112,6 +113,42 @@ class ProjectHubTests(unittest.TestCase):
         self.assertEqual(rewritten["nested"][0], "/projects/sample/task-html/check.html")
         self.assertEqual(rewritten["nested"][1], "/api/tasks")
 
+    def test_project_config_update_is_validated_and_keeps_project_id(self) -> None:
+        registry = self.registry()
+        result = registry.update_project("sample", {
+            "name": "Renamed Sample",
+            "repositoryUrl": "git@github.com:Example/Sample.git",
+            "defaultBaseBranch": "develop",
+        })
+        self.assertEqual(result["id"], "sample")
+        self.assertEqual(result["name"], "Renamed Sample")
+        self.assertEqual(result["repositoryUrl"], "https://github.com/Example/Sample.git")
+        saved = json.loads(self.profile_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["id"], "sample")
+        self.assertEqual(saved["defaultBaseBranch"], "develop")
+
+    def test_invalid_project_config_does_not_overwrite_profile(self) -> None:
+        registry = self.registry()
+        before = self.profile_path.read_text(encoding="utf-8")
+        with self.assertRaises(hub.controller.WorkflowError):
+            registry.update_project("sample", {"repoRoot": str(self.root / "missing")})
+        self.assertEqual(self.profile_path.read_text(encoding="utf-8"), before)
+
+    def test_discovery_exposes_paths_for_project_card(self) -> None:
+        project = self.registry().discover()[0][0]
+        for field in ("workspaceRoot", "repoRoot", "repositoryUrl", "docsRoot", "worktreesRoot", "htmlTaskRoot", "worktreeNamePrefix"):
+            self.assertIn(field, project)
+
+    def test_open_project_directory_uses_registered_repo_path_only(self) -> None:
+        registry = self.registry()
+        project = registry.get("sample")
+        with mock.patch.object(registry, "get", return_value=project), mock.patch.object(hub.subprocess, "Popen") as opener:
+            opened = registry.open_project_directory("sample", "repo")
+        self.assertEqual(opened, self.repo.resolve())
+        self.assertEqual(opener.call_args.args[0], ["open", str(self.repo.resolve())])
+        with self.assertRaises(hub.controller.WorkflowError):
+            registry.open_project_directory("sample", str(self.root))
+
     def test_frontend_and_startup_expose_multi_project_entrypoints(self) -> None:
         app = (TOOL_DIR / "app.js").read_text(encoding="utf-8")
         html = (TOOL_DIR / "index.html").read_text(encoding="utf-8")
@@ -121,6 +158,11 @@ class ProjectHubTests(unittest.TestCase):
         self.assertIn('id="hubDashboard"', html)
         self.assertIn('id="addProjectDialog"', html)
         self.assertIn('id="addProjectRepositoryUrl"', html)
+        self.assertIn('id="projectConfigDialog"', html)
+        self.assertIn('data-hub-open-local', app)
+        self.assertIn('data-hub-config', app)
+        self.assertIn('/config', app)
+        self.assertIn('/open', app)
         self.assertIn('data-knowledge-publish', app)
         self.assertIn('"$SCRIPT_DIR/hub.py"', start)
 
