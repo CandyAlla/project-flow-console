@@ -1844,7 +1844,14 @@
   }
 
   function requiredManualIndexes(cases) {
-    return cases.map((item, index) => isRequiredManualCase(item) ? index : -1).filter((index) => index >= 0);
+    const required = cases.map((item, index) => isRequiredManualCase(item) ? index : -1).filter((index) => index >= 0);
+    // Keep an all-optional result actionable. When the producer forgot to
+    // mark any case as required, the complete returned list is the gate.
+    return required.length ? required : cases.map((_, index) => index);
+  }
+
+  function allManualCasesAreGate(cases) {
+    return cases.length > 0 && cases.every((item) => item?.required === false);
   }
 
   function logFilterToken(value) {
@@ -1863,8 +1870,8 @@
     </section>`;
   }
 
-  function renderManualCase(item, index) {
-    const required = isRequiredManualCase(item);
+  function renderManualCase(item, index, requiredIndexes) {
+    const required = requiredIndexes.includes(index);
     const priority = item.priority || "P0";
     const steps = textItems(item.steps);
     const filters = textItems(item.log_filters);
@@ -1885,11 +1892,12 @@
   function renderManualCaseNavigation(cases, requiredIndexes) {
     const completedRequired = requiredIndexes.filter((index) => ui.checks[index]).length;
     const completedAll = cases.filter((_, index) => ui.checks[index]).length;
+    const progressLabel = allManualCasesAreGate(cases) ? "门禁" : "必测";
     return `<aside class="manual-case-nav" aria-label="人工验收用例导航">
-      <div class="manual-case-nav-head"><div><p class="section-kicker">固定清单</p><h3>验收用例</h3></div><strong class="manual-case-nav-progress">必测 ${completedRequired} / ${requiredIndexes.length}</strong></div>
+      <div class="manual-case-nav-head"><div><p class="section-kicker">固定清单</p><h3>验收用例</h3></div><strong class="manual-case-nav-progress">${progressLabel} ${completedRequired} / ${requiredIndexes.length}</strong></div>
       <p class="manual-case-nav-summary">全部完成 <span data-manual-case-completed>${completedAll}</span> / ${cases.length} · 点击可跳转</p>
       <div class="manual-case-nav-list">${cases.map((item, index) => {
-        const required = isRequiredManualCase(item);
+        const required = requiredIndexes.includes(index);
         const priority = item.priority || "P0";
         const complete = Boolean(ui.checks[index]);
         return `<button class="manual-case-nav-item ${complete ? "is-complete" : ""}" type="button" data-manual-case-jump="${index}">
@@ -1929,14 +1937,20 @@
     const requiredIndexes = requiredManualIndexes(cases);
     const completedRequired = requiredIndexes.filter((index) => ui.checks[index]).length;
     const requiredDone = requiredIndexes.length > 0 && completedRequired === requiredIndexes.length;
+    const allCasesGate = allManualCasesAreGate(cases);
+    const gateLabel = allCasesGate ? "人工门禁" : "P0 / 必测";
+    const approveLabel = inBugfix ? "Bug 复验通过" : allCasesGate ? "人工门禁通过" : "P0 / 必测验证通过";
+    const gateHint = allCasesGate
+      ? "本次结果没有标出必测用例，已将全部人工用例纳入 Commit 门禁；请逐条完成。"
+      : "只有标记为“Commit 必测”的用例会阻塞提交；P1/P2 补充回归可按本次发布风险选择执行，并在备注中记录。";
     return `<section class="section" data-section-title="${inBugfix ? "Bug 修改结果概览" : "执行结果概览"}"><div class="summary-grid"><div class="summary-item"><span>${inBugfix ? "Bug 修改结果" : "执行结果"}</span><strong>${escapeHTML(result.summary || "实现已完成")}</strong></div><div class="summary-item"><span>检查方式</span><strong>${escapeHTML(reviewLabel)}</strong></div></div></section>
       ${renderMinimumVerification(result.minimum_manual_verification)}
       <section class="section"><h3>自动/逻辑验证</h3><div class="checklist">${(result.verification || []).map((item) => `<div class="check-row"><span>${item.status === "passed" ? "✓" : item.status === "failed" ? "!" : "–"}</span><div><strong>${escapeHTML(item.check)}</strong><span>${escapeHTML(item.result)} · ${escapeHTML(item.status)}</span></div></div>`).join("") || '<span class="hint">Codex 未返回自动验证条目。</span>'}</div></section>
-      <div class="verification-case-layout"><section class="section verification-case-content"><div class="section-heading"><div><p class="section-kicker">逐条勾选</p><h3>详细测试用例</h3></div><strong class="gate-progress">P0 / 必测 ${completedRequired} / ${requiredIndexes.length}</strong></div><p class="section-copy">只有标记为“Commit 必测”的用例会阻塞提交；P1/P2 补充回归可按本次发布风险选择执行，并在备注中记录。</p><div class="test-case-list">${cases.map(renderManualCase).join("")}</div></section>${renderManualCaseNavigation(cases, requiredIndexes)}</div>
+      <div class="verification-case-layout"><section class="section verification-case-content"><div class="section-heading"><div><p class="section-kicker">逐条勾选</p><h3>详细测试用例</h3></div><strong class="gate-progress">${gateLabel} ${completedRequired} / ${requiredIndexes.length}</strong></div><p class="section-copy">${gateHint}</p><div class="test-case-list">${cases.map((item, index) => renderManualCase(item, index, requiredIndexes)).join("")}</div></section>${renderManualCaseNavigation(cases, requiredIndexes)}</div>
       ${renderAcceptanceLogs(result.acceptance_logs)}
       ${renderExecutionModeSelector("acceptance")}
       <section class="section" data-section-title="验收备注与问题"><div class="field"><label for="verificationNote">验收备注或发现的问题</label><textarea id="verificationNote" placeholder="记录设备、操作证据，或描述需要定向返修的问题……">${escapeHTML(ui.verificationNote)}</textarea>${renderFeedbackImageInput("verification")}<span class="hint">文字和图片可以单独或一起提交。退回后只处理这条人工反馈，不会重新执行整份 Plan；本轮新增或更新的受影响用例会取消勾选，其他已通过用例会保留。</span></div></section>
-      <div class="actions"><div class="actions-secondary"><button class="danger" id="returnToExecution" ${ui.verificationNote.trim() || feedbackImageItems("verification").length ? "" : "disabled"}>发现问题，启动定向返修</button></div><div class="actions-primary"><button class="primary" id="approveVerification" ${requiredDone ? "" : "disabled"}>${inBugfix ? "Bug 复验通过" : "P0 / 必测验证通过"}</button></div></div>${reviewPanel(task.execution.review)}${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><button class="danger" id="returnToExecution" ${ui.verificationNote.trim() || feedbackImageItems("verification").length ? "" : "disabled"}>发现问题，启动定向返修</button></div><div class="actions-primary"><button class="primary" id="approveVerification" ${requiredDone ? "" : "disabled"}>${approveLabel}</button></div></div>${reviewPanel(task.execution.review)}${eventLogDetails()}`;
   }
 
   function renderVerify() {
@@ -2167,9 +2181,9 @@
       const approve = document.querySelector("#approveVerification");
       if (approve) approve.disabled = !requiredIndexes.length || completedRequired !== requiredIndexes.length;
       const progress = document.querySelector(".gate-progress");
-      if (progress) progress.textContent = `P0 / 必测 ${completedRequired} / ${requiredIndexes.length}`;
+      if (progress) progress.textContent = `${allManualCasesAreGate(cases) ? "人工门禁" : "P0 / 必测"} ${completedRequired} / ${requiredIndexes.length}`;
       const navProgress = document.querySelector(".manual-case-nav-progress");
-      if (navProgress) navProgress.textContent = `必测 ${completedRequired} / ${requiredIndexes.length}`;
+      if (navProgress) navProgress.textContent = `${allManualCasesAreGate(cases) ? "门禁" : "必测"} ${completedRequired} / ${requiredIndexes.length}`;
       const navCompleted = document.querySelector("[data-manual-case-completed]");
       if (navCompleted) navCompleted.textContent = String(completedAll);
       const index = Number(input.dataset.checkIndex);
@@ -2515,8 +2529,11 @@
   async function approveVerification() {
     captureVisibleFields();
     const cases = task?.execution?.result?.manual_cases || [];
+    if (!cases.length) return showToast("执行结果缺少人工验收用例，请退回执行补充后再通过。", true);
     const requiredIndexes = requiredManualIndexes(cases);
-    if (!requiredIndexes.length || requiredIndexes.some((index) => !ui.checks[index])) return showToast("请先完成全部 P0 / 必测人工验收项。", true);
+    if (!requiredIndexes.length || requiredIndexes.some((index) => !ui.checks[index])) {
+      return showToast(allManualCasesAreGate(cases) ? "请先完成全部人工门禁验收项。" : "请先完成全部 P0 / 必测人工验收项。", true);
+    }
     await withAction(async () => {
       const result = await post(`/api/tasks/${task.id}/verification`, { checks: ui.checks, note: ui.verificationNote });
       ui.commitConfirmed = false;

@@ -534,6 +534,14 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('@media (max-width: 1320px)', index_html)
         self.assertIn('@media (max-width: 1120px)', index_html)
 
+    def test_manual_verification_submit_uses_same_case_gate_as_rendering(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        submit = app_js.split("async function approveVerification", 1)[1].split("async function refreshGit", 1)[0]
+        self.assertIn("task?.execution?.result?.manual_cases || []", submit)
+        self.assertIn("执行结果缺少人工验收用例，请退回执行补充后再通过。", submit)
+        self.assertIn("requiredManualIndexes(cases)", submit)
+        self.assertIn("allManualCasesAreGate(cases)", submit)
+
     def test_manual_verification_rework_persists_and_rehydrates_checks(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         execute_plan = app_js.split("async function executePlan", 1)[1].split("async function cancelExecution", 1)[0]
@@ -766,6 +774,20 @@ class ControllerTests(unittest.TestCase):
         legacy_task = {"execution": {"result": {"manual_cases": [{"title": "旧用例"}]}}}
         self.assertEqual(server.required_manual_case_indexes(legacy_task), [0])
         self.assertTrue(server.manual_verification_checks_pass(legacy_task, [True]))
+
+        all_optional_task = {
+            "execution": {
+                "result": {
+                    "manual_cases": [
+                        {"title": "静态检查", "required": False},
+                        {"title": "人工回归", "required": False},
+                    ]
+                }
+            }
+        }
+        self.assertEqual(server.required_manual_case_indexes(all_optional_task), [0, 1])
+        self.assertTrue(server.manual_verification_checks_pass(all_optional_task, [True, True]))
+        self.assertFalse(server.manual_verification_checks_pass(all_optional_task, [True, False]))
 
     def test_execution_prompt_requires_minimum_steps_detailed_cases_and_logs(self) -> None:
         task = {
@@ -2591,6 +2613,29 @@ class ControllerTests(unittest.TestCase):
             server.approve_manual_verification(task_id, [True], "人工通过")
 
         refresh_git.assert_called_once_with(task_id)
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["stage"], "commit")
+        self.assertTrue(task["verification"]["approved"])
+
+    def test_manual_verification_accepts_all_optional_cases_as_fallback_gate(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000088")
+        result = self.quick_result()
+        result["manual_cases"] = [
+            {"title": "静态检查", "required": False, "priority": "P1", "steps": ["检查"], "expected": "通过"},
+            {"title": "人工回归", "required": False, "priority": "P2", "steps": ["运行"], "expected": "正常"},
+        ]
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "verify"
+            task["maxStageIndex"] = server.STAGE_INDEX["verify"]
+            task["execution"].update({
+                "status": "complete",
+                "flowMode": "fast",
+                "result": result,
+                "review": {"verdict": "skipped", "summary": "快速自检", "findings": []},
+            })
+        with mock.patch.object(server, "refresh_git_task"):
+            server.approve_manual_verification(task_id, [True, True], "人工通过")
+
         task = server.get_task_copy(task_id)
         self.assertEqual(task["stage"], "commit")
         self.assertTrue(task["verification"]["approved"])

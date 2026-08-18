@@ -731,10 +731,14 @@ def required_manual_case_indexes(task: dict[str, Any]) -> list[int]:
     cases = task.get("execution", {}).get("result", {}).get("manual_cases") or []
     if not isinstance(cases, list):
         return []
-    return [
+    required = [
         index for index, case in enumerate(cases)
         if not isinstance(case, dict) or case.get("required") is not False
     ]
+    # A malformed/legacy result may mark every case as optional. Do not make
+    # the verification gate impossible in that situation: all returned cases
+    # are the only available acceptance scope and must be checked.
+    return required or list(range(len(cases)))
 
 
 def manual_case_identity(case: Any) -> str:
