@@ -1319,7 +1319,7 @@ class ControllerTests(unittest.TestCase):
             "git": {"committed": False},
             "bugfix": {"status": "idle"},
         }
-        for action in ("discussion", "plan", "plan/approve", "worktree", "execute", "bugfix"):
+        for action in ("discussion", "plan", "plan/approve", "worktree", "worktree/select-existing", "execute", "bugfix"):
             with self.subTest(action=action), self.assertRaisesRegex(server.WorkflowError, "仅可回看"):
                 server.ensure_flow_action_allowed(completed_task, action)
 
@@ -1357,6 +1357,79 @@ class ControllerTests(unittest.TestCase):
             "git": {"committed": False}, "bugfix": {"status": "review"},
         }
         server.ensure_flow_action_allowed(bugfix_review, "execute")
+
+    def test_unapproved_plan_can_return_to_editable_discussion(self) -> None:
+        task_id = self.seed_execution_task()
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "plan"
+            task["maxStageIndex"] = server.STAGE_INDEX["plan"]
+            task["discussion"].update({
+                "status": "ready",
+                "threadId": "discussion-thread",
+                "result": {"summary": "保留讨论", "questions": []},
+                "messages": [{"role": "user", "note": "保留消息"}],
+            })
+            task["plan"].update({
+                "status": "ready",
+                "approved": False,
+                "result": {"summary": "保留草案"},
+                "markdown": "# Existing draft",
+                "draftPath": str(self.repo / "plan.md"),
+            })
+
+        returned = server.return_plan_to_discussion(task_id)
+
+        self.assertEqual(returned["stage"], "discuss")
+        self.assertEqual(returned["maxStageIndex"], server.STAGE_INDEX["discuss"])
+        self.assertEqual(returned["discussion"]["threadId"], "discussion-thread")
+        self.assertEqual(returned["discussion"]["messages"][0]["note"], "保留消息")
+        self.assertEqual(returned["plan"]["markdown"], "# Existing draft")
+        self.assertEqual(returned["plan"]["result"]["summary"], "保留草案")
+        self.assertIn("Plan 已退回 discussion", returned["events"][-1]["message"])
+
+        with self.assertRaisesRegex(server.WorkflowError, "仅可回看"):
+            server.return_plan_to_discussion(task_id)
+
+    def test_approved_plan_cannot_return_to_discussion(self) -> None:
+        task_id = self.seed_execution_task()
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "plan"
+            task["maxStageIndex"] = server.STAGE_INDEX["plan"]
+            task["plan"].update({"status": "ready", "approved": True})
+
+        with self.assertRaisesRegex(server.WorkflowError, "仅可回看"):
+            server.return_plan_to_discussion(task_id)
+
+    def test_plan_return_button_calls_stage_transition_api(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('on("returnToDiscuss", "click", returnPlanToDiscussion);', app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/plan/return-discussion`)', app_js)
+        self.assertNotIn('on("returnToDiscuss", "click", () => { ui.viewStage = "discuss"; render(); });', app_js)
+
+    def test_worktree_stage_can_select_existing_linked_worktree(self) -> None:
+        task_id = self.seed_execution_task()
+        existing = self.create_linked_worktree()
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "worktree"
+            task["maxStageIndex"] = server.STAGE_INDEX["worktree"]
+            task["plan"].update({"status": "ready", "approved": True})
+            task["worktree"].update({"status": "validated", "imported": False})
+
+        with mock.patch.object(server, "REPO_ROOT", self.repo):
+            selected = server.select_existing_worktree(task_id, str(existing))
+
+        self.assertTrue(selected["worktree"]["imported"])
+        self.assertEqual(selected["worktree"]["path"], str(existing.resolve()))
+        self.assertEqual(selected["worktree"]["branch"], "worktree/existing-task")
+        self.assertEqual(selected["worktree"]["status"], "validated")
+        self.assertIn("已有 Worktree 校验通过", selected["worktree"]["preview"])
+        self.assertEqual(selected["stage"], "worktree")
+
+    def test_worktree_stage_selection_ui_calls_existing_worktree_api(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="worktreeSelect"', app_js)
+        self.assertIn('id="selectExistingWorktree"', app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/worktree/select-existing`, { path })', app_js)
 
     def test_archive_and_restore_task_without_touching_execution_assets(self) -> None:
         task_id = self.seed_task()

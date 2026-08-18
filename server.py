@@ -1311,8 +1311,16 @@ def ensure_flow_action_allowed(task: dict[str, Any], action: str, *, acceptance_
         )
     elif action == "plan/approve":
         allowed = stage == "plan" and not plan.get("approved")
+    elif action == "plan/return-discussion":
+        allowed = (
+            stage == "plan"
+            and not plan.get("approved")
+            and plan.get("status") in {"ready", "error", "interrupted", "partial"}
+        )
     elif action == "worktree":
         allowed = stage == "worktree"
+    elif action == "worktree/select-existing":
+        allowed = stage == "worktree" and bool(plan.get("approved"))
     elif action == "execute":
         bugfix_continue = bool(
             stage == "bugfix"
@@ -1361,6 +1369,22 @@ def prepare_discussion_retry(task_id: str) -> dict[str, Any]:
         })
         live.setdefault("sessions", {})["discussion"] = None
         add_event(live, "已请求重试 discussion；将创建新的只读 Codex 会话。", "info")
+    return get_task_copy(task_id)
+
+
+def return_plan_to_discussion(task_id: str) -> dict[str, Any]:
+    """Return an unapproved Plan to its existing editable discussion."""
+    task = get_task_copy(task_id)
+    ensure_flow_action_allowed(task, "plan/return-discussion")
+    if task.get("activeJob"):
+        raise WorkflowError(f"任务正在执行 {task['activeJob']}，请等待完成。")
+    with mutate_task(task_id) as live:
+        ensure_flow_action_allowed(live, "plan/return-discussion")
+        if live.get("activeJob"):
+            raise WorkflowError(f"任务正在执行 {live['activeJob']}，请等待完成。")
+        live["stage"] = "discuss"
+        live["maxStageIndex"] = STAGE_INDEX["discuss"]
+        add_event(live, "Plan 已退回 discussion；现有草案保留，可继续修改讨论内容。", "warning")
     return get_task_copy(task_id)
 
 
@@ -2054,6 +2078,43 @@ def validate_existing_worktree(path_value: str, expected_branch: str = "") -> di
         if run_command(["git", "rev-parse", "--verify", "-q", ref], path).returncode == 0:
             raise WorkflowError(f"已有 Worktree 存在未完成的 Git 操作：{ref}。")
     return {"path": str(path), "branch": branch, "head": command_ok(["git", "rev-parse", "HEAD"], path)}
+
+
+def select_existing_worktree(task_id: str, path_value: str) -> dict[str, Any]:
+    """Switch a Worktree-stage task to a validated linked Worktree."""
+    task = get_task_copy(task_id)
+    ensure_flow_action_allowed(task, "worktree/select-existing")
+    if task.get("activeJob"):
+        raise WorkflowError(f"任务正在执行 {task['activeJob']}，请等待完成。")
+    info = validate_existing_worktree(path_value)
+    candidate = copy.deepcopy(task)
+    candidate["worktree"].update({
+        "status": "validated",
+        "name": Path(info["path"]).name,
+        "base": "existing",
+        "branch": info["branch"],
+        "path": info["path"],
+        "imported": True,
+    })
+    preview = worktree_preview(candidate)
+    with mutate_task(task_id) as live:
+        ensure_flow_action_allowed(live, "worktree/select-existing")
+        if live.get("activeJob"):
+            raise WorkflowError(f"任务正在执行 {live['activeJob']}，请等待完成。")
+        live["worktree"].update({
+            "status": "validated",
+            "name": Path(info["path"]).name,
+            "base": "existing",
+            "branch": info["branch"],
+            "path": info["path"],
+            "imported": True,
+            "preview": safe_block(preview, 12000),
+            "output": "",
+            "error": "",
+            "logs": [],
+        })
+        add_event(live, f"已选择已有 Worktree：{info['path']}（{info['branch']}）。", "ok")
+    return get_task_copy(task_id)
 
 
 def resolve_existing_document(path_value: str, mode: str, worktree: Path) -> Path:
@@ -4843,7 +4904,7 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 task_id, candidate_id = knowledge_unpublish.groups()
                 self.send_json({"ok": True, "task": unpublish_knowledge_candidate(task_id, candidate_id)})
                 return
-            match = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/(discussion/retry|discussion|plan|plan/approve|worktree|execute|cancel|verification|commit/confirm-manual|commit|bugfix|knowledge|ask|app/open|app/disconnect|app/new)", path)
+            match = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/(discussion/retry|discussion|plan|plan/approve|plan/return-discussion|worktree/select-existing|worktree|execute|cancel|verification|commit/confirm-manual|commit|bugfix|knowledge|ask|app/open|app/disconnect|app/new)", path)
             if not match:
                 self.send_error_json("未知 API。", HTTPStatus.NOT_FOUND)
                 return
@@ -4909,12 +4970,21 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                     add_event(live, "Plan 已通过验收，Worktree dry-run 完成。", "ok")
                 self.send_json({"ok": True, "task": get_task_copy(task_id)})
                 return
+            if action == "plan/return-discussion":
+                self.send_json({"ok": True, "task": return_plan_to_discussion(task_id)})
+                return
             if action == "worktree":
                 ensure_flow_action_allowed(task, action)
                 if not task["plan"].get("approved"):
                     raise WorkflowError("Plan 尚未通过验收。")
                 launch_job(task_id, "worktree", lambda: worktree_job(task_id))
                 self.send_json({"ok": True, "task": get_task_copy(task_id)}, HTTPStatus.ACCEPTED)
+                return
+            if action == "worktree/select-existing":
+                self.send_json({
+                    "ok": True,
+                    "task": select_existing_worktree(task_id, str(payload.get("path") or "")),
+                })
                 return
             if action == "execute":
                 if task["worktree"].get("status") != "ready":

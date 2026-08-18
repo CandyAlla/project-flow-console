@@ -49,6 +49,7 @@
     baseBranch: "main",
     existingDocumentPath: "",
     existingWorktreePath: "",
+    worktreeSelectionPath: "",
     existingPlanFileName: "",
     answers: {},
     customAnswers: {},
@@ -192,7 +193,7 @@
 
   const taskViewKeys = [
     "module", "viewStage", "knowledgeFilter", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
-    "existingDocumentPath", "existingWorktreePath", "existingPlanFileName",
+    "existingDocumentPath", "existingWorktreePath", "worktreeSelectionPath", "existingPlanFileName",
     "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationRevision", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
   ];
 
@@ -1784,7 +1785,18 @@
       : quick
         ? "<strong>轻量执行单与 Worktree 预检已完成。</strong> 已跳过两次前置 Agent 等待；点击后只创建隔离 Worktree 并绑定执行单，不会开始改代码。"
         : "<strong>创建前预检已完成。</strong> 未提交的主仓库改动不会复制到新 Worktree；不会 Fetch、切换主仓库分支、Push 或 Merge。";
+    const selectedPath = ui.worktreeSelectionPath || "";
+    const worktreeOptions = projectWorktrees.map((item) => `<option value="${escapeHTML(item.path)}" ${item.path === selectedPath ? "selected" : ""}>${escapeHTML(item.name)} · ${escapeHTML(item.branch)}</option>`).join("");
+    const selectionHint = worktreeLoadError
+      ? `读取已有 Worktree 失败：${escapeHTML(worktreeLoadError)} 可点击刷新重试。`
+      : projectWorktrees.length
+        ? `来自当前 Profile 主仓库：${projectWorktrees.length} 个可用 linked Worktree；选择后不会创建新目录。`
+        : "当前主仓库没有可用 linked Worktree。";
+    const existingSelection = !imported
+      ? `<section class="section"><div class="field"><div class="field-label-row"><label for="worktreeSelect">或选择已有 Worktree</label><button class="small" id="refreshStageWorktrees" type="button" ${busy ? "disabled" : ""}>刷新 Worktree</button></div><select id="worktreeSelect" class="mono"><option value="">继续使用自动创建</option>${worktreeOptions}</select><span class="hint">${selectionHint}</span></div><div class="actions"><div class="actions-secondary"><span class="hint">已有 Worktree 会先做 linked、分支和 Git 状态校验。</span></div><div class="actions-primary"><button id="selectExistingWorktree" class="primary" type="button" ${busy || !selectedPath ? "disabled" : ""}>使用选中的 Worktree</button></div></div></section>`
+      : "";
     return `<section class="section">${error || callout(intro, "warning")}</section>
+      ${existingSelection}
       <section class="section"><div class="path-list"><div class="path-row"><span>主仓库</span><strong class="mono">${escapeHTML(health?.paths?.repo)}</strong></div>${imported ? "" : `<div class="path-row"><span>基准</span><strong class="mono">${escapeHTML(section.base)}</strong></div>`}<div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(section.branch)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(section.path)}</strong></div><div class="path-row"><span>Plan 目标</span><strong class="mono">${escapeHTML(task.paths.planRelative)}</strong></div></div></section>
       <section class="section"><h3>${imported ? "已有 Worktree 校验" : "真实 dry-run"}</h3><div class="preview"><pre>${escapeHTML(section.preview || "等待预检输出")}</pre></div></section>
       <div class="actions"><div class="actions-secondary"><button id="backToPlan">返回 Plan</button></div><div class="actions-primary"><button class="primary" id="createWorktree">${imported ? "绑定 Plan 到已有 Worktree" : section.status === "error" ? "重试创建 Worktree" : "创建 Worktree"}</button></div></div>${eventLogDetails()}`;
@@ -2242,6 +2254,18 @@
     on("generatePlan", "click", () => submitDiscussion(true));
     on("retryPlan", "click", () => submitDiscussion(true));
     on("approvePlan", "click", approvePlan);
+    on("worktreeSelect", "change", (event) => {
+      ui.worktreeSelectionPath = event.target.value || "";
+      saveUi();
+      render();
+    });
+    on("selectExistingWorktree", "click", selectExistingWorktree);
+    on("refreshStageWorktrees", "click", () => {
+      withAction(async () => {
+        await refreshProjectWorktrees();
+        showToast(`已从主仓库刷新 ${projectWorktrees.length} 个 Worktree。`);
+      });
+    });
     on("createWorktree", "click", createWorktree);
     on("openCodexApp", "click", openCodexApp);
     on("newCodexAppChat", "click", newCodexAppChat);
@@ -2306,7 +2330,7 @@
     on("commitConfirmed", "change", (event) => { ui.commitConfirmed = event.target.checked; saveUi(); render(); });
     on("backToInput", "click", newTask);
     on("newTaskButton", "click", newTask);
-    on("returnToDiscuss", "click", () => { ui.viewStage = "discuss"; render(); });
+    on("returnToDiscuss", "click", returnPlanToDiscussion);
     on("backToPlan", "click", () => { ui.viewStage = "plan"; render(); });
     on("backToVerify", "click", () => { ui.viewStage = "verify"; render(); });
     const goToActiveStage = () => { ui.viewStage = activeFlowStageId(); render(); };
@@ -2459,11 +2483,30 @@
     });
   }
 
+  async function returnPlanToDiscussion() {
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/plan/return-discussion`);
+      setTask(result.task, true);
+      showToast("已退回需求讨论；可修改回答或补充说明。");
+    });
+  }
+
   async function createWorktree() {
     await withAction(async () => {
       const result = await post(`/api/tasks/${task.id}/worktree`, { confirmed: true });
       setTask(result.task, true);
       if (task.worktree?.imported) showToast("Plan 已绑定到已有 Worktree。" );
+    });
+  }
+
+  async function selectExistingWorktree() {
+    const path = String(ui.worktreeSelectionPath || "").trim();
+    if (!path) return showToast("请先选择一个已有 Worktree。", true);
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/worktree/select-existing`, { path });
+      ui.worktreeSelectionPath = "";
+      setTask(result.task, true);
+      showToast("已选择已有 Worktree；点击“绑定 Plan 到已有 Worktree”继续。" );
     });
   }
 
