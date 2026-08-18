@@ -1295,6 +1295,7 @@ def ensure_flow_action_allowed(task: dict[str, Any], action: str, *, acceptance_
     tabs and repeated clicks from replaying an already completed operation.
     """
     stage = str(task.get("stage") or "input")
+    discussion = task.get("discussion") or {}
     plan = task.get("plan") or {}
     bugfix = task.get("bugfix") or {}
     committed = bool((task.get("git") or {}).get("committed"))
@@ -1302,6 +1303,8 @@ def ensure_flow_action_allowed(task: dict[str, Any], action: str, *, acceptance_
 
     if action == "discussion":
         allowed = stage == "discuss"
+    elif action == "discussion/retry":
+        allowed = stage == "discuss" and discussion.get("status") in {"error", "interrupted", "partial"}
     elif action == "plan":
         allowed = stage == "discuss" or (
             stage == "plan" and plan.get("status") in {"error", "interrupted"}
@@ -1338,6 +1341,27 @@ def ensure_flow_action_allowed(task: dict[str, Any], action: str, *, acceptance_
         "execute": "执行", "verify": "人工验收", "commit": "Commit", "bugfix": "Bug 修复",
     }.get(stage, stage)
     raise WorkflowError(f"该流程阶段已完成，仅可回看；当前阶段是“{current_label}”，已拒绝重复操作。")
+
+
+def prepare_discussion_retry(task_id: str) -> dict[str, Any]:
+    """Reset a failed discussion so it can start a fresh read-only Codex session."""
+    task = get_task_copy(task_id)
+    ensure_flow_action_allowed(task, "discussion/retry")
+    if task.get("activeJob"):
+        raise WorkflowError(f"任务正在执行 {task['activeJob']}，请等待完成。")
+    with mutate_task(task_id) as live:
+        discussion = live.setdefault("discussion", {})
+        discussion.update({
+            "status": "idle",
+            "threadId": None,
+            "result": None,
+            "messages": [],
+            "logs": [],
+            "error": "",
+        })
+        live.setdefault("sessions", {})["discussion"] = None
+        add_event(live, "已请求重试 discussion；将创建新的只读 Codex 会话。", "info")
+    return get_task_copy(task_id)
 
 
 def task_summary(task: dict[str, Any]) -> dict[str, Any]:
@@ -4819,7 +4843,7 @@ class WorkflowHandler(BaseHTTPRequestHandler):
                 task_id, candidate_id = knowledge_unpublish.groups()
                 self.send_json({"ok": True, "task": unpublish_knowledge_candidate(task_id, candidate_id)})
                 return
-            match = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/(discussion|plan|plan/approve|worktree|execute|cancel|verification|commit/confirm-manual|commit|bugfix|knowledge|ask|app/open|app/disconnect|app/new)", path)
+            match = re.fullmatch(r"/api/tasks/([0-9a-f-]+)/(discussion/retry|discussion|plan|plan/approve|worktree|execute|cancel|verification|commit/confirm-manual|commit|bugfix|knowledge|ask|app/open|app/disconnect|app/new)", path)
             if not match:
                 self.send_error_json("未知 API。", HTTPStatus.NOT_FOUND)
                 return
@@ -4844,6 +4868,11 @@ class WorkflowHandler(BaseHTTPRequestHandler):
             if action == "knowledge":
                 prepare_knowledge_generation(task_id)
                 launch_job(task_id, "knowledge", lambda: knowledge_job(task_id))
+                self.send_json({"ok": True, "task": get_task_copy(task_id)}, HTTPStatus.ACCEPTED)
+                return
+            if action == "discussion/retry":
+                prepare_discussion_retry(task_id)
+                launch_job(task_id, "discussion", lambda: initial_discussion_job(task_id))
                 self.send_json({"ok": True, "task": get_task_copy(task_id)}, HTTPStatus.ACCEPTED)
                 return
             if action == "discussion":

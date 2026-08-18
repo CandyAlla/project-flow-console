@@ -585,6 +585,42 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('setTask(result.task, generatePlan)', app_js)
         self.assertNotIn("${questions.length ? '<button id=\"sendDiscussionNote\"", app_js)
 
+    def test_discussion_error_ui_exposes_retry_action(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="retryDiscussion"', app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/discussion/retry`)', app_js)
+        self.assertIn('on("retryDiscussion", "click", retryDiscussion)', app_js)
+        self.assertIn('["error", "interrupted", "partial"].includes(section.status)', app_js)
+
+    def test_discussion_retry_resets_failed_session_state(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000081"
+        server.TASKS[task_id] = {
+            "id": task_id,
+            "stage": "discuss",
+            "activeJob": None,
+            "sessions": {"discussion": "failed-thread"},
+            "discussion": {
+                "status": "error",
+                "threadId": "failed-thread",
+                "result": {"summary": "旧结果"},
+                "messages": [{"note": "旧输入"}],
+                "logs": [{"message": "旧错误"}],
+                "error": "模型容量不足",
+            },
+            "events": [],
+        }
+
+        reset = server.prepare_discussion_retry(task_id)
+
+        self.assertEqual(reset["discussion"]["status"], "idle")
+        self.assertIsNone(reset["discussion"]["threadId"])
+        self.assertIsNone(reset["discussion"]["result"])
+        self.assertEqual(reset["discussion"]["messages"], [])
+        self.assertEqual(reset["discussion"]["logs"], [])
+        self.assertEqual(reset["discussion"]["error"], "")
+        self.assertIsNone(reset["sessions"]["discussion"])
+        self.assertIn("重试 discussion", reset["events"][-1]["message"])
+
     def test_worktree_snapshot_detects_changes_to_already_dirty_files(self) -> None:
         readme = self.repo / "README.md"
         readme.write_text("dirty before repair\n", encoding="utf-8")

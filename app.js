@@ -1706,8 +1706,8 @@
       const title = readerTitles[task.source?.reader] || "discussion-only / ask-first 正在读取项目事实";
       return renderProgress(section, title);
     }
-    if (["error", "interrupted"].includes(section.status)) {
-      return `<section class="section">${callout(`<strong>讨论阶段未完成：</strong>${escapeHTML(section.error)}`, "danger")}</section><div class="actions"><div class="actions-secondary"><button id="newTaskButton">返回新建需求</button></div></div>${eventLogDetails()}`;
+    if (["error", "interrupted", "partial"].includes(section.status)) {
+      return `<section class="section">${callout(`<strong>讨论阶段未完成：</strong>${escapeHTML(section.error)}`, "danger")}</section><div class="actions"><div class="actions-secondary"><button id="newTaskButton" type="button">返回新建需求</button></div><div class="actions-primary"><button class="primary" id="retryDiscussion" type="button" ${busy || task.activeJob ? "disabled" : ""}>重试讨论</button></div></div>${eventLogDetails()}`;
     }
     const result = section.result || {};
     const questions = result.questions || [];
@@ -2237,6 +2237,7 @@
       });
     });
     on("startDiscussion", "click", startDiscussion);
+    on("retryDiscussion", "click", retryDiscussion);
     on("sendDiscussionNote", "click", () => submitDiscussion(false));
     on("generatePlan", "click", () => submitDiscussion(true));
     on("retryPlan", "click", () => submitDiscussion(true));
@@ -2436,6 +2437,17 @@
         result.task.maxStageIndex = Math.max(Number(result.task.maxStageIndex) || 0, stages.findIndex((item) => item.id === "plan"));
       }
       setTask(result.task, generatePlan);
+    });
+  }
+
+  async function retryDiscussion() {
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/discussion/retry`);
+      ui.answers = {};
+      ui.customAnswers = {};
+      ui.discussionNote = "";
+      setTask(result.task, true);
+      showToast("已重新启动需求讨论，将使用新的 Codex 会话。");
     });
   }
 
