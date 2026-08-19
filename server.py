@@ -4499,6 +4499,7 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
     worktree_path = Path(worktree_info["path"])
     task_id = str(uuid.uuid4())
     uploaded_plan = False
+    pasted_requirement = False
     document_path: Path
     if mode == "existing_plan" and payload.get("documentFileBase64"):
         raw_file_name = str(payload.get("documentFileName") or "")
@@ -4523,6 +4524,20 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
         upload_path.write_bytes(content)
         document_path = upload_path.resolve()
         uploaded_plan = True
+    elif mode == "existing_requirement" and "documentText" in payload:
+        document_text = payload.get("documentText")
+        if not isinstance(document_text, str):
+            raise WorkflowError("粘贴的已有需求文档必须是文本。")
+        if not document_text.strip():
+            raise WorkflowError("粘贴的已有需求文档内容不能为空。")
+        content = document_text.encode("utf-8")
+        if len(content) > MAX_SOURCE_TEXT:
+            raise WorkflowError("粘贴的已有需求文档不能超过 240 KB。")
+        upload_path = task_dir(task_id) / "uploads" / "pasted-requirement.md"
+        upload_path.parent.mkdir(parents=True, exist_ok=True)
+        upload_path.write_bytes(content)
+        document_path = upload_path.resolve()
+        pasted_requirement = True
     else:
         document_path = resolve_existing_document(str(payload.get("documentPath") or ""), mode, worktree_path)
     status = git_status(worktree_path)
@@ -4631,7 +4646,10 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
         "knowledge": default_knowledge(),
         "events": [],
     }
-    if imported_plan and uploaded_plan:
+    if pasted_requirement:
+        task["intake"]["documentPath"] = str(document_path)
+        task["source"].update({"uploaded": True, "inputMode": "paste", "filePath": str(document_path)})
+    elif imported_plan and uploaded_plan:
         task["intake"]["documentPath"] = str(document_path)
         task["source"].update({"uploaded": True, "filePath": str(document_path)})
     if imported_plan:

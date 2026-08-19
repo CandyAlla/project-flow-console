@@ -48,6 +48,8 @@
     sourceFileName: "",
     baseBranch: "main",
     existingDocumentPath: "",
+    existingRequirementSource: "path",
+    existingDocumentText: "",
     existingWorktreePath: "",
     worktreeSelectionPath: "",
     existingPlanFileName: "",
@@ -193,7 +195,7 @@
 
   const taskViewKeys = [
     "module", "viewStage", "knowledgeFilter", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
-    "existingDocumentPath", "existingWorktreePath", "worktreeSelectionPath", "existingPlanFileName",
+    "existingDocumentPath", "existingRequirementSource", "existingDocumentText", "existingWorktreePath", "worktreeSelectionPath", "existingPlanFileName",
     "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationRevision", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
   ];
 
@@ -1669,10 +1671,17 @@
         ? `来自主仓库 ${escapeHTML(health?.paths?.repo || "repoRoot")}：${projectWorktrees.length} 个可用 linked Worktree。`
         : "当前主仓库没有可用 linked Worktree，可手动填写绝对路径。";
     const existingPlanDrop = isPlan ? `<div class="field"><label>拖入或选择执行 Plan</label><div class="document-drop-zone" data-document-drop-zone role="button" tabindex="0" aria-label="选择或拖入已有执行 Plan"><input class="feedback-file-input" id="existingPlanFile" type="file" accept=".md,text/markdown"><div><strong>${selectedPlanFile ? `已选择：${escapeHTML(selectedPlanFile.name)}` : "拖入 .md Plan 文件"}</strong><span>也可以点击选择；文件最大 240 KB，上传内容只进入任务运行目录。</span></div><button class="small" type="button" id="pickExistingPlan">选择文件</button></div><span class="hint">${selectedPlanFile ? "已选择的文件提交时优先于下面的路径。" : ui.existingPlanFileName ? `刷新后需重新选择：${escapeHTML(ui.existingPlanFileName)}；也可改用下面的绝对路径。` : "如果不上传文件，继续使用下面的绝对路径输入。"}</span></div>` : "";
+    const existingRequirementSource = ui.existingRequirementSource === "paste" ? "paste" : "path";
+    const existingRequirementSourceTabs = !isPlan ? `<div class="field"><div class="field-label-row"><span>文档来源</span><span class="hint">二选一</span></div><div class="source-tabs" role="group" aria-label="选择已有需求文档来源"><button type="button" class="${existingRequirementSource === "path" ? "active" : ""}" data-existing-requirement-source="path">文件路径</button><button type="button" class="${existingRequirementSource === "paste" ? "active" : ""}" data-existing-requirement-source="paste">粘贴文档</button></div></div>` : "";
+    const existingRequirementDocument = isPlan
+      ? `<div class="field"><label for="existingDocumentPath">执行 Plan 绝对路径</label><input id="existingDocumentPath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.workspace || "/absolute/project/path")}/plan.md" value="${escapeHTML(ui.existingDocumentPath)}"><span class="hint">仅支持 .md，最大 240 KB；也可以直接拖入上方文件。</span></div>`
+      : existingRequirementSource === "paste"
+        ? `<div class="field"><label for="existingDocumentText">粘贴需求文档</label><textarea id="existingDocumentText" placeholder="粘贴已有需求文档的 Markdown 或纯文本……">${escapeHTML(ui.existingDocumentText)}</textarea><span class="hint">支持 Markdown / 纯文本，最大 240 KB；内容只保存到本次任务运行目录，不写入项目文档或 Worktree。</span></div>`
+        : `<div class="field"><label for="existingDocumentPath">需求文档绝对路径</label><input id="existingDocumentPath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.workspace || "/absolute/project/path")}/requirement.md" value="${escapeHTML(ui.existingDocumentPath)}"><span class="hint">支持 md、txt、pdf、doc、docx、html，文件需位于 Profile 允许的项目路径。</span></div>`;
     const existingFields = `${callout(isPlan
       ? `<strong>直接进入执行。</strong> Plan 必须是 Worktree 内或配置的文档目录 <code>${escapeHTML(health?.paths?.docs || "docsRoot")}</code> 内的 UTF-8 Markdown；本步只校验，不运行 Codex。`
       : "<strong>继续需求梳理。</strong> 将读取已有文档完成 discussion、ask-first、Plan 和 HTML；已有 Worktree 只做接入，不创建新目录。", "warning")}
-      ${existingPlanDrop}<div class="field"><label for="existingDocumentPath">${isPlan ? "执行 Plan 绝对路径" : "需求文档绝对路径"}</label><input id="existingDocumentPath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.workspace || "/absolute/project/path")}/${isPlan ? "plan.md" : "requirement.md"}" value="${escapeHTML(ui.existingDocumentPath)}"><span class="hint">${isPlan ? "仅支持 .md，最大 240 KB；也可以直接拖入上方文件。" : "支持 md、txt、pdf、doc、docx、html，文件需位于 Profile 允许的项目路径。"}</span></div>
+      ${existingPlanDrop}${existingRequirementSourceTabs}${existingRequirementDocument}
       <div class="field"><div class="field-label-row"><label for="existingWorktreeSelect">已有 Worktree</label><button class="small" id="refreshWorktrees" type="button" ${busy ? "disabled" : ""}>刷新 Worktree</button></div><select id="existingWorktreeSelect" class="mono"><option value="">手动填写绝对路径</option>${worktreeOptions}</select><span class="hint">${worktreeHint}</span><input id="existingWorktreePath" class="mono" type="text" placeholder="${escapeHTML(health?.paths?.worktrees || "/absolute/worktrees")}/${escapeHTML(health?.project?.worktreeNamePrefix || "Project")}_feature" value="${escapeHTML(ui.existingWorktreePath)}" ${selectedKnownWorktree ? "hidden" : ""}><span class="hint" id="existingWorktreeManualHint" ${selectedKnownWorktree ? "hidden" : ""}>必须是当前 Profile 主仓库的独立 linked worktree；也可以继续手动填写绝对路径。</span></div>`;
     const intro = ui.intakeMode === "new"
       ? quickWorkflow
@@ -2106,6 +2115,7 @@
       sourceText: document.querySelector("#sourceText")?.value,
       baseBranch: document.querySelector("#baseBranch")?.value,
       existingDocumentPath: document.querySelector("#existingDocumentPath")?.value,
+      existingDocumentText: document.querySelector("#existingDocumentText")?.value,
       existingWorktreePath: document.querySelector("#existingWorktreePath")?.value,
       discussionNote: document.querySelector("#discussionNote")?.value,
       verificationNote: document.querySelector("#verificationNote")?.value,
@@ -2150,6 +2160,12 @@
     document.querySelectorAll("[data-intake-mode]").forEach((button) => button.addEventListener("click", () => {
       captureVisibleFields();
       ui.intakeMode = button.dataset.intakeMode;
+      render();
+    }));
+    document.querySelectorAll("[data-existing-requirement-source]").forEach((button) => button.addEventListener("click", () => {
+      captureVisibleFields();
+      ui.existingRequirementSource = button.dataset.existingRequirementSource === "paste" ? "paste" : "path";
+      saveUi();
       render();
     }));
     document.querySelectorAll("[data-workflow-mode]").forEach((input) => input.addEventListener("change", () => {
@@ -2336,7 +2352,7 @@
     const goToActiveStage = () => { ui.viewStage = activeFlowStageId(); render(); };
     on("goActiveStage", "click", goToActiveStage);
     on("goCurrentStage", "click", goToActiveStage);
-    ["taskTitle", "sourceText", "existingDocumentPath", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage", "askQuestion"].forEach((id) => on(id, "input", captureVisibleFields));
+    ["taskTitle", "sourceText", "existingDocumentPath", "existingDocumentText", "existingWorktreePath", "discussionNote", "verificationNote", "commitMessage", "askQuestion"].forEach((id) => on(id, "input", captureVisibleFields));
     on("sourceUrl", "input", (event) => {
       captureVisibleFields();
       const options = document.querySelector("#larkReaderOptions");
@@ -2398,15 +2414,18 @@
     if (!ui.title.trim()) return showToast("请先填写需求名称。", true);
     if (ui.intakeMode !== "new") {
       if (ui.intakeMode === "existing_plan" && !ui.existingDocumentPath.trim() && !selectedPlanFile) return showToast("请拖入已有 Plan，或填写其绝对路径。", true);
-      if (ui.intakeMode === "existing_requirement" && !ui.existingDocumentPath.trim()) return showToast("请填写已有文档的绝对路径。", true);
+      const pasteExistingRequirement = ui.intakeMode === "existing_requirement" && ui.existingRequirementSource === "paste";
+      if (ui.intakeMode === "existing_requirement" && pasteExistingRequirement && !ui.existingDocumentText.trim()) return showToast("请粘贴已有需求文档内容。", true);
+      if (ui.intakeMode === "existing_requirement" && !pasteExistingRequirement && !ui.existingDocumentPath.trim()) return showToast("请填写已有文档的绝对路径。", true);
       if (!ui.existingWorktreePath.trim()) return showToast("请填写已有 Worktree 的绝对路径。", true);
       await withAction(async () => {
         const body = {
           title: ui.title.trim(),
           intakeMode: ui.intakeMode,
-          documentPath: ui.existingDocumentPath.trim(),
+          documentPath: pasteExistingRequirement ? "" : ui.existingDocumentPath.trim(),
           worktreePath: ui.existingWorktreePath.trim()
         };
+        if (pasteExistingRequirement) body.documentText = ui.existingDocumentText;
         if (selectedPlanFile) {
           if (!/\.md$/i.test(selectedPlanFile.name || "")) throw new Error("已有执行 Plan 只能选择 .md 文件。");
           if (selectedPlanFile.size > 240_000) throw new Error("已有执行 Plan 不能超过 240 KB。");

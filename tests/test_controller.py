@@ -1161,6 +1161,39 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(plan_path.read_text(encoding="utf-8"), "# Uploaded Plan\n\nRun the change.\n")
         self.assertEqual(task["stage"], "execute")
 
+    def test_import_existing_requirement_from_pasted_markdown_starts_discussion(self) -> None:
+        worktree = self.create_linked_worktree()
+        patches = self.imported_paths()
+        pasted = "# Pasted Requirement\n\n请支持从已有需求页粘贴正文。\n"
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(server, "launch_job") as launch_job:
+            task = server.create_imported_task({
+                "title": "粘贴已有需求",
+                "intakeMode": "existing_requirement",
+                "documentText": pasted,
+                "worktreePath": str(worktree),
+            })
+
+        launch_job.assert_called_once()
+        document_path = Path(task["intake"]["documentPath"])
+        self.assertTrue(document_path.is_file())
+        self.assertTrue(document_path.resolve().is_relative_to((server.TASK_ROOT / task["id"]).resolve()))
+        self.assertEqual(document_path.name, "pasted-requirement.md")
+        self.assertEqual(document_path.read_text(encoding="utf-8"), pasted)
+        self.assertEqual(task["source"]["type"], "existing_file")
+        self.assertEqual(task["source"]["inputMode"], "paste")
+        self.assertTrue(task["source"]["uploaded"])
+        self.assertEqual(task["worktree"]["status"], "validated")
+
+    def test_import_pasted_requirement_rejects_empty_and_oversized_text(self) -> None:
+        worktree = self.create_linked_worktree()
+        patches = self.imported_paths()
+        base = {"title": "粘贴校验", "intakeMode": "existing_requirement", "worktreePath": str(worktree)}
+        with patches[0], patches[1], patches[2], patches[3]:
+            with self.assertRaisesRegex(server.WorkflowError, "不能为空"):
+                server.create_imported_task({**base, "documentText": " \n\t"})
+            with self.assertRaisesRegex(server.WorkflowError, "240 KB"):
+                server.create_imported_task({**base, "documentText": "x" * (server.MAX_SOURCE_TEXT + 1)})
+
     def test_import_uploaded_plan_rejects_extension_size_encoding_and_utf8(self) -> None:
         worktree = self.create_linked_worktree()
         patches = self.imported_paths()
@@ -1189,6 +1222,9 @@ class ControllerTests(unittest.TestCase):
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         self.assertIn('data-document-drop-zone', app_js)
         self.assertIn('id="existingPlanFile"', app_js)
+        self.assertIn('data-existing-requirement-source="paste"', app_js)
+        self.assertIn('id="existingDocumentText"', app_js)
+        self.assertIn('body.documentText = ui.existingDocumentText', app_js)
         self.assertIn('id="existingWorktreeSelect"', app_js)
         self.assertIn('id="existingWorktreePath"', app_js)
         self.assertIn('api("/api/worktrees")', app_js)
