@@ -221,6 +221,71 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["stage"], "bugfix")
         self.assertEqual(task["maxStageIndex"], server.STAGE_INDEX["bugfix"])
 
+    def test_commit_can_include_only_selected_paths(self) -> None:
+        task_id = self.seed_task()
+        (self.repo / "feature.txt").write_text("selected\n", encoding="utf-8")
+        (self.repo / "keep-local.txt").write_text("do not commit\n", encoding="utf-8")
+        status = server.git_status(self.repo)
+
+        commit_id = server.commit_task(task_id, "feat: selected files", status["digest"], ["feature.txt"])
+
+        self.assertTrue(commit_id)
+        self.assertEqual(server.git_status(self.repo)["entries"], [{"code": "??", "path": "keep-local.txt"}])
+        committed_files = subprocess.check_output(
+            ["git", "show", "--format=", "--name-only", commit_id], cwd=self.repo, text=True
+        ).splitlines()
+        self.assertEqual(committed_files, ["feature.txt"])
+
+    def test_stage_can_include_only_selected_paths_without_commit(self) -> None:
+        task_id = self.seed_task()
+        (self.repo / "feature.txt").write_text("selected\n", encoding="utf-8")
+        (self.repo / "keep-local.txt").write_text("do not stage\n", encoding="utf-8")
+        status = server.git_status(self.repo)
+
+        updated = server.stage_task(task_id, status["digest"], ["feature.txt"])
+
+        self.assertFalse(updated["git"].get("committed"))
+        self.assertEqual(subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=self.repo, text=True).splitlines(), ["feature.txt"])
+        self.assertEqual(server.git_status(self.repo)["entries"], [
+            {"code": "A ", "path": "feature.txt"},
+            {"code": "??", "path": "keep-local.txt"},
+        ])
+        self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip(), status["head"])
+
+    def test_stage_rejects_stale_git_state(self) -> None:
+        task_id = self.seed_task()
+        first = server.git_status(self.repo)
+        (self.repo / "changed-after-preview.txt").write_text("changed\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(server.WorkflowError, "Git 状态已变化"):
+            server.stage_task(task_id, first["digest"], ["changed-after-preview.txt"])
+
+    def test_commit_rejects_selected_path_outside_current_status(self) -> None:
+        task_id = self.seed_task()
+        (self.repo / "feature.txt").write_text("selected\n", encoding="utf-8")
+        status = server.git_status(self.repo)
+
+        with self.assertRaisesRegex(server.WorkflowError, "不在当前改动中"):
+            server.commit_task(task_id, "feat: invalid selection", status["digest"], ["missing.txt"])
+
+        self.assertEqual(server.git_status(self.repo)["entries"], [{"code": "??", "path": "feature.txt"}])
+
+    def test_commit_selected_rename_includes_original_and_new_paths(self) -> None:
+        task_id = self.seed_task()
+        run(["git", "mv", "README.md", "RENAMED.md"], self.repo)
+        (self.repo / "keep-local.txt").write_text("do not commit\n", encoding="utf-8")
+        status = server.git_status(self.repo)
+        renamed = next(entry for entry in status["entries"] if "R" in entry["code"])
+
+        commit_id = server.commit_task(task_id, "refactor: rename readme", status["digest"], [renamed["path"]])
+
+        committed_files = subprocess.check_output(
+            ["git", "show", "--format=", "--name-status", commit_id], cwd=self.repo, text=True
+        )
+        self.assertIn("README.md", committed_files)
+        self.assertIn("RENAMED.md", committed_files)
+        self.assertEqual(server.git_status(self.repo)["entries"], [{"code": "??", "path": "keep-local.txt"}])
+
     def test_confirm_manual_commit_records_head_without_git_write(self) -> None:
         task_id = self.seed_task()
         (self.repo / "feature.txt").write_text("manual commit\n", encoding="utf-8")
@@ -757,6 +822,122 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(plan_path.is_relative_to(Path(updated["worktree"]["path"])))
         self.assertIn("Change the local timer", plan_path.read_text(encoding="utf-8"))
 
+    def test_discussion_direct_execution_prepares_runtime_sheet_for_new_worktree(self) -> None:
+        worktrees_root = self.root / "direct-worktrees"
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", worktrees_root), \
+                mock.patch.object(server, "launch_job"):
+            task = server.create_task({
+                "title": "简单计时调整",
+                "workflowMode": "standard",
+                "sourceType": "paste",
+                "sourceText": "把局内提示停留时间从 2 秒改为 1 秒。",
+                "baseBranch": "main",
+            })
+            with server.mutate_task(task["id"]) as live:
+                live["discussion"].update({
+                    "status": "ready",
+                    "result": {
+                        "summary": "已确认只调整提示停留时间",
+                        "confirmed_facts": ["现有提示逻辑已存在"],
+                        "assumptions": [],
+                        "questions": [],
+                        "ready_for_plan": True,
+                    },
+                })
+            with mock.patch.object(server, "worktree_preview", return_value="direct dry-run") as preview:
+                direct = server.prepare_direct_execution(task["id"], "不调整其他动画参数")
+
+        preview.assert_called_once()
+        self.assertEqual(direct["stage"], "worktree")
+        self.assertEqual(direct["plan"]["mode"], "direct")
+        self.assertEqual(direct["plan"]["status"], "ready")
+        self.assertTrue(direct["plan"]["approved"])
+        self.assertEqual(direct["worktree"]["status"], "validated")
+        self.assertEqual(direct["worktree"]["preview"], "direct dry-run")
+        self.assertEqual(direct["paths"]["htmlUrl"], "")
+        sheet = Path(direct["plan"]["finalPath"])
+        self.assertTrue(sheet.is_file())
+        self.assertTrue(sheet.resolve().is_relative_to((server.TASK_ROOT / direct["id"]).resolve()))
+        self.assertIn("不调整其他动画参数", sheet.read_text(encoding="utf-8"))
+
+    def test_discussion_direct_execution_reuses_existing_worktree_without_plan_file(self) -> None:
+        worktree = self.create_linked_worktree()
+        requirement = self.root / "ProjectDocs" / "requirement.md"
+        requirement.parent.mkdir(exist_ok=True)
+        requirement.write_text("# Requirement\n", encoding="utf-8")
+        patches = self.imported_paths()
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(server, "launch_job"):
+            task = server.create_imported_task({
+                "title": "已有需求直接执行",
+                "intakeMode": "existing_requirement",
+                "documentPath": str(requirement),
+                "worktreePath": str(worktree),
+            })
+            with server.mutate_task(task["id"]) as live:
+                live["discussion"].update({
+                    "status": "ready",
+                    "result": {
+                        "summary": "已确认只改一处文案",
+                        "confirmed_facts": ["目标文案位置明确"],
+                        "assumptions": [],
+                        "questions": [],
+                        "ready_for_plan": True,
+                    },
+                })
+            with mock.patch.object(server, "worktree_preview", return_value="existing direct dry-run"):
+                direct = server.prepare_direct_execution(task["id"])
+
+        self.assertEqual(direct["stage"], "execute")
+        self.assertEqual(direct["worktree"]["status"], "ready")
+        self.assertTrue(direct["worktree"]["imported"])
+        sheet = Path(direct["plan"]["finalPath"])
+        self.assertTrue(sheet.resolve().is_relative_to((server.TASK_ROOT / direct["id"]).resolve()))
+        self.assertFalse((worktree / direct["paths"]["planRelative"]).exists())
+
+    def test_discussion_direct_execution_worktree_does_not_bind_sheet_into_repo(self) -> None:
+        worktrees_root = self.root / "direct-worktrees"
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", worktrees_root), \
+                mock.patch.object(server, "launch_job"):
+            task = server.create_task({
+                "title": "Direct Timer Tweak",
+                "workflowMode": "standard",
+                "sourceType": "paste",
+                "sourceText": "Change the timer to one second.",
+                "baseBranch": "main",
+            })
+            with server.mutate_task(task["id"]) as live:
+                live["discussion"].update({
+                    "status": "ready",
+                    "result": {"summary": "timer", "confirmed_facts": ["timer"], "questions": [], "ready_for_plan": True},
+                })
+            with mock.patch.object(server, "worktree_preview", return_value="direct dry-run"):
+                direct = server.prepare_direct_execution(task["id"])
+
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", worktrees_root), \
+                mock.patch.object(server, "INITIALIZE_SUBMODULES", False), \
+                mock.patch.object(server, "bind_plan_to_worktree", side_effect=AssertionError("direct mode must not bind a repo Plan")):
+            server._worktree_job(direct["id"])
+        updated = server.get_task_copy(direct["id"])
+        self.assertEqual(updated["stage"], "execute")
+        self.assertEqual(updated["worktree"]["status"], "ready")
+        self.assertTrue(Path(updated["plan"]["finalPath"]).resolve().is_relative_to((server.TASK_ROOT / direct["id"]).resolve()))
+        self.assertFalse((Path(updated["worktree"]["path"]) / updated["paths"]["planRelative"]).exists())
+
+    def test_discussion_direct_execution_requires_completed_clarification(self) -> None:
+        task_id = self.seed_execution_task()
+        with server.mutate_task(task_id) as task:
+            task["stage"] = "discuss"
+            task["discussion"] = {
+                "status": "ready",
+                "result": {"summary": "仍有问题", "questions": [{"id": "scope"}], "ready_for_plan": False},
+            }
+            task["plan"] = {"status": "idle", "approved": False}
+        with self.assertRaisesRegex(server.WorkflowError, "澄清尚未完成"):
+            server.prepare_direct_execution(task_id)
+
     def test_standard_requirement_is_default_and_quick_change_remains_available(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         self.assertIn('workflowMode: "standard"', app_js)
@@ -765,6 +946,41 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('data-workflow-mode="standard"', app_js)
         self.assertIn("跳过 discussion、完整 Plan Agent 和 HTML", app_js)
         self.assertIn("workflowMode: ui.workflowMode", app_js)
+
+    def test_discussion_supports_full_plan_or_direct_execution_choices(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        server_py = SERVER_PATH.read_text(encoding="utf-8")
+        self.assertIn("直接执行（简单需求）", app_js)
+        self.assertIn("生成完整 Plan", app_js)
+        self.assertIn('on("directExecute", "click", directExecuteAfterDiscussion);', app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/plan/direct`', app_js)
+        self.assertIn('workflow: clarified-direct-execution', server_py)
+        self.assertIn('plan/direct', server_py)
+
+    def test_discussion_forward_choices_require_second_confirmation(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        plan_confirmation = 'if (generatePlan && !window.confirm("确认进入 Plan 验收？'
+        direct_confirmation = 'if (!window.confirm("确认直接执行这个简单需求？'
+        plan_request = 'post(`/api/tasks/${task.id}/${generatePlan ? "plan" : "discussion"}`'
+        direct_request = 'post(`/api/tasks/${task.id}/plan/direct`'
+        self.assertIn(plan_confirmation, app_js)
+        self.assertIn(direct_confirmation, app_js)
+        self.assertLess(app_js.index(plan_confirmation), app_js.index(plan_request))
+        self.assertLess(app_js.index(direct_confirmation), app_js.index(direct_request))
+        self.assertIn("将提交当前回答和补充说明，启动 Plan 生成", app_js)
+        self.assertIn("将跳过完整 Plan Agent 和逻辑 HTML", app_js)
+
+    def test_commit_ui_supports_per_file_selection(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('data-commit-path="${escapeHTML(item.path)}"', app_js)
+        self.assertIn('paths: selectedPaths', app_js)
+        self.assertIn("未选中的文件会保留在 Worktree", app_js)
+        self.assertIn("至少选择一个要提交的文件", app_js)
+        self.assertIn('id="stageChanges"', app_js)
+        self.assertIn("Stage 当前任务修改", app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/stage`', app_js)
+        self.assertIn("只会执行 git add，不会 Commit", app_js)
 
     def test_semantic_worktree_slug_rejects_generic_names(self) -> None:
         for slug in ("v2", "feature-v2", "task-feature-v2"):
@@ -1030,8 +1246,11 @@ class ControllerTests(unittest.TestCase):
         launch_job.assert_called_once()
         self.assertEqual(task["source"]["reader"], "chrome_mcp")
         prompt = run_codex.call_args.args[2][-1]
+        self.assertIn("$read-feishu-doc 与 $chrome:control-chrome", prompt)
         self.assertIn("$chrome:control-chrome", prompt)
         self.assertIn("不要改用 curl、Web Search、其他浏览器", prompt)
+        self.assertIn("对照目录检查飞书虚拟化或懒加载内容", prompt)
+        self.assertIn("不得查看或输出 Cookie、浏览器存储、密码或 Token", prompt)
         self.assertIn("名称必须能单独看出任务含义", prompt)
 
     def test_lark_links_can_use_ready_official_cli_in_read_only_mode(self) -> None:
@@ -1098,6 +1317,8 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('data-lark-reader="lark_cli"', app_js)
         self.assertIn('options.hidden = !isLarkLink(event.target.value)', app_js)
         self.assertIn('larkReader: ui.larkReader', app_js)
+        self.assertIn("Chrome 登录态", app_js)
+        self.assertIn("会对照目录检查懒加载章节", app_js)
         self.assertIn("官方 Lark CLI 正在只读获取飞书需求", app_js)
 
     def test_generated_html_normalizes_escaped_tag_newlines_only(self) -> None:
@@ -1217,6 +1438,81 @@ class ControllerTests(unittest.TestCase):
             payload = server.project_worktrees_payload()
         self.assertEqual([item["path"] for item in payload["worktrees"]], [str(linked.resolve())])
         self.assertEqual(payload["worktrees"][0]["branch"], "worktree/existing-task")
+
+    def test_managed_worktrees_marks_clean_profile_worktree_removable(self) -> None:
+        linked = self.create_linked_worktree()
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", linked.parent):
+            payload = server.managed_worktrees_payload()
+
+        item = next(value for value in payload["worktrees"] if value["path"] == str(linked.resolve()))
+        self.assertEqual(item["status"], "clean")
+        self.assertTrue(item["managed"])
+        self.assertTrue(item["removable"])
+        self.assertEqual(item["boundTasks"], [])
+
+    def test_managed_worktrees_rejects_dirty_external_and_active_bindings(self) -> None:
+        linked = self.create_linked_worktree()
+        (linked / "dirty.txt").write_text("keep\n", encoding="utf-8")
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", linked.parent):
+            dirty = next(value for value in server.managed_worktrees_payload()["worktrees"] if value["path"] == str(linked.resolve()))
+        self.assertEqual(dirty["status"], "dirty")
+        self.assertFalse(dirty["removable"])
+
+        (linked / "dirty.txt").unlink()
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", self.root / "different-root"):
+            external = next(value for value in server.managed_worktrees_payload()["worktrees"] if value["path"] == str(linked.resolve()))
+        self.assertEqual(external["status"], "external")
+        self.assertFalse(external["removable"])
+
+        server.TASKS["bound-task"] = {
+            "id": "bound-task", "title": "仍在使用", "archivedAt": "", "activeJob": "execution",
+            "worktree": {"path": str(linked)},
+        }
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", linked.parent):
+            bound = next(value for value in server.managed_worktrees_payload()["worktrees"] if value["path"] == str(linked.resolve()))
+        self.assertFalse(bound["removable"])
+        self.assertTrue(bound["boundTasks"][0]["active"])
+
+    def test_remove_project_worktree_preserves_branch_and_archived_task(self) -> None:
+        linked = self.create_linked_worktree()
+        server.TASKS["archived-task"] = {
+            "id": "archived-task", "title": "历史需求", "archivedAt": "2026-08-24T10:00:00+08:00",
+            "activeJob": None, "worktree": {"path": str(linked)},
+        }
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", linked.parent):
+            result = server.remove_project_worktree(str(linked))
+
+        self.assertEqual(result["removedPath"], str(linked.resolve()))
+        self.assertFalse(linked.exists())
+        self.assertIn("archived-task", server.TASKS)
+        branch = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", "refs/heads/worktree/existing-task"],
+            cwd=self.repo, check=False,
+        )
+        self.assertEqual(branch.returncode, 0)
+
+    def test_remove_project_worktree_revalidates_safety(self) -> None:
+        linked = self.create_linked_worktree()
+        (linked / "dirty.txt").write_text("keep\n", encoding="utf-8")
+        with mock.patch.object(server, "REPO_ROOT", self.repo), \
+                mock.patch.object(server, "WORKTREES_ROOT", linked.parent), \
+                self.assertRaisesRegex(server.WorkflowError, "不是干净状态"):
+            server.remove_project_worktree(str(linked))
+        self.assertTrue(linked.is_dir())
+
+    def test_worktree_manager_ui_uses_project_level_cleanup_api(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="worktreeManagerButton"', index_html)
+        self.assertIn('id="worktreeManagerDialog"', index_html)
+        self.assertIn('api("/api/worktrees/managed")', app_js)
+        self.assertIn('post("/api/worktrees/remove", { path })', app_js)
+        self.assertIn("不删除分支", app_js)
 
     def test_existing_asset_intake_ui_supports_plan_drop_and_worktree_select(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
@@ -1355,10 +1651,11 @@ class ControllerTests(unittest.TestCase):
             "git": {"committed": False},
             "bugfix": {"status": "idle"},
         }
-        for action in ("discussion", "plan", "plan/approve", "worktree", "worktree/select-existing", "execute", "bugfix"):
+        for action in ("discussion", "plan", "plan/direct", "plan/approve", "worktree", "worktree/select-existing", "execute", "bugfix"):
             with self.subTest(action=action), self.assertRaisesRegex(server.WorkflowError, "仅可回看"):
                 server.ensure_flow_action_allowed(completed_task, action)
 
+        server.ensure_flow_action_allowed(completed_task, "stage")
         server.ensure_flow_action_allowed(completed_task, "commit")
 
         delivered_task = {
@@ -1673,6 +1970,30 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("严格审查白名单", command[-1])
         self.assertIn("禁止运行无路径限定的 git diff", command[-1])
         self.assertEqual(run_codex.call_args.kwargs["timeout_seconds"], server.REVIEW_TIMEOUT_SECONDS)
+        self.assertTrue(run_codex.call_args.kwargs["progress_timeout"])
+        self.assertEqual(run_codex.call_args.kwargs["hard_timeout_seconds"], server.REVIEW_HARD_TIMEOUT_SECONDS)
+
+    def test_review_expands_reported_directories_and_ignores_external_paths(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000036"
+        directory = self.repo / "Assets" / "Scripts"
+        directory.mkdir(parents=True)
+        (directory / "Changed.cs").write_text("changed\n", encoding="utf-8")
+        server.TASKS[task_id] = {
+            "id": task_id,
+            "title": "Review 文件范围",
+            "updatedAt": "",
+            "plan": {"finalPath": str(self.repo / "Doc" / "plans" / "active" / "test.md")},
+            "worktree": {"path": str(self.repo)},
+            "execution": {"result": {"changed_files": ["Assets/Scripts/", str(self.root / "outside.html")]}},
+        }
+        review = {"verdict": "pass", "summary": "通过", "findings": []}
+
+        with mock.patch.object(server, "run_codex_structured", return_value=(review, "review-thread")) as run_codex:
+            self.assertEqual(server.run_review(task_id), review)
+
+        prompt = run_codex.call_args.args[2][-1]
+        self.assertIn("Assets/Scripts/Changed.cs", prompt)
+        self.assertNotIn(str(self.root / "outside.html"), prompt)
 
     def test_codex_resolution_falls_back_to_chatgpt_bundle_without_shell_path(self) -> None:
         bundled = self.root / "ChatGPT.app" / "Contents" / "Resources" / "codex"
@@ -1882,6 +2203,39 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["stage"], "verify")
         self.assertTrue(any("仅重试失败的 Code Review" in event["message"] for event in task["events"]))
         self.assertEqual(task["sessions"]["execution"], "saved-execution-thread")
+
+    def test_execution_job_retries_review_with_saved_review_thread_when_git_digest_matches(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000037"
+        implementation = {"summary": "实施已完成", "changed_files": ["feature.cs"], "verification": [], "manual_cases": []}
+        server.TASKS[task_id] = {
+            "id": task_id,
+            "title": "Review 会话续接",
+            "updatedAt": "",
+            "stage": "execute",
+            "maxStageIndex": 4,
+            "activeJob": "execution",
+            "jobState": "running",
+            "sessions": {"discussion": None, "execution": "saved-execution-thread", "review": "saved-review-thread"},
+            "discussion": {},
+            "plan": {"finalPath": str(self.repo / "plan.md"), "markdown": "# Plan"},
+            "paths": {},
+            "worktree": {"status": "ready", "path": str(self.repo), "branch": "main"},
+            "execution": {
+                "status": "error", "phase": "review", "threadId": "saved-execution-thread", "reviewThreadId": "saved-review-thread",
+                "reviewInputDigest": "same-digest", "result": implementation, "review": None, "logs": [], "error": "Review 超时",
+            },
+            "verification": {"approved": False},
+            "git": {"committed": False},
+            "events": [],
+        }
+        clean_status = {"entries": [], "digest": "same-digest", "branch": "main", "head": "abc", "diffStat": "", "refreshedAt": "now"}
+        with mock.patch.object(server, "run_implementation") as run_implementation, \
+                mock.patch.object(server, "run_review", return_value={"verdict": "pass", "summary": "通过", "findings": []}) as run_review, \
+                mock.patch.object(server, "git_status", return_value=clean_status):
+            server.execution_job(task_id, "", retry_review_only=True)
+
+        run_implementation.assert_not_called()
+        self.assertEqual(run_review.call_args.kwargs["resume_thread"], "saved-review-thread")
 
     def test_review_only_retry_is_decided_before_launch_job_overwrites_status(self) -> None:
         task = {

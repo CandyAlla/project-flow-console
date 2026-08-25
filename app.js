@@ -64,6 +64,7 @@
     verificationNote: "",
     commitMessage: "",
     commitConfirmed: false,
+    commitSelectedPaths: null,
     bugfixDescription: "",
     askQuestion: ""
   };
@@ -93,6 +94,8 @@
   let branchLoadError = "";
   let projectWorktrees = [];
   let worktreeLoadError = "";
+  let managedWorktrees = [];
+  let managedWorktreeError = "";
   let token = "";
   let selectedFile = null;
   let selectedPlanFile = null;
@@ -127,6 +130,9 @@
   const addProjectButtonEl = document.querySelector("#addProjectButton");
   const addProjectDialogEl = document.querySelector("#addProjectDialog");
   const projectConfigDialogEl = document.querySelector("#projectConfigDialog");
+  const worktreeManagerDialogEl = document.querySelector("#worktreeManagerDialog");
+  const worktreeManagerListEl = document.querySelector("#worktreeManagerList");
+  const worktreeManagerSummaryEl = document.querySelector("#worktreeManagerSummary");
   document.querySelector("#resetButton").addEventListener("click", newTask);
   createTaskButtonEl.addEventListener("click", newTask);
   archiveViewButtonEl.addEventListener("click", () => {
@@ -142,6 +148,19 @@
     saveUi();
     render();
     if (ui.module === "knowledge-center") await refreshKnowledgeCenter();
+  });
+  document.querySelector("#worktreeManagerButton")?.addEventListener("click", openWorktreeManagerDialog);
+  document.querySelector("#refreshManagedWorktreesButton")?.addEventListener("click", async () => {
+    await withAction(async () => {
+      await refreshManagedWorktrees();
+      showToast(`已刷新 ${managedWorktrees.length} 个 Worktree。`);
+    });
+    renderWorktreeManager();
+  });
+  worktreeManagerListEl?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-remove-worktree]");
+    if (!button || button.disabled) return;
+    removeManagedWorktree(button.dataset.removeWorktree, button.dataset.worktreeName || "Worktree");
   });
   stepsEl.addEventListener("click", (event) => {
     const moduleButton = event.target.closest("[data-module-jump]");
@@ -196,7 +215,7 @@
   const taskViewKeys = [
     "module", "viewStage", "knowledgeFilter", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
     "existingDocumentPath", "existingRequirementSource", "existingDocumentText", "existingWorktreePath", "worktreeSelectionPath", "existingPlanFileName",
-    "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationRevision", "verificationNote", "commitMessage", "commitConfirmed", "bugfixDescription", "askQuestion"
+    "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationRevision", "verificationNote", "commitMessage", "commitConfirmed", "commitSelectedPaths", "bugfixDescription", "askQuestion"
   ];
 
   function taskViewSnapshot(source) {
@@ -965,6 +984,79 @@
     }
   }
 
+  async function refreshManagedWorktrees() {
+    try {
+      const result = await api("/api/worktrees/managed");
+      managedWorktrees = Array.isArray(result.worktrees) ? result.worktrees : [];
+      managedWorktreeError = "";
+      return result;
+    } catch (error) {
+      managedWorktrees = [];
+      managedWorktreeError = error.message || "无法读取 Worktree 管理状态。";
+      throw error;
+    }
+  }
+
+  function worktreeStatusLabel(item) {
+    return ({
+      clean: "干净",
+      dirty: "有未提交改动",
+      locked: "已锁定",
+      detached: "Detached HEAD",
+      external: "配置目录外",
+      operation: "Git 操作中",
+      prunable: "残留登记",
+      missing: "目录缺失",
+      invalid: "无法验证"
+    })[item.status] || item.status || "未知";
+  }
+
+  function renderWorktreeManager() {
+    if (!worktreeManagerListEl || !worktreeManagerSummaryEl) return;
+    if (managedWorktreeError) {
+      worktreeManagerSummaryEl.textContent = "读取失败";
+      worktreeManagerListEl.innerHTML = callout(escapeHTML(managedWorktreeError), "danger");
+      return;
+    }
+    const removable = managedWorktrees.filter((item) => item.removable).length;
+    worktreeManagerSummaryEl.textContent = `${managedWorktrees.length} 个 Worktree · ${removable} 个可清理`;
+    if (!managedWorktrees.length) {
+      worktreeManagerListEl.innerHTML = '<p class="task-empty">当前项目没有可管理的 linked Worktree。</p>';
+      return;
+    }
+    worktreeManagerListEl.innerHTML = managedWorktrees.map((item) => {
+      const statusClass = item.removable ? "ok" : ["dirty", "locked", "invalid"].includes(item.status) ? "danger" : "";
+      const bindings = (item.boundTasks || []).map((task) => `${task.archived ? "已归档" : "未归档"} · ${task.title}`).join("；");
+      const reason = bindings ? `${item.statusDetail} 任务绑定：${bindings}` : item.statusDetail;
+      return `<article class="worktree-manager-item"><div class="worktree-manager-head"><strong>${escapeHTML(item.name || "未命名 Worktree")}</strong><span class="worktree-manager-status ${statusClass}">${escapeHTML(worktreeStatusLabel(item))}</span></div><div class="worktree-manager-meta"><span>分支：<code>${escapeHTML(item.branch || "detached HEAD")}</code></span><span>路径：<code>${escapeHTML(item.path)}</code></span></div><div class="worktree-manager-status ${statusClass}">${escapeHTML(reason || "")}</div><div class="worktree-manager-actions"><button class="small danger" type="button" data-remove-worktree="${escapeHTML(item.path)}" data-worktree-name="${escapeHTML(item.name || "Worktree")}" ${item.removable && !busy ? "" : "disabled"}>清理目录</button></div></article>`;
+    }).join("");
+  }
+
+  async function openWorktreeManagerDialog() {
+    if (!worktreeManagerDialogEl || !health?.ok) return;
+    renderWorktreeManager();
+    worktreeManagerDialogEl.showModal();
+    await withAction(async () => {
+      await refreshManagedWorktrees();
+    });
+    renderWorktreeManager();
+  }
+
+  async function removeManagedWorktree(path, name) {
+    if (!path) return;
+    const item = managedWorktrees.find((value) => value.path === path);
+    if (!item?.removable) return showToast("该 Worktree 未通过安全检查，不能清理。", true);
+    const confirmed = window.confirm(`清理 Worktree “${name}”？\n\n${path}\n\n只移除 linked Worktree 目录，不删除分支；该操作不会清理未提交改动（脏目录会被拒绝）。`);
+    if (!confirmed) return;
+    await withAction(async () => {
+      await post("/api/worktrees/remove", { path });
+      await refreshManagedWorktrees();
+      await refreshProjectWorktrees();
+      showToast(`Worktree 已清理：${name}`);
+    });
+    renderWorktreeManager();
+  }
+
   async function bootProject(preferredTaskId = "") {
     try {
       const response = await fetch(projectApiPath("/api/health"), { cache: "no-store" });
@@ -1625,7 +1717,7 @@
     if (quickWorkflow) ui.sourceType = "paste";
     const larkReaderOptions = `<div id="larkReaderOptions" class="reader-mode-section" ${isLarkLink(ui.sourceUrl) ? "" : "hidden"}><div class="field-label-row"><span>飞书读取方式</span><span class="hint">仅对飞书 / Lark 链接生效</span></div>
       <div class="execution-mode-grid reader-mode-grid" role="radiogroup" aria-label="选择飞书读取方式">
-        <label class="execution-mode-card ${selectedLarkReader === "chrome_mcp" ? "selected" : ""}"><input type="radio" name="larkReader" value="chrome_mcp" data-lark-reader="chrome_mcp" ${selectedLarkReader === "chrome_mcp" ? "checked" : ""}><span class="mode-card-head"><strong>Chrome MCP</strong><em>默认</em></span><span>复用当前 Chrome 登录态打开网页，只读提取需求内容。</span><small>无需配置飞书应用；页面结构变化时可能受影响</small></label>
+        <label class="execution-mode-card ${selectedLarkReader === "chrome_mcp" ? "selected" : ""}"><input type="radio" name="larkReader" value="chrome_mcp" data-lark-reader="chrome_mcp" ${selectedLarkReader === "chrome_mcp" ? "checked" : ""}><span class="mode-card-head"><strong>Chrome 登录态</strong><em>默认</em></span><span>复用当前 Chrome 登录态，只读读取 Wiki / 文档目录、正文和表格。</span><small>无需创建飞书应用；会对照目录检查懒加载章节</small></label>
         <label class="execution-mode-card ${selectedLarkReader === "lark_cli" ? "selected" : ""} ${larkCliReady ? "" : "disabled"}"><input type="radio" name="larkReader" value="lark_cli" data-lark-reader="lark_cli" ${selectedLarkReader === "lark_cli" ? "checked" : ""} ${larkCliReady ? "" : "disabled"}><span class="mode-card-head"><strong>官方 Lark CLI</strong><em>${larkCliReady ? "稳定读取" : "待配置"}</em></span><span>通过飞书官方接口和只读 Agent Skills 读取 Wiki / 文档正文。</span><small>${escapeHTML(larkCli.message)}${larkCliReady ? ` · ${escapeHTML(larkCli.version)}` : ""}</small></label>
       </div><span class="hint">Lark CLI 只用于读取需求；不会在 discussion 中创建、覆盖、移动或分享飞书内容，也不会自动扩大授权。</span></div>`;
     const panels = {
@@ -1710,7 +1802,7 @@
     }
     if (["queued", "running"].includes(section.status)) {
       const readerTitles = {
-        chrome_mcp: "Chrome MCP 正在只读获取飞书需求并扫描项目事实",
+        chrome_mcp: "Chrome 正在按目录完整读取飞书需求并扫描项目事实",
         lark_cli: "官方 Lark CLI 正在只读获取飞书需求并扫描项目事实"
       };
       const title = readerTitles[task.source?.reader] || "discussion-only / ask-first 正在读取项目事实";
@@ -1723,11 +1815,15 @@
     const questions = result.questions || [];
     const messages = (section.messages || []).map((message) => `<div class="message user"><span class="message-role">你</span>${escapeHTML(message.note || Object.values(message.answers || {}).join("；") || "已提交回答")}</div>`).join("");
     const discussionActionLabel = questions.length ? "提交回答，继续讨论" : "发送补充，继续讨论";
+    const directExecutionReady = Boolean(result.ready_for_plan) && questions.length === 0;
+    const directExecutionHint = directExecutionReady
+      ? "简单需求可跳过完整 Plan Agent 和逻辑 HTML；仍保留 Worktree、Review、人工验收与 Commit 门禁。"
+      : "完成全部高返工问题的澄清后，才可以选择直接执行。";
     return `<section class="section"><div class="summary-grid"><div class="summary-item"><span>Codex 结论</span><strong>${escapeHTML(result.summary || "已完成事实扫描")}</strong></div><div class="summary-item"><span>Plan 就绪度</span><strong>${result.ready_for_plan ? "可以形成 Solution Plan" : "仍有高返工点待确认"}</strong></div></div></section>
       ${result.confirmed_facts?.length ? `<section class="section"><h3>已确认事实</h3><div class="checklist">${result.confirmed_facts.map((item) => staticCheck(item, "来自项目事实或当前需求材料")).join("")}</div></section>` : ""}
       <section class="section"><h3>Ask-first：${questions.length ? `确认 ${questions.length} 个高返工问题` : "当前没有新的阻塞问题"}</h3><div class="question-list">${questions.map(questionFieldset).join("")}</div></section>
       <section class="section"><h3>继续补充和讨论</h3><div class="conversation">${messages || '<div class="message"><span class="message-role">Codex · discussion-only</span>已读取需求和项目事实，等待你的回答。</div>'}</div><div class="field"><label for="discussionNote">补充说明</label><textarea id="discussionNote" placeholder="补充特殊口径，或在这里继续讨论……">${escapeHTML(ui.discussionNote)}</textarea></div></section>
-      <div class="actions"><div class="actions-secondary"><button id="backToInput" type="button">新建另一条需求</button><button id="sendDiscussionNote" type="button">${discussionActionLabel}</button></div><div class="actions-primary"><button class="primary" id="generatePlan" type="button">确认口径并生成 Plan</button></div></div>${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><button id="backToInput" type="button">新建另一条需求</button><button id="sendDiscussionNote" type="button">${discussionActionLabel}</button><span class="hint">${directExecutionHint}</span></div><div class="actions-primary"><button id="directExecute" type="button" ${directExecutionReady ? "" : "disabled"}>直接执行（简单需求）</button><button class="primary" id="generatePlan" type="button">生成完整 Plan</button></div></div>${eventLogDetails()}`;
   }
 
   function questionFieldset(question, index) {
@@ -1773,6 +1869,11 @@
         <section class="section"><div class="summary-grid"><div class="summary-item"><span>执行摘要</span><strong>${escapeHTML(result.summary)}</strong></div><div class="summary-item"><span>风险边界</span><strong>跳过独立方案分析与 Review</strong></div></div><div class="preview"><pre>${escapeHTML(section.markdown)}</pre></div></section>
         <div class="actions"><div class="actions-secondary"><span class="hint">如发现需求存在分支或影响范围不明确，请新建标准需求。</span></div><div class="actions-primary"><button class="primary" id="goCurrentStage">返回 Worktree 阶段</button></div></div>${eventLogDetails()}`;
     }
+    if (task.plan?.mode === "direct") {
+      return `<section class="section">${callout("<strong>这是澄清后的轻量执行单。</strong> 已跳过完整 Plan Agent 和逻辑 HTML；执行范围来自已确认事实与用户决策。", "warning")}</section>
+        <section class="section"><div class="summary-grid"><div class="summary-item"><span>执行摘要</span><strong>${escapeHTML(result.summary)}</strong></div><div class="summary-item"><span>执行门禁</span><strong>保留 Code Review、人工验收与 Commit</strong></div></div><div class="preview"><pre>${escapeHTML(section.markdown)}</pre></div></section>
+        <div class="actions"><div class="actions-secondary"><span class="hint">如果发现需求并不简单，请返回讨论并改为生成完整 Plan。</span></div><div class="actions-primary"><button class="primary" id="goCurrentStage">返回当前阶段</button></div></div>${eventLogDetails()}`;
+    }
     const logic = `<div class="callout ok"><p><strong>HTML 验收页已落地。</strong> <a href="${escapeHTML(section.htmlUrl)}" target="_blank" rel="noopener">在新窗口打开逻辑验收页</a></p></div><iframe title="逻辑验收 HTML" src="${escapeHTML(section.htmlUrl)}" style="width:100%;height:620px;margin-top:16px;border:1px solid var(--line);background:#fff"></iframe>`;
     const md = `<div class="preview"><pre>${escapeHTML(section.markdown)}</pre></div>`;
     const importedWorktree = task.intake?.mode === "existing_requirement";
@@ -1788,9 +1889,12 @@
     if (["queued", "running"].includes(section.status)) return renderProgress(section, imported ? "正在重新验证已有 Worktree 并绑定 Plan" : `git-worktree 正在创建${health?.capabilities?.initializeSubmodules ? "并初始化 Submodule" : ""}`);
     const retryHint = imported ? "未覆盖已有文件；请按错误信息处理后重试绑定。" : "如果目录已部分创建，再次点击会只接管本任务预期的路径和分支并重试 Submodule。";
     const error = ["error", "partial", "interrupted"].includes(section.status) ? callout(`<strong>Worktree 未完成：</strong>${escapeHTML(section.error)}<br>${retryHint}`, "danger") : "";
-    const quick = task.intake?.mode === "quick_change";
+    const direct = task.plan?.mode === "direct";
+    const quick = task.intake?.mode === "quick_change" || direct;
     const intro = imported
       ? "<strong>已有 Worktree 预检已完成。</strong> 不创建目录、不切换分支、不初始化 Submodule；点击后只把已批准 Plan 写入该 Worktree。"
+      : direct
+        ? "<strong>澄清后的轻量执行单与 Worktree 预检已完成。</strong> 不生成完整 Plan 或逻辑 HTML；确认后只创建隔离 Worktree，不会开始改代码。"
       : quick
         ? "<strong>轻量执行单与 Worktree 预检已完成。</strong> 已跳过两次前置 Agent 等待；点击后只创建隔离 Worktree 并绑定执行单，不会开始改代码。"
         : "<strong>创建前预检已完成。</strong> 未提交的主仓库改动不会复制到新 Worktree；不会 Fetch、切换主仓库分支、Push 或 Merge。";
@@ -1806,7 +1910,7 @@
       : "";
     return `<section class="section">${error || callout(intro, "warning")}</section>
       ${existingSelection}
-      <section class="section"><div class="path-list"><div class="path-row"><span>主仓库</span><strong class="mono">${escapeHTML(health?.paths?.repo)}</strong></div>${imported ? "" : `<div class="path-row"><span>基准</span><strong class="mono">${escapeHTML(section.base)}</strong></div>`}<div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(section.branch)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(section.path)}</strong></div><div class="path-row"><span>Plan 目标</span><strong class="mono">${escapeHTML(task.paths.planRelative)}</strong></div></div></section>
+      <section class="section"><div class="path-list"><div class="path-row"><span>主仓库</span><strong class="mono">${escapeHTML(health?.paths?.repo)}</strong></div>${imported ? "" : `<div class="path-row"><span>基准</span><strong class="mono">${escapeHTML(section.base)}</strong></div>`}<div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(section.branch)}</strong></div><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(section.path)}</strong></div><div class="path-row"><span>${direct ? "轻量执行单" : "Plan 目标"}</span><strong class="mono">${escapeHTML(direct ? task.plan.finalPath : task.paths.planRelative)}</strong></div></div></section>
       <section class="section"><h3>${imported ? "已有 Worktree 校验" : "真实 dry-run"}</h3><div class="preview"><pre>${escapeHTML(section.preview || "等待预检输出")}</pre></div></section>
       <div class="actions"><div class="actions-secondary"><button id="backToPlan">返回 Plan</button></div><div class="actions-primary"><button class="primary" id="createWorktree">${imported ? "绑定 Plan 到已有 Worktree" : section.status === "error" ? "重试创建 Worktree" : "创建 Worktree"}</button></div></div>${eventLogDetails()}`;
   }
@@ -1841,17 +1945,21 @@
     const interrupted = ["error", "interrupted", "partial"].includes(section.status);
     const partial = section.status === "partial";
     const checkpoint = partial && section.checkpoint ? `<section class="section"><div class="summary-grid"><div class="summary-item"><span>已保存断点</span><strong>${Number(section.checkpoint.changedFiles?.length || 0)} 个执行文件</strong></div><div class="summary-item"><span>最后活动</span><strong>${escapeHTML(formatDateTime(section.checkpoint.lastActivity || section.checkpoint.createdAt))}</strong></div></div><p class="section-copy">继续时会先读取当前 Git Diff，只补齐未完成修改、自检和验收结果，不会重新执行整份 Plan。</p></section>` : "";
-    const error = interrupted ? callout(`<strong>${partial ? "执行已部分完成" : "执行中断"}：</strong>${escapeHTML(section.error)}`, partial ? "warning" : "danger") : "";
+    const reviewInterrupted = interrupted && section.phase === "review" && Boolean(section.result);
+    const error = interrupted ? callout(`<strong>${reviewInterrupted ? "实现已完成，Code Review 中断" : partial ? "执行已部分完成" : "执行中断"}：</strong>${escapeHTML(section.error)}`, reviewInterrupted || partial ? "warning" : "danger") : "";
     const needs = section.status === "needs_attention";
     const fast = ui.executionMode !== "standard";
-    const canResetSession = Boolean(interrupted && (fast ? task.agentMemory?.sessions?.app : task.agentMemory?.sessions?.execution));
+    const direct = task.plan?.mode === "direct";
+    const canResetSession = Boolean(interrupted && !reviewInterrupted && (fast ? task.agentMemory?.sessions?.app : task.agentMemory?.sessions?.execution));
     const imported = task.worktree?.imported ? "已有 Worktree 已接入" : "隔离环境已绑定";
-    return `<section class="section">${error || callout(`<strong>${imported}。</strong> Plan 位于 <code>${escapeHTML(task.plan.finalPath || task.paths.planRelative)}</code>；点击后 Codex 才会获得 Worktree 写权限。`, needs ? "danger" : "warning")}</section>
+    const contractLabel = direct ? "轻量执行单" : "Plan";
+    const executeLabel = direct ? (fast ? "快速执行轻量执行单" : "按标准流程执行轻量执行单") : (fast ? "快速执行 Plan" : "按标准流程执行 Plan");
+    return `<section class="section">${error || callout(`<strong>${imported}。</strong> ${contractLabel} 位于 <code>${escapeHTML(task.plan.finalPath || task.paths.planRelative)}</code>；点击后 Codex 才会获得 Worktree 写权限。`, needs ? "danger" : "warning")}</section>
       <section class="section"><div class="summary-grid"><div class="summary-item"><span>执行目录</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div><div class="summary-item"><span>Skill 链</span><strong>${escapeHTML([...(health?.skills?.execution || []), ...(health?.skills?.review || [])].join(" → ") || "通用项目规则")}</strong></div>${task.worktree?.imported ? `<div class="summary-item"><span>接入时 Git 改动</span><strong>${Number(task.git?.entries?.length || 0)} 个文件，Commit 前完整复核</strong></div>` : ""}</div></section>
       ${checkpoint}
       ${reviewPanel(section.review)}
       ${renderExecutionModeSelector("execution")}
-      <div class="actions"><div class="actions-secondary"><span class="hint">不会 Commit、Push 或 Merge；快速模式不启动独立 Review。</span>${canResetSession ? `<button class="danger" id="resetExecutionSession">放弃旧${fast ? "后台执行 Thread" : " execution 会话"}，用任务记忆重建</button>` : ""}</div><div class="actions-primary"><button class="primary" id="executePlan">${partial && fast ? "继续现有修改并完成自检" : needs ? fast ? "快速处理 Review 发现" : "根据 Review 继续执行" : interrupted && section.phase === "review" && section.result && !fast ? "只重试 Code Review" : interrupted ? fast ? "从断点快速重试" : "重试原 execution 会话" : fast ? "快速执行 Plan" : "按标准流程执行 Plan"}</button></div></div>${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><span class="hint">${reviewInterrupted ? "实现结果已保留；Git 状态未变化时会续接上次 Review，并从剩余范围继续。" : "不会 Commit、Push 或 Merge；快速模式不启动独立 Review。"}</span>${canResetSession ? `<button class="danger" id="resetExecutionSession">放弃旧${fast ? "后台执行 Thread" : " execution 会话"}，用任务记忆重建</button>` : ""}</div><div class="actions-primary"><button class="primary" id="executePlan">${partial && fast ? "继续现有修改并完成自检" : needs ? fast ? "快速处理 Review 发现" : "根据 Review 继续执行" : reviewInterrupted && !fast ? "继续上次 Code Review" : interrupted ? fast ? "从断点快速重试" : "重试原 execution 会话" : executeLabel}</button></div></div>${eventLogDetails()}`;
   }
 
   function textItems(value) {
@@ -1978,6 +2086,12 @@
     return renderVerification(false);
   }
 
+  function commitPathEntries(entries) {
+    const available = (entries || []).map((item) => String(item.path || "")).filter(Boolean);
+    const selected = Array.isArray(ui.commitSelectedPaths) ? ui.commitSelectedPaths : available;
+    return { available, selected: available.filter((path) => selected.includes(path)) };
+  }
+
   function renderCommit(inBugfix = false) {
     if (task.git?.committed) {
       const manual = task.git.commitSource === "manual";
@@ -1985,12 +2099,13 @@
       return `<section class="section">${callout(`<strong>${manual ? "已确认人工 Commit" : "Commit 已完成"}。</strong> 提交：<code>${escapeHTML(task.git.commitId)}</code><br>${manual ? "控制台只记录当前 HEAD，没有执行 Git 写操作。" : "控制台没有执行 Push 或 Merge。"}`, "ok")}${pendingEntries.length ? callout(`<strong>Worktree 仍有 ${pendingEntries.length} 项未提交改动。</strong>这些改动没有被“确认人工提交”按钮处理，请按实际归属另行检查。`, "warning") : ""}</section><section class="section"><div class="path-list"><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div><div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(task.git.branch)}</strong></div><div class="path-row"><span>Commit 来源</span><strong>${manual ? "人工提交（控制台仅确认）" : "控制台执行"}</strong></div><div class="path-row"><span>Commit Message</span><strong>${escapeHTML(task.git.message)}</strong></div></div></section>${pendingEntries.length ? `<section class="section"><h3>仍未提交的文件</h3><div class="diff-wrap"><table class="diff-table"><thead><tr><th>状态</th><th>文件</th></tr></thead><tbody>${pendingEntries.map((item) => `<tr><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("")}</tbody></table></div></section>` : ""}<div class="actions"><div class="actions-primary"><button class="primary" id="newTaskButton">新建下一条需求</button></div></div>${eventLogDetails()}`;
     }
     const entries = task.git?.entries || [];
+    const commitPaths = commitPathEntries(entries);
     const defaultMessage = `feat: complete ${task.worktree.name}`.slice(0, 120);
     if (!ui.commitMessage) ui.commitMessage = defaultMessage;
     return `<section class="section">${callout(`<strong>${inBugfix ? "Bug 修复的最后一道 Git 写入门" : "最后一道 Git 写入门"}。</strong> Commit 只作用于当前 Worktree。配套验收 HTML 位于配置的 docsRoot：<code>${escapeHTML(health?.paths?.docs || "")}</code>；若它在仓库外则不属于此 Git 提交。不会 Push 或 Merge。`, "warning")}</section>
-      <section class="section"><h3>待提交文件 · ${escapeHTML(task.git.refreshedAt || "尚未刷新")}</h3><div class="diff-wrap"><table class="diff-table"><thead><tr><th>状态</th><th>文件</th></tr></thead><tbody>${entries.length ? entries.map((item) => `<tr><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("") : '<tr><td colspan="2">当前没有改动</td></tr>'}</tbody></table></div>${task.git.diffStat ? `<div class="preview"><pre>${escapeHTML(task.git.diffStat)}</pre></div>` : ""}</section>
-      <section class="section"><div class="field"><label for="commitMessage">Commit Message</label><input id="commitMessage" class="mono" type="text" maxlength="120" value="${escapeHTML(ui.commitMessage)}"></div><label class="choice"><input id="commitConfirmed" type="checkbox" ${ui.commitConfirmed ? "checked" : ""}><span>我已确认上方真实文件列表、自动验证和人工验收结果。</span></label></section>
-      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button>${inBugfix ? "" : '<button id="backToVerify">返回人工验收</button>'}</div><div class="actions-primary"><button id="confirmManualCommit" ${ui.commitConfirmed ? "" : "disabled"}>确认已人工提交</button><button class="primary" id="commitChanges" ${ui.commitConfirmed && entries.length ? "" : "disabled"}>Commit</button></div></div><p class="hint">“确认已人工提交”只记录当前 HEAD，不会再次执行 Commit；若仍有未提交改动，完成页会继续提示。</p>${eventLogDetails()}`;
+      <section class="section"><div class="section-heading"><div><p class="section-kicker">逐项选择</p><h3>本次要提交的文件 · ${escapeHTML(task.git.refreshedAt || "尚未刷新")}</h3></div><strong class="gate-progress">已选 ${commitPaths.selected.length} / ${commitPaths.available.length}</strong></div><p class="section-copy">默认全选。取消勾选的文件会保留在 Worktree，不会进入本次控制台 Commit；刷新 Git 状态后需要重新选择。</p><div class="diff-wrap"><table class="diff-table"><thead><tr><th>提交</th><th>状态</th><th>文件</th></tr></thead><tbody>${entries.length ? entries.map((item) => `<tr><td><input type="checkbox" data-commit-path="${escapeHTML(item.path)}" ${commitPaths.selected.includes(item.path) ? "checked" : ""} aria-label="选择提交 ${escapeHTML(item.path)}"></td><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("") : '<tr><td colspan="3">当前没有改动</td></tr>'}</tbody></table></div>${task.git.diffStat ? `<div class="preview"><pre>${escapeHTML(task.git.diffStat)}</pre></div>` : ""}</section>
+      <section class="section"><div class="field"><label for="commitMessage">Commit Message</label><input id="commitMessage" class="mono" type="text" maxlength="120" value="${escapeHTML(ui.commitMessage)}"></div><label class="choice"><input id="commitConfirmed" type="checkbox" ${ui.commitConfirmed ? "checked" : ""}><span>我已确认文件选择、自动验证和人工验收结果。</span></label></section>
+      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button>${inBugfix ? "" : '<button id="backToVerify">返回人工验收</button>'}</div><div class="actions-primary"><button id="confirmManualCommit" ${ui.commitConfirmed ? "" : "disabled"}>确认已人工提交</button><button id="stageChanges" ${commitPaths.selected.length ? "" : "disabled"}>Stage 当前任务修改${commitPaths.selected.length ? `（${commitPaths.selected.length} 个文件）` : ""}</button><button class="primary" id="commitChanges" ${ui.commitConfirmed && commitPaths.selected.length ? "" : "disabled"}>Commit${commitPaths.selected.length ? `（${commitPaths.selected.length} 个文件）` : ""}</button></div></div><p class="hint">Stage 只暂存当前任务清单中勾选的文件，不会 Commit；“确认已人工提交”只记录当前 HEAD，不会执行 Git 写操作。</p>${eventLogDetails()}`;
   }
 
   function renderBugfix() {
@@ -2267,6 +2382,7 @@
     on("startDiscussion", "click", startDiscussion);
     on("retryDiscussion", "click", retryDiscussion);
     on("sendDiscussionNote", "click", () => submitDiscussion(false));
+    on("directExecute", "click", directExecuteAfterDiscussion);
     on("generatePlan", "click", () => submitDiscussion(true));
     on("retryPlan", "click", () => submitDiscussion(true));
     on("approvePlan", "click", approvePlan);
@@ -2297,6 +2413,7 @@
     });
     on("approveVerification", "click", approveVerification);
     on("refreshGit", "click", refreshGit);
+    on("stageChanges", "click", stageChanges);
     on("confirmManualCommit", "click", confirmManualCommit);
     on("commitChanges", "click", commitChanges);
     on("startBugfix", "click", startBugfix);
@@ -2343,6 +2460,18 @@
       updateFeedbackActionState("bugfix");
     });
     on("verificationNote", "input", () => updateFeedbackActionState("verification"));
+    document.querySelectorAll("[data-commit-path]").forEach((input) => input.addEventListener("change", (event) => {
+      const path = event.currentTarget.dataset.commitPath || "";
+      const current = new Set(Array.isArray(ui.commitSelectedPaths)
+        ? ui.commitSelectedPaths
+        : (task?.git?.entries || []).map((item) => item.path));
+      if (event.currentTarget.checked) current.add(path);
+      else current.delete(path);
+      ui.commitSelectedPaths = [...current];
+      ui.commitConfirmed = false;
+      saveUi();
+      render();
+    }));
     on("commitConfirmed", "change", (event) => { ui.commitConfirmed = event.target.checked; saveUi(); render(); });
     on("backToInput", "click", newTask);
     on("newTaskButton", "click", newTask);
@@ -2459,7 +2588,7 @@
       ui.discussionNote = "";
       setTask(result.task, true);
       if (result.task.intake?.mode === "quick_change") showToast("轻量执行单已生成；确认 dry-run 后即可创建 Worktree。" );
-      if (result.task.source?.reader === "chrome_mcp") showToast("已交给 Chrome MCP 读取飞书需求；只读，不会编辑网页。" );
+      if (result.task.source?.reader === "chrome_mcp") showToast("已交给 Chrome 登录态读取飞书需求；会检查目录覆盖，只读且不会编辑网页。" );
       if (result.task.source?.reader === "lark_cli") showToast("已交给官方 Lark CLI 读取飞书需求；只读，不会修改飞书内容。" );
     });
   }
@@ -2470,6 +2599,7 @@
     if (!generatePlan && !questions.length && !ui.discussionNote.trim()) {
       return showToast("请先填写要继续讨论的补充说明。", true);
     }
+    if (generatePlan && !window.confirm("确认进入 Plan 验收？\n\n将提交当前回答和补充说明，启动 Plan 生成；生成后会进入 Plan 验收阶段。")) return;
     await withAction(async () => {
       const answers = collectAnswers();
       const result = await post(`/api/tasks/${task.id}/${generatePlan ? "plan" : "discussion"}`, { answers, note: ui.discussionNote.trim() });
@@ -2480,6 +2610,21 @@
         result.task.maxStageIndex = Math.max(Number(result.task.maxStageIndex) || 0, stages.findIndex((item) => item.id === "plan"));
       }
       setTask(result.task, generatePlan);
+    });
+  }
+
+  async function directExecuteAfterDiscussion() {
+    captureVisibleFields();
+    const result = task?.discussion?.result || {};
+    if (!result.ready_for_plan || (result.questions || []).length) {
+      return showToast("请先完成全部高返工问题的澄清。", true);
+    }
+    if (!window.confirm("确认直接执行这个简单需求？\n\n将跳过完整 Plan Agent 和逻辑 HTML，生成轻量执行单并进入 Worktree；后续仍保留 Review、人工验收和 Commit 门禁。")) return;
+    await withAction(async () => {
+      const response = await post(`/api/tasks/${task.id}/plan/direct`, { note: ui.discussionNote.trim() });
+      ui.discussionNote = "";
+      setTask(response.task, true);
+      showToast(response.task.stage === "execute" ? "已跳过完整 Plan，已有 Worktree 可直接执行。" : "已生成轻量执行单，请确认 Worktree 后开始执行。");
     });
   }
 
@@ -2611,6 +2756,7 @@
     await withAction(async () => {
       const result = await post(`/api/tasks/${task.id}/verification`, { checks: ui.checks, note: ui.verificationNote });
       ui.commitConfirmed = false;
+      ui.commitSelectedPaths = null;
       setTask(result.task, true);
     });
   }
@@ -2619,6 +2765,7 @@
     await withAction(async () => {
       const result = await api(`/api/tasks/${task.id}/git-status`);
       ui.commitConfirmed = false;
+      ui.commitSelectedPaths = (result.task.git?.entries || []).map((item) => item.path);
       setTask(result.task, false);
       showToast("已重新读取 Worktree Git 状态，请再次核对。" );
     });
@@ -2627,11 +2774,34 @@
   async function commitChanges() {
     captureVisibleFields();
     if (!ui.commitConfirmed) return showToast("请先确认真实文件列表和验收结果。", true);
+    const selectedPaths = Array.isArray(ui.commitSelectedPaths)
+      ? ui.commitSelectedPaths
+      : (task.git?.entries || []).map((item) => item.path);
+    if (!selectedPaths.length) return showToast("至少选择一个要提交的文件。", true);
+    const confirmed = window.confirm(`确认提交选中的 ${selectedPaths.length} 个文件？\n\n未选中的文件会保留在 Worktree，不会进入本次 Commit。`);
+    if (!confirmed) return;
     await withAction(async () => {
-      const result = await post(`/api/tasks/${task.id}/commit`, { message: ui.commitMessage.trim(), digest: task.git.digest });
+      const result = await post(`/api/tasks/${task.id}/commit`, { message: ui.commitMessage.trim(), digest: task.git.digest, paths: selectedPaths });
       ui.commitConfirmed = false;
+      ui.commitSelectedPaths = [];
       setTask(result.task, true);
       showToast(`Commit 完成：${result.commitId.slice(0, 12)}`);
+    });
+  }
+
+  async function stageChanges() {
+    captureVisibleFields();
+    const selectedPaths = Array.isArray(ui.commitSelectedPaths)
+      ? ui.commitSelectedPaths
+      : (task.git?.entries || []).map((item) => item.path);
+    if (!selectedPaths.length) return showToast("至少选择一个要暂存的文件。", true);
+    const confirmed = window.confirm(`确认 Stage 当前任务清单中选中的 ${selectedPaths.length} 个文件？\n\n只会执行 git add，不会 Commit；未选中的文件不会被暂存。`);
+    if (!confirmed) return;
+    await withAction(async () => {
+      const result = await post(`/api/tasks/${task.id}/stage`, { digest: task.git.digest, paths: selectedPaths });
+      ui.commitConfirmed = false;
+      setTask(result.task, false);
+      showToast(`已 Stage ${selectedPaths.length} 个文件，尚未 Commit。`);
     });
   }
 

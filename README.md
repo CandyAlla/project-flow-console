@@ -42,13 +42,14 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 - 模糊、跨模块或高风险需求保留只读 discussion / ask-first，再生成完整执行 Plan。
 - 同时输出 Markdown Plan 和自包含的逻辑验收 HTML。
 - 创建 Worktree 前先展示真实 dry-run；也可以接入已有 Worktree。
+- 项目级 Worktree 管理：从任务队列打开“清理 Worktree”，查看当前仓库的 linked Worktree；只允许清理位于 Profile `worktreesRoot`、Git 状态干净且未被未归档任务占用的目录。清理使用 `git worktree remove`，不使用 `--force`，不删除分支。
 - 每个需求可绑定一个独立的 Codex App 人工聊天，通过 `codex://threads/<thread-id>` 打开，并可断开连接或切换到新聊天。
 - 快速修改复用后台执行 Thread，一轮完成实现和自检；人工聊天与后台执行隔离，避免多客户端争用同一个 writer。
 - 在任务绑定的 Worktree 中执行 Codex 和项目 Skills。
 - 将实施与 Code Review 分开，Review 不通过时进入定向修复。
 - 生成人工验收最短路径、详细测试案例和关键日志筛选词。
 - 人工验收返修和 Commit 后 Bug 修复都可附加多张截图，支持选择、粘贴、拖入、预览和单张删除。
-- Commit 前重新校验真实 Git 状态，防止确认后文件又发生变化。
+- Commit 前逐项选择本次要提交的文件，并重新校验真实 Git 状态；可先只 Stage 当前选择的文件，未选文件保留在 Worktree。
 - Commit 后发现问题时，复用当前 Worktree 和任务记忆，在 Bug 修复模块内完成定向修改、Review、复验和新 Commit，不重新执行 Plan。
 - Commit 与 Bug 修复闭环后，可只读生成最多 5 条 AI 沉淀候选；候选按稳定事实、决策、手册、踩坑、验收规律、Skill 或自动化分类，并保留直接证据。
 - 任务级“沉淀”阶段和跨任务“沉淀中心”支持保留、忽略、二次确认发布和取消共享；候选审核只更新 `.runtime`，只有单独点击“发布到共享记忆”才写入 Memory Hub。
@@ -301,7 +302,7 @@ python3 hub.py
 | Worktree | 先预览，再创建或绑定隔离 Worktree | 需要单独点击批准 |
 | 执行 | 在 Worktree 内执行 Plan 和项目 Skill 链 | 不自动 Commit、Push、Merge |
 | 人工验收 | 展示最小验证步骤、详细用例和验收日志；问题反馈可填写文字或附截图 | 用户逐项确认 P0 / 必测项；截图仅进入任务运行目录 |
-| Commit | 刷新 Git 摘要并校验状态指纹 | 需要单独确认；只提交当前 Worktree |
+| Commit | 刷新 Git 摘要、逐项选择文件并校验状态指纹；可单独 Stage | Stage 只暂存选中文件；Commit 需要单独确认，只提交选中项，未选文件保留 |
 | Bug 修复 | 根据文字、截图或两者组合，在本模块内完成定向修改、Review、人工复验和新 Commit | 不重新执行 Plan；复用当前 Worktree，不重写旧 Commit |
 | AI 沉淀 | 从任务记忆引用、Plan Hash、Commit、变更文件和验证证据中生成 0–5 条候选，并逐条审核 | 严格只读；候选与审核状态仅保存到 `.runtime`，不自动发布 |
 | Ask | 基于当前任务、Plan、持久记忆和 Worktree 回答实现问题 | 严格只读，不修改文件，不改变流程阶段 |
@@ -353,6 +354,7 @@ Worktree 已准备完成且目录有效时，人工聊天连接该 Worktree；�
 - P0 / 必测人工验收门禁。
 - Commit 前真实 Git 状态与指纹复核。
 - 不自动 Push 或 Merge。
+- 标准流程的 Code Review 采用“无新进展超时 + 绝对上限”；有命令、消息或检查事件时自动续期。
 
 快速模式只是省去第二个独立 Review，不会把“未 Review”伪装成“Review 通过”。用户停止快速任务时，服务只中断当前需求的 Turn，不会结束其他需求共享的 App Server 进程。
 
@@ -366,6 +368,17 @@ PROJECT_FLOW_QUICK_HARD_TIMEOUT=1800 \
 PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" \
 python3 server.py
 ```
+
+标准流程的 Code Review 默认连续 600 秒没有新事件才停止，绝对上限为 1800 秒；可单独配置：
+
+```bash
+PROJECT_FLOW_REVIEW_TIMEOUT=600 \
+PROJECT_FLOW_REVIEW_HARD_TIMEOUT=1800 \
+PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" \
+python3 server.py
+```
+
+Review 超时只会中断 Review，不会回滚实施结果或 Worktree 改动。页面会保留“继续上次 Code Review”入口：如果 Git 状态没有变化，则续接上次 Review；如果状态发生变化，则自动放弃旧 Review 会话并重新读取当前范围。
 
 ## 接入已有文档和 Worktree
 
@@ -494,7 +507,7 @@ python3 server.py
 
 当输入 `feishu.cn`、`larksuite.com` 或 `larkoffice.com` 链接时，输入区会显示两种可选读取方式：
 
-- `Chrome MCP`（默认）：通过 `$chrome:control-chrome` 复用当前 Chrome 登录态只读打开页面，无需配置飞书应用。
+- `Chrome 登录态`（默认）：通过 `$read-feishu-doc` 与 `$chrome:control-chrome` 复用当前 Chrome 登录态只读打开页面，无需配置飞书应用。读取时核对最终 URL、标题和访问状态，对照目录补读虚拟化/懒加载章节，并保留正文、表格、列表、代码块和警告；无法覆盖的章节会明确标记。
 - `官方 Lark CLI`：通过 `$lark-shared`、`$lark-wiki`、`$lark-doc` 和飞书开放平台接口读取。页面结构变化不会影响接口读取，但首次需要安装、配置应用并完成用户授权。
 
 Lark CLI、三个只读 Skills 或授权任一未就绪时，该读取器会在界面中禁用，不影响 Chrome MCP 和其他需求来源。按官方 AI Agent 快速开始完成一次配置：
@@ -529,7 +542,7 @@ lark-cli auth status
 - 删除或覆盖已经存在的 Worktree。
 - 自动提交代码。
 
-控制台的 Commit 操作也有独立门禁：人工验收通过后，服务会重新读取文件列表和 Git 状态指纹；如果状态发生变化，Commit 会被拒绝并要求重新确认。
+控制台的 Stage / Commit 操作也有独立门禁：人工验收通过后，用户逐项选择文件。Stage 会重新读取文件列表和 Git 状态指纹，只执行 `git add`，不会创建 Commit；Commit 会再次校验并只提交选中项。如果状态发生变化或所选路径已失效，操作会被拒绝并要求重新确认；未选文件继续保留在 Worktree。
 
 ## 本地服务安全
 

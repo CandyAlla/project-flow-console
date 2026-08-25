@@ -288,6 +288,16 @@
     .project-config-grid .field { min-width: 0; }
     .project-config-grid input { min-width: 0; }
     .project-config-notice { margin: 0 0 16px; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); color: #40527d; font-size: .8rem; line-height: 1.55; }
+    .worktree-manager-list { display: grid; gap: 10px; max-height: min(58vh, 620px); overflow: auto; }
+    .worktree-manager-item { display: grid; gap: 7px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; }
+    .worktree-manager-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+    .worktree-manager-head strong { overflow-wrap: anywhere; }
+    .worktree-manager-meta { display: grid; gap: 3px; color: var(--muted); font-size: .78rem; }
+    .worktree-manager-meta code { color: var(--ink); overflow-wrap: anywhere; }
+    .worktree-manager-status { color: var(--muted); font-size: .78rem; line-height: 1.45; }
+    .worktree-manager-status.ok { color: #216e4e; }
+    .worktree-manager-status.danger { color: #7a2730; }
+    .worktree-manager-actions { display: flex; justify-content: flex-end; gap: 7px; }
 
     .task-sidebar,
     .workflow-sidebar {
@@ -313,8 +323,8 @@
     .task-sidebar-head strong { display: block; }
     .task-sidebar-head span { display: block; margin-top: 2px; color: var(--muted); font-size: .76rem; }
     .task-sidebar-head button { flex: 0 0 auto; }
-    .task-sidebar-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; width: 100%; gap: 4px; }
-    .task-sidebar-actions button { width: 100%; padding-inline: 6px; }
+    .task-sidebar-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; width: 100%; gap: 6px; }
+    .task-sidebar-actions button { min-width: 0; width: 100%; padding-inline: 8px; white-space: nowrap; }
 
     .task-filters {
       display: grid;
@@ -1648,6 +1658,7 @@
         </div>
         <div class="task-sidebar-actions">
           <button class="small ghost" id="knowledgeCenterButton" type="button">沉淀中心</button>
+          <button class="small ghost" id="worktreeManagerButton" type="button">清理 Worktree</button>
           <button class="small ghost" id="archiveViewButton" type="button">查看归档</button>
           <button class="small primary" id="createTaskButton" type="button">＋ 新建</button>
         </div>
@@ -1722,6 +1733,26 @@
       <div class="project-dialog-actions">
         <button id="previewProjectButton" value="preview" type="button">先扫描预览</button>
         <button class="primary" id="confirmAddProjectButton" value="confirm" type="button" disabled>确认添加</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="project-dialog" id="worktreeManagerDialog">
+    <form method="dialog" id="worktreeManagerForm">
+      <div class="project-dialog-head">
+        <div>
+          <h2>清理 Worktree</h2>
+          <p>当前项目的全部 linked Worktree。只清理干净、未被未归档任务占用的目录；不会删除 Git 分支。</p>
+        </div>
+        <button class="small ghost" value="cancel" type="submit" aria-label="关闭">关闭</button>
+      </div>
+      <div class="project-dialog-body">
+        <div class="field-label-row"><strong id="worktreeManagerSummary">正在读取 Worktree</strong><button class="small" id="refreshManagedWorktreesButton" value="refresh" type="button">刷新</button></div>
+        <div class="worktree-manager-list" id="worktreeManagerList"></div>
+        <p class="hint" style="margin-top:14px">安全门禁：主仓库、detached、locked、脏目录、Git 操作中、目录缺失或仍被活动任务绑定的 Worktree 都不会被清理。</p>
+      </div>
+      <div class="project-dialog-actions">
+        <button value="cancel" type="submit">关闭</button>
       </div>
     </form>
   </dialog>
