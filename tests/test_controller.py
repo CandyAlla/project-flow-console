@@ -283,6 +283,62 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=self.repo, text=True).strip(), "")
 
+    def test_legacy_agent_file_lists_do_not_authorize_stage(self) -> None:
+        task_id = self.seed_task()
+        with server.mutate_task(task_id) as task:
+            task["execution"] = {
+                "roundChangedFiles": ["feature.txt", "keep-local.txt"],
+                "result": {"changed_files": ["feature.txt", "keep-local.txt"]},
+            }
+        (self.repo / "feature.txt").write_text("agent change\n", encoding="utf-8")
+        (self.repo / "keep-local.txt").write_text("user change\n", encoding="utf-8")
+        status = server.git_status(self.repo)
+
+        server.refresh_git_task(task_id)
+        git = server.get_task_copy(task_id)["git"]
+        self.assertFalse(git["taskChangeOwnershipKnown"])
+        self.assertEqual(git["taskEntries"], [])
+        self.assertEqual([item["path"] for item in git["foreignEntries"]], ["feature.txt", "keep-local.txt"])
+        with self.assertRaisesRegex(server.WorkflowError, "没有执行前后快照"):
+            server.stage_task(task_id, status["digest"], ["feature.txt"])
+
+        self.assertEqual(subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=self.repo, text=True).strip(), "")
+
+    def test_null_task_file_ownership_does_not_authorize_stage(self) -> None:
+        task_id = self.seed_task()
+        with server.mutate_task(task_id) as task:
+            task["execution"] = {"taskChangedFiles": None, "roundChangedFiles": ["feature.txt"]}
+        (self.repo / "feature.txt").write_text("agent change\n", encoding="utf-8")
+        status = server.git_status(self.repo)
+
+        server.refresh_git_task(task_id)
+        self.assertFalse(server.get_task_copy(task_id)["git"]["taskChangeOwnershipKnown"])
+        with self.assertRaisesRegex(server.WorkflowError, "没有执行前后快照"):
+            server.stage_task(task_id, status["digest"], ["feature.txt"])
+
+    def test_stage_rejects_when_foreign_changes_are_already_staged(self) -> None:
+        task_id = self.seed_task()
+        (self.repo / "feature.txt").write_text("agent change\n", encoding="utf-8")
+        (self.repo / "keep-local.txt").write_text("user change\n", encoding="utf-8")
+        run(["git", "add", "keep-local.txt"], self.repo)
+        status = server.git_status(self.repo)
+
+        with self.assertRaisesRegex(server.WorkflowError, "暂存区已包含非当前任务改动"):
+            server.stage_task(task_id, status["digest"], ["feature.txt"])
+
+        self.assertEqual(
+            subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=self.repo, text=True).splitlines(),
+            ["keep-local.txt"],
+        )
+        self.assertEqual(
+            subprocess.check_output(["git", "diff", "--name-only"], cwd=self.repo, text=True).splitlines(),
+            [],
+        )
+        self.assertEqual(server.git_status(self.repo)["entries"], [
+            {"code": "A ", "path": "keep-local.txt"},
+            {"code": "??", "path": "feature.txt"},
+        ])
+
     def test_task_git_status_separates_owned_and_foreign_entries(self) -> None:
         task_id = self.seed_task()
         (self.repo / "feature.txt").write_text("agent change\n", encoding="utf-8")

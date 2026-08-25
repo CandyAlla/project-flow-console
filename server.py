@@ -2447,9 +2447,10 @@ def changed_paths_between(before: dict[str, str], after: dict[str, str]) -> list
 def task_changed_files(task: dict[str, Any]) -> list[str]:
     """Return the file-level change ownership recorded for this task.
 
-    New tasks always have an explicit ``taskChangedFiles`` list.  The older
-    execution fields are kept as a read-only compatibility fallback for tasks
-    created before ownership tracking was introduced.
+    New tasks always have an explicit ``taskChangedFiles`` list. Older
+    execution fields are kept only for display compatibility; they are Agent
+    output/history rather than a trusted ownership boundary and must never
+    authorize Stage or Commit by themselves.
     """
     execution = task.get("execution")
     if not isinstance(execution, dict):
@@ -2511,6 +2512,8 @@ def record_task_change_delta(
 
 
 def task_stageable_files(task: dict[str, Any], current_snapshot: dict[str, str]) -> tuple[list[str], list[str]]:
+    if not task_change_ownership_known(task):
+        return [], []
     fingerprints = task_changed_file_fingerprints(task)
     stageable: list[str] = []
     mixed = set(task_mixed_changed_files(task))
@@ -2529,11 +2532,15 @@ def task_stageable_files(task: dict[str, Any], current_snapshot: dict[str, str])
 
 def task_change_ownership_known(task: dict[str, Any]) -> bool:
     execution = task.get("execution")
-    if not isinstance(execution, dict):
-        return False
-    return "taskChangedFiles" in execution or "roundChangedFiles" in execution or bool(
-        isinstance(execution.get("result"), dict) and "changed_files" in execution["result"]
-    )
+    # ``roundChangedFiles`` and result.changed_files predate ownership
+    # tracking and may describe every dirty file seen by an older execution.
+    # Only the explicit list produced from before/after snapshots is trusted.
+    return isinstance(execution, dict) and isinstance(execution.get("taskChangedFiles"), list)
+
+
+def entry_has_staged_change(entry: dict[str, Any]) -> bool:
+    code = str(entry.get("code") or "")
+    return bool(code) and code[0] not in {" ", "?"}
 
 
 def decorate_git_status_for_task(
@@ -4491,7 +4498,10 @@ def resolve_commit_paths(
         if path in allowed or str(entry.get("originalPath") or "") in allowed
     ]
     if not ownership_known:
-        raise WorkflowError("当前任务没有可靠的实际修改记录，不能安全 Stage/Commit；请先重新执行任务以建立文件归属。")
+        raise WorkflowError(
+            "当前任务没有执行前后快照形成的可靠文件归属，不能安全 Stage/Commit；"
+            "请在控制台外手动按文件处理，或重新执行任务以建立归属。"
+        )
     if selected_paths is None:
         if not available_paths:
             raise WorkflowError("当前任务没有可 Stage/Commit 的实际修改文件。Worktree 中其他改动已被保护。")
@@ -4533,7 +4543,19 @@ def stage_task(task_id: str, expected_digest: str, selected_paths: Any = None) -
             raise WorkflowError("Git 状态已变化，已停止 Stage；请刷新并重新核对文件列表。")
         if not status["entries"]:
             raise WorkflowError("当前没有可暂存改动。")
-        stageable_paths, _ = task_stageable_files(task, worktree_change_snapshot(worktree))
+        current_snapshot = worktree_change_snapshot(worktree)
+        decorated = decorate_git_status_for_task(task, status, current_snapshot)
+        already_staged_foreign = [
+            entry
+            for entry in [*(decorated.get("mixedEntries") or []), *(decorated.get("foreignEntries") or [])]
+            if entry_has_staged_change(entry)
+        ]
+        if already_staged_foreign:
+            raise WorkflowError(
+                "暂存区已包含非当前任务改动，无法保证一键 Stage 后只有当前任务内容："
+                f"{already_staged_foreign[0].get('path')}。请先在控制台外处理现有暂存区。"
+            )
+        stageable_paths, _ = task_stageable_files(task, current_snapshot)
         paths, entries_by_path = resolve_commit_paths(
             status,
             selected_paths,
