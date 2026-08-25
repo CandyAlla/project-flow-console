@@ -76,6 +76,7 @@ class ControllerTests(unittest.TestCase):
             "maxStageIndex": 6,
             "events": [],
             "worktree": {"path": str(self.repo)},
+            "execution": {"taskChangedFiles": ["README.md", "RENAMED.md", "bugfix.txt", "feature.txt"]},
             "verification": {"approved": True},
             "git": {"committed": False, "commitId": ""},
         }
@@ -98,7 +99,7 @@ class ControllerTests(unittest.TestCase):
             "plan": {"status": "ready", "approved": True, "finalPath": str(self.repo / "plan.md"), "markdown": "# Plan"},
             "paths": {"planRelative": "plan.md", "htmlRelative": ""},
             "worktree": {"status": "ready", "path": str(self.repo), "branch": "main", "name": "quick-mode"},
-            "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
+            "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "taskChangedFiles": [], "logs": [], "error": ""},
             "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
             "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "cwd": str(self.repo), "logs": [], "error": ""},
             "codexApp": server.default_codex_app_chat(self.repo),
@@ -252,6 +253,76 @@ class ControllerTests(unittest.TestCase):
         ])
         self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip(), status["head"])
 
+    def test_stage_defaults_to_task_owned_paths_and_protects_other_worktree_changes(self) -> None:
+        task_id = self.seed_task()
+        (self.repo / "feature.txt").write_text("agent change\n", encoding="utf-8")
+        (self.repo / "keep-local.txt").write_text("user change\n", encoding="utf-8")
+        status = server.git_status(self.repo)
+
+        server.stage_task(task_id, status["digest"])
+
+        self.assertEqual(
+            subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=self.repo, text=True).splitlines(),
+            ["feature.txt"],
+        )
+        self.assertEqual(
+            subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=self.repo, text=True).splitlines(),
+            ["keep-local.txt"],
+        )
+
+    def test_stage_and_commit_reject_non_task_paths_even_when_requested_directly(self) -> None:
+        task_id = self.seed_task()
+        (self.repo / "feature.txt").write_text("agent change\n", encoding="utf-8")
+        (self.repo / "keep-local.txt").write_text("user change\n", encoding="utf-8")
+        status = server.git_status(self.repo)
+
+        with self.assertRaisesRegex(server.WorkflowError, "不是当前任务实际修改"):
+            server.stage_task(task_id, status["digest"], ["keep-local.txt"])
+        with self.assertRaisesRegex(server.WorkflowError, "不是当前任务实际修改"):
+            server.commit_task(task_id, "feat: unsafe request", status["digest"], ["keep-local.txt"])
+
+        self.assertEqual(subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=self.repo, text=True).strip(), "")
+
+    def test_task_git_status_separates_owned_and_foreign_entries(self) -> None:
+        task_id = self.seed_task()
+        (self.repo / "feature.txt").write_text("agent change\n", encoding="utf-8")
+        (self.repo / "keep-local.txt").write_text("user change\n", encoding="utf-8")
+
+        server.refresh_git_task(task_id)
+
+        git = server.get_task_copy(task_id)["git"]
+        self.assertEqual([item["path"] for item in git["taskEntries"]], ["feature.txt"])
+        self.assertEqual([item["path"] for item in git["foreignEntries"]], ["keep-local.txt"])
+        self.assertTrue(git["taskChangeOwnershipKnown"])
+
+    def test_task_owned_file_changed_after_execution_is_quarantined(self) -> None:
+        task_id = self.seed_task()
+        (self.repo / "feature.txt").write_text("agent change\n", encoding="utf-8")
+        snapshot = server.worktree_change_snapshot(self.repo)
+        with server.mutate_task(task_id) as task:
+            task["execution"]["taskChangedFileFingerprints"] = {"feature.txt": snapshot["feature.txt"]}
+        (self.repo / "feature.txt").write_text("agent change plus user edit\n", encoding="utf-8")
+        status = server.git_status(self.repo)
+
+        server.refresh_git_task(task_id)
+        git = server.get_task_copy(task_id)["git"]
+        self.assertEqual(git["taskEntries"], [])
+        self.assertEqual([item["path"] for item in git["mixedEntries"]], ["feature.txt"])
+        with self.assertRaisesRegex(server.WorkflowError, "不是当前任务实际修改"):
+            server.stage_task(task_id, status["digest"], ["feature.txt"])
+
+    def test_execution_delta_does_not_claim_a_preexisting_user_modified_file(self) -> None:
+        task = {"execution": {"taskChangedFiles": []}}
+        changed = server.record_task_change_delta(
+            task,
+            {"shared.cs": "user-before"},
+            {"shared.cs": "agent-after"},
+        )
+
+        self.assertEqual(changed, ["shared.cs"])
+        self.assertEqual(task["execution"]["taskChangedFiles"], [])
+        self.assertEqual(task["execution"]["taskMixedChangedFiles"], ["shared.cs"])
+
     def test_stage_rejects_stale_git_state(self) -> None:
         task_id = self.seed_task()
         first = server.git_status(self.repo)
@@ -306,6 +377,33 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(task["git"]["entries"]), 1)
         self.assertEqual(task["stage"], "bugfix")
         self.assertIn("仍有 1 项未提交改动", task["events"][-1]["message"])
+
+    def test_confirm_manual_commit_ignores_stale_rebase_head_without_rebase_state(self) -> None:
+        task_id = self.seed_task()
+        (self.repo / "feature.txt").write_text("manual commit\n", encoding="utf-8")
+        run(["git", "add", "feature.txt"], self.repo)
+        run(["git", "-c", "user.name=Flow Test", "-c", "user.email=flow@example.test", "commit", "-m", "feat: manual work"], self.repo)
+        server.git_path(self.repo, "REBASE_HEAD").write_text(
+            subprocess.check_output(["git", "rev-parse", "HEAD^"], cwd=self.repo, text=True).strip() + "\n",
+            encoding="utf-8",
+        )
+        status = server.git_status(self.repo)
+
+        commit_id = server.confirm_manual_commit(task_id, status["digest"])
+
+        self.assertEqual(commit_id, status["head"])
+        self.assertEqual(server.unfinished_git_operation(self.repo), "")
+        self.assertTrue(server.get_task_copy(task_id)["git"]["committed"])
+
+    def test_confirm_manual_commit_still_rejects_real_rebase_state(self) -> None:
+        task_id = self.seed_task()
+        server.git_path(self.repo, "rebase-merge").mkdir()
+        status = server.git_status(self.repo)
+
+        with self.assertRaisesRegex(server.WorkflowError, "REBASE_HEAD"):
+            server.confirm_manual_commit(task_id, status["digest"])
+
+        self.assertFalse(server.get_task_copy(task_id)["git"]["committed"])
 
     def test_confirm_manual_commit_rejects_stale_git_state(self) -> None:
         task_id = self.seed_task()
@@ -637,10 +735,17 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('data-section-jump="${index}"', app_js)
         self.assertIn('aria-controls="sectionNavigatorPanel"', app_js)
         self.assertIn('aria-current", "location"', app_js)
+        self.assertIn("const jumpToSection = (index) =>", app_js)
+        self.assertIn('data-section-marker="${index}" role="button" tabindex="0"', app_js)
+        self.assertIn('markers.forEach((marker, index) =>', app_js)
+        self.assertIn("点击任意标记跳转，悬停展开目录", app_js)
+        self.assertIn("const scheduleClose = () =>", app_js)
+        self.assertIn("}, 280);", app_js)
+        self.assertIn('panel.addEventListener("pointerenter", () => setOpen(true))', app_js)
         self.assertIn('sections[index].element.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" })', app_js)
         self.assertIn('window.addEventListener("scroll", onScroll, { passive: true })', app_js)
         self.assertIn('navigator.addEventListener("pointerenter", () => setOpen(true))', app_js)
-        self.assertIn('navigator.addEventListener("pointerleave", () => setOpen(false))', app_js)
+        self.assertIn('navigator.addEventListener("pointerleave", scheduleClose)', app_js)
         self.assertIn('class="section-navigator-snapshot"', app_js)
         self.assertIn('const gapLeft = workflowRect?.right ?? workspaceRect.left - 18', app_js)
         self.assertIn('navigator.style.setProperty("--section-nav-width", `${gapWidth}px`)', app_js)
@@ -650,6 +755,8 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("position: fixed;", index_html)
         self.assertIn(".section-navigator:is(:hover, .is-open) .section-navigator-panel", index_html)
         self.assertIn(".section-navigator-snapshot", index_html)
+        self.assertIn(".section-navigator-line::after", index_html)
+        self.assertIn("left: calc(100% - 2px);", index_html)
         self.assertIn(".section-navigator.is-outside-stage", index_html)
         self.assertIn(".app-shell, .app-shell.verification-layout-active { grid-template-columns: 1fr;", index_html)
 
@@ -993,6 +1100,9 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("Stage 当前任务修改", app_js)
         self.assertIn('post(`/api/tasks/${task.id}/stage`', app_js)
         self.assertIn("只会执行 git add，不会 Commit", app_js)
+        self.assertIn("task.git?.taskEntries || []", app_js)
+        self.assertIn("非当前任务修改，已禁止 Stage/Commit", app_js)
+        self.assertIn("taskCommitEntries().map", app_js)
 
     def test_semantic_worktree_slug_rejects_generic_names(self) -> None:
         for slug in ("v2", "feature-v2", "task-feature-v2"):

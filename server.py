@@ -2060,10 +2060,7 @@ def managed_worktrees_payload() -> dict[str, Any]:
             status_detail = "目录不存在，需手动执行 git worktree prune。"
         else:
             try:
-                unfinished_ref = next((
-                    ref for ref in ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
-                    if run_command(["git", "rev-parse", "--verify", "-q", ref], Path(path)).returncode == 0
-                ), "")
+                unfinished_ref = unfinished_git_operation(Path(path))
                 if unfinished_ref:
                     status = "operation"
                     status_detail = f"存在未完成的 Git 操作：{unfinished_ref}。"
@@ -2216,6 +2213,21 @@ def git_common_dir(path: Path) -> Path:
     return (value if value.is_absolute() else path / value).resolve()
 
 
+def git_path(path: Path, name: str) -> Path:
+    value = Path(command_ok(["git", "rev-parse", "--git-path", name], path))
+    return (value if value.is_absolute() else path / value).resolve(strict=False)
+
+
+def unfinished_git_operation(path: Path) -> str:
+    """Return a real in-progress Git operation, ignoring stale REBASE_HEAD refs."""
+    for ref in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+        if run_command(["git", "rev-parse", "--verify", "-q", ref], path).returncode == 0:
+            return ref
+    if git_path(path, "rebase-merge").is_dir() or git_path(path, "rebase-apply").is_dir():
+        return "REBASE_HEAD"
+    return ""
+
+
 def validate_existing_worktree(path_value: str, expected_branch: str = "") -> dict[str, str]:
     candidate = Path(path_value).expanduser()
     if not candidate.is_absolute():
@@ -2238,9 +2250,8 @@ def validate_existing_worktree(path_value: str, expected_branch: str = "") -> di
         raise WorkflowError("已有 Worktree 当前处于 detached HEAD，拒绝接入。")
     if expected_branch and branch != expected_branch:
         raise WorkflowError(f"已有 Worktree 分支已变化：预期 {expected_branch}，实际 {branch}。")
-    for ref in ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
-        if run_command(["git", "rev-parse", "--verify", "-q", ref], path).returncode == 0:
-            raise WorkflowError(f"已有 Worktree 存在未完成的 Git 操作：{ref}。")
+    if operation := unfinished_git_operation(path):
+        raise WorkflowError(f"已有 Worktree 存在未完成的 Git 操作：{operation}。")
     return {"path": str(path), "branch": branch, "head": command_ok(["git", "rev-parse", "HEAD"], path)}
 
 
@@ -2424,6 +2435,129 @@ def changed_paths_between(before: dict[str, str], after: dict[str, str]) -> list
     return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
 
 
+def task_changed_files(task: dict[str, Any]) -> list[str]:
+    """Return the file-level change ownership recorded for this task.
+
+    New tasks always have an explicit ``taskChangedFiles`` list.  The older
+    execution fields are kept as a read-only compatibility fallback for tasks
+    created before ownership tracking was introduced.
+    """
+    execution = task.get("execution")
+    if not isinstance(execution, dict):
+        return []
+    if "taskChangedFiles" in execution:
+        values = execution.get("taskChangedFiles")
+    else:
+        values = execution.get("roundChangedFiles")
+        if not isinstance(values, list) or not values:
+            values = (execution.get("result") or {}).get("changed_files")
+    return compact_strings(values, 200, 1200)
+
+
+def task_changed_file_fingerprints(task: dict[str, Any]) -> dict[str, str]:
+    execution = task.get("execution")
+    values = execution.get("taskChangedFileFingerprints") if isinstance(execution, dict) else None
+    if not isinstance(values, dict):
+        return {}
+    return {
+        str(path): str(fingerprint)
+        for path, fingerprint in values.items()
+        if isinstance(path, str) and path and isinstance(fingerprint, str) and fingerprint
+    }
+
+
+def task_mixed_changed_files(task: dict[str, Any]) -> list[str]:
+    execution = task.get("execution")
+    values = execution.get("taskMixedChangedFiles") if isinstance(execution, dict) else None
+    return compact_strings(values, 200, 1200)
+
+
+def record_task_change_delta(
+    task: dict[str, Any],
+    before: dict[str, str],
+    after: dict[str, str],
+) -> list[str]:
+    """Record safe task-owned paths and quarantine files with mixed ownership."""
+    actual = changed_paths_between(before, after)
+    owned = set(task_changed_files(task))
+    mixed = set(task_mixed_changed_files(task))
+    fingerprints = task_changed_file_fingerprints(task)
+    for path in actual:
+        task_owned_before = path in owned
+        fingerprint_matches_before = path in fingerprints and fingerprints.get(path) == before.get(path)
+        if path not in mixed and (path not in before or (task_owned_before and fingerprint_matches_before)):
+            owned.add(path)
+            fingerprints[path] = after.get(path, "")
+        else:
+            owned.discard(path)
+            fingerprints.pop(path, None)
+            mixed.add(path)
+    execution = task.setdefault("execution", {})
+    execution["taskChangedFiles"] = sorted(owned)
+    execution["taskMixedChangedFiles"] = sorted(mixed)
+    execution["taskChangedFileFingerprints"] = {
+        path: fingerprints[path] for path in sorted(owned) if fingerprints.get(path)
+    }
+    return actual
+
+
+def task_stageable_files(task: dict[str, Any], current_snapshot: dict[str, str]) -> tuple[list[str], list[str]]:
+    fingerprints = task_changed_file_fingerprints(task)
+    stageable: list[str] = []
+    mixed = set(task_mixed_changed_files(task))
+    for path in task_changed_files(task):
+        expected = fingerprints.get(path)
+        if expected and path not in current_snapshot:
+            # A task-owned deletion is still stageable; Git status is the
+            # source of truth for whether the path is a deletion.
+            stageable.append(path)
+        elif expected and current_snapshot.get(path) != expected:
+            mixed.add(path)
+        elif path not in mixed:
+            stageable.append(path)
+    return sorted(stageable), sorted(mixed)
+
+
+def task_change_ownership_known(task: dict[str, Any]) -> bool:
+    execution = task.get("execution")
+    if not isinstance(execution, dict):
+        return False
+    return "taskChangedFiles" in execution or "roundChangedFiles" in execution or bool(
+        isinstance(execution.get("result"), dict) and "changed_files" in execution["result"]
+    )
+
+
+def decorate_git_status_for_task(
+    task: dict[str, Any],
+    status: dict[str, Any],
+    current_snapshot: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if current_snapshot is None:
+        current_snapshot = worktree_change_snapshot(Path(task["worktree"]["path"])) if status.get("entries") else {}
+    stageable, mixed = task_stageable_files(task, current_snapshot)
+    owned = set(stageable)
+    mixed_paths = set(mixed)
+    task_entries: list[dict[str, Any]] = []
+    mixed_entries: list[dict[str, Any]] = []
+    foreign_entries: list[dict[str, Any]] = []
+    for entry in status.get("entries") or []:
+        path = str(entry.get("path") or "")
+        original = str(entry.get("originalPath") or "")
+        if path in mixed_paths or original in mixed_paths:
+            target = mixed_entries
+        else:
+            target = task_entries if path in owned or original in owned else foreign_entries
+        target.append(entry)
+    return {
+        **status,
+        "taskChangedFiles": sorted(task_changed_files(task)),
+        "taskEntries": task_entries,
+        "mixedEntries": mixed_entries,
+        "foreignEntries": foreign_entries,
+        "taskChangeOwnershipKnown": task_change_ownership_known(task),
+    }
+
+
 def refresh_git_task(task_id: str) -> dict[str, Any]:
     task = get_task_copy(task_id)
     worktree_path = task.get("worktree", {}).get("path")
@@ -2437,7 +2571,7 @@ def refresh_git_task(task_id: str) -> dict[str, Any]:
             for key in ("committed", "commitId", "message", "commitSource", "confirmedAt")
             if key in previous
         }
-        live["git"] = {**status, **completion}
+        live["git"] = {**decorate_git_status_for_task(live, status), **completion}
     return status
 
 
@@ -3365,7 +3499,7 @@ def _worktree_job(task_id: str) -> None:
         live["plan"]["finalPath"] = str(plan_path)
         live["stage"] = "execute"
         live["maxStageIndex"] = max(live["maxStageIndex"], STAGE_INDEX["execute"])
-        live["git"] = {**status, "committed": False, "commitId": ""}
+        live["git"] = {**decorate_git_status_for_task(live, status), "committed": False, "commitId": ""}
         add_event(
             live,
             f"Worktree 已准备并关联本地轻量执行单：{path}" if direct_execution else f"Worktree 已创建并绑定 Plan：{path}",
@@ -3841,6 +3975,7 @@ def execution_job(
             else:
                 live["execution"].pop("roundResult", None)
             live["execution"]["roundChangedFiles"] = round_changed_files
+            record_task_change_delta(live, before_snapshot, after_snapshot)
         if isinstance(live["execution"].get("review"), dict):
             live["execution"]["previousReview"] = live["execution"]["review"]
         live["execution"]["review"] = None
@@ -3865,7 +4000,7 @@ def execution_job(
     status = git_status(Path(task["worktree"]["path"]))
     with mutate_task(task_id) as live:
         live["execution"].update({"result": result, "review": review, "error": "", "reviewStatus": "complete"})
-        live["git"] = {**status, "committed": False, "commitId": ""}
+        live["git"] = {**decorate_git_status_for_task(live, status), "committed": False, "commitId": ""}
         if review.get("verdict") == "pass":
             live["execution"].update({"status": "complete", "phase": "complete"})
             if bugfix_active:
@@ -4029,8 +4164,9 @@ def quick_execution_job(
                     "diffStat": status.get("diffStat", ""),
                     "reason": safe_log(exc, 1200),
                 }
+                record_task_change_delta(live, before_snapshot, after_snapshot)
                 execution.update({"status": "partial", "phase": "implementation"})
-                live["git"] = {**status, "committed": False, "commitId": ""}
+                live["git"] = {**decorate_git_status_for_task(live, status, after_snapshot), "committed": False, "commitId": ""}
             raise PartialWorkflowError(
                 f"{safe_log(exc, 1000)} 检测到 {len(cumulative_files)} 个执行文件已有改动，已保存断点；请继续现有修改并完成自检。"
             ) from exc
@@ -4076,9 +4212,10 @@ def quick_execution_job(
             "review": review,
             "error": "",
         })
+        record_task_change_delta(live, before_snapshot, after_snapshot)
         live["execution"].pop("checkpoint", None)
         live["execution"].pop("resumeFromCheckpoint", None)
-        live["git"] = {**status, "committed": False, "commitId": ""}
+        live["git"] = {**decorate_git_status_for_task(live, status, after_snapshot), "committed": False, "commitId": ""}
         if remapped_checks is not None:
             verification = live.setdefault("verification", {})
             verification.update({
@@ -4228,7 +4365,7 @@ def prepare_bugfix_request(
                 for key in ("committed", "commitId", "message", "commitSource", "confirmedAt")
                 if key in previous
             }
-            live["git"] = {**status, **completion}
+            live["git"] = {**decorate_git_status_for_task(live, status), **completion}
         raise WorkflowError("Git 状态已变化，未启动 Bug 修复；请刷新并重新核对当前 HEAD 和文件列表。")
 
     attachments = persist_feedback_images(task_id, images, "bugfix")
@@ -4267,7 +4404,10 @@ def prepare_bugfix_request(
             "note": "",
             "revision": verification_revision,
         }
-        live["git"] = {**status, "committed": False, "commitId": ""}
+        live.setdefault("execution", {})["taskChangedFiles"] = []
+        live["execution"].pop("taskMixedChangedFiles", None)
+        live["execution"].pop("taskChangedFileFingerprints", None)
+        live["git"] = {**decorate_git_status_for_task(live, status), "committed": False, "commitId": ""}
         live.setdefault("execution", {})["mode"] = "bugfix"
         live["execution"]["flowMode"] = execution_mode
         live["execution"]["transport"] = "app-server" if execution_mode == "fast" else "exec"
@@ -4329,10 +4469,23 @@ def complete_bugfix_cycle(task: dict[str, Any], commit_id: str) -> None:
     bugfix.update({"status": "complete", "completedAt": now_iso(), "resultCommit": commit_id})
 
 
-def resolve_commit_paths(status: dict[str, Any], selected_paths: Any = None) -> tuple[list[str], dict[str, dict[str, Any]]]:
+def resolve_commit_paths(
+    status: dict[str, Any],
+    selected_paths: Any = None,
+    allowed_paths: Any = None,
+    ownership_known: bool = True,
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
     entries_by_path = {str(entry.get("path") or ""): entry for entry in status.get("entries") or []}
-    available_paths = list(entries_by_path)
+    allowed = set(compact_strings(allowed_paths, 200, 1200)) if allowed_paths is not None else set(entries_by_path)
+    available_paths = [
+        path for path, entry in entries_by_path.items()
+        if path in allowed or str(entry.get("originalPath") or "") in allowed
+    ]
+    if not ownership_known:
+        raise WorkflowError("当前任务没有可靠的实际修改记录，不能安全 Stage/Commit；请先重新执行任务以建立文件归属。")
     if selected_paths is None:
+        if not available_paths:
+            raise WorkflowError("当前任务没有可 Stage/Commit 的实际修改文件。Worktree 中其他改动已被保护。")
         return available_paths, entries_by_path
     if not isinstance(selected_paths, list):
         raise WorkflowError("请选择要操作的文件列表。")
@@ -4346,6 +4499,12 @@ def resolve_commit_paths(status: dict[str, Any], selected_paths: Any = None) -> 
     unknown = [path for path in paths if path not in entries_by_path]
     if unknown:
         raise WorkflowError(f"文件列表已过期或不在当前改动中：{unknown[0]}")
+    foreign = [
+        path for path in paths
+        if path not in available_paths and str(entries_by_path[path].get("originalPath") or "") not in allowed
+    ]
+    if foreign:
+        raise WorkflowError(f"该文件不是当前任务实际修改内容，不能 Stage/Commit：{foreign[0]}")
     if not paths:
         raise WorkflowError("至少选择一个要操作的文件。")
     return paths, entries_by_path
@@ -4361,11 +4520,17 @@ def stage_task(task_id: str, expected_digest: str, selected_paths: Any = None) -
         status = git_status(worktree)
         if status["digest"] != expected_digest:
             with mutate_task(task_id) as live:
-                live["git"] = {**status, "committed": False, "commitId": ""}
+                live["git"] = {**decorate_git_status_for_task(live, status), "committed": False, "commitId": ""}
             raise WorkflowError("Git 状态已变化，已停止 Stage；请刷新并重新核对文件列表。")
         if not status["entries"]:
             raise WorkflowError("当前没有可暂存改动。")
-        paths, entries_by_path = resolve_commit_paths(status, selected_paths)
+        stageable_paths, _ = task_stageable_files(task, worktree_change_snapshot(worktree))
+        paths, entries_by_path = resolve_commit_paths(
+            status,
+            selected_paths,
+            stageable_paths,
+            task_change_ownership_known(task),
+        )
         selected_specs = [f":(literal){path}" for path in paths]
         staged = run_command(["git", "add", "-A", "--", *selected_specs], worktree)
         if staged.returncode != 0:
@@ -4382,7 +4547,7 @@ def stage_task(task_id: str, expected_digest: str, selected_paths: Any = None) -
                 raise WorkflowError(staged_originals.stderr or staged_originals.stdout or "git 清理重命名原路径失败。")
         refreshed = git_status(worktree)
         with mutate_task(task_id) as live:
-            live["git"] = {**refreshed, "committed": False, "commitId": ""}
+            live["git"] = {**decorate_git_status_for_task(live, refreshed), "committed": False, "commitId": ""}
             add_event(live, f"已暂存当前选择的 {len(paths)} 个文件；未执行 Commit。", "ok")
         return get_task_copy(task_id)
 
@@ -4411,17 +4576,22 @@ def _commit_task(
     status = git_status(worktree)
     if status["digest"] != expected_digest:
         with mutate_task(task_id) as live:
-            live["git"] = {**status, "committed": False, "commitId": ""}
+            live["git"] = {**decorate_git_status_for_task(live, status), "committed": False, "commitId": ""}
         raise WorkflowError("Git 状态已变化，已停止 Commit；请刷新并重新核对文件列表。")
     if not status["entries"]:
         raise WorkflowError("当前没有可提交改动。")
-    commit_paths, entries_by_path = resolve_commit_paths(status, selected_paths)
+    stageable_paths, _ = task_stageable_files(task, worktree_change_snapshot(worktree))
+    commit_paths, entries_by_path = resolve_commit_paths(
+        status,
+        selected_paths,
+        stageable_paths,
+        task_change_ownership_known(task),
+    )
     message = message.strip()
     if not message or "\n" in message or len(message) > 120:
         raise WorkflowError("Commit Message 必须为 1–120 个字符的单行文本。")
-    for ref in ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
-        if run_command(["git", "rev-parse", "--verify", "-q", ref], worktree).returncode == 0:
-            raise WorkflowError(f"检测到未完成的 Git 操作：{ref}，拒绝 Commit。")
+    if operation := unfinished_git_operation(worktree):
+        raise WorkflowError(f"检测到未完成的 Git 操作：{operation}，拒绝 Commit。")
     identity = run_command(["git", "var", "GIT_AUTHOR_IDENT"], worktree)
     if identity.returncode != 0:
         raise WorkflowError("Git 作者身份不可用；控制服务不会修改 git config。")
@@ -4451,7 +4621,7 @@ def _commit_task(
     final_status = git_status(worktree)
     with mutate_task(task_id) as live:
         live["git"] = {
-            **final_status,
+            **decorate_git_status_for_task(live, final_status),
             "committed": True,
             "commitId": commit_id,
             "message": message,
@@ -4478,11 +4648,10 @@ def confirm_manual_commit(task_id: str, expected_digest: str) -> str:
         status = git_status(worktree)
         if status["digest"] != expected_digest:
             with mutate_task(task_id) as live:
-                live["git"] = {**status, "committed": False, "commitId": ""}
+                live["git"] = {**decorate_git_status_for_task(live, status), "committed": False, "commitId": ""}
             raise WorkflowError("Git 状态已变化，未确认人工 Commit；请刷新并重新核对当前 HEAD 和文件列表。")
-        for ref in ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
-            if run_command(["git", "rev-parse", "--verify", "-q", ref], worktree).returncode == 0:
-                raise WorkflowError(f"检测到未完成的 Git 操作：{ref}，不能确认人工 Commit。")
+        if operation := unfinished_git_operation(worktree):
+            raise WorkflowError(f"检测到未完成的 Git 操作：{operation}，不能确认人工 Commit。")
         commit_id = status["head"]
         message = command_ok(["git", "show", "-s", "--format=%s", commit_id], worktree)
         pending_count = len(status["entries"])
@@ -4990,7 +5159,7 @@ workflow: quick-change
             "branch": f"worktree/{worktree_name}", "path": str(WORKTREES_ROOT / worktree_name),
             "preview": "", "output": "", "logs": [], "error": "",
         },
-        "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
+        "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "taskChangedFiles": [], "logs": [], "error": ""},
         "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
         "app": {"status": "idle", "threadId": None, "turnId": None, "deepLink": "", "cwd": str(REPO_ROOT.resolve()), "logs": [], "error": ""},
         "codexApp": default_codex_app_chat(REPO_ROOT.resolve()),
@@ -5156,7 +5325,7 @@ def create_imported_task(payload: dict[str, Any]) -> dict[str, Any]:
             "imported": True,
             "preview": "", "output": "", "logs": [], "error": "",
         },
-        "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "logs": [], "error": ""},
+        "execution": {"status": "idle", "phase": "idle", "threadId": None, "result": None, "review": None, "taskChangedFiles": [], "logs": [], "error": ""},
         "ask": {"status": "idle", "threadId": None, "messages": [], "logs": [], "error": ""},
         "app": {
             "status": "idle", "threadId": None, "turnId": None, "deepLink": "",

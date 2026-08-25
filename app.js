@@ -1506,7 +1506,7 @@
     navigator.className = "section-navigator";
     navigator.id = "sectionNavigator";
     navigator.setAttribute("aria-label", "当前页面段落导航");
-    navigator.innerHTML = `<div class="section-navigator-panel" id="sectionNavigatorPanel" aria-hidden="true"><div class="section-navigator-head"><strong>段落与快照</strong><span>${sections.length} 个</span></div><nav class="section-navigator-list" aria-label="段落标题">${sections.map((item, index) => `<button class="section-navigator-item" type="button" data-section-jump="${index}" title="跳转到：${escapeHTML(item.title)}"><span class="section-navigator-index">${String(index + 1).padStart(2, "0")}</span><span class="section-navigator-copy"><span class="section-navigator-label">${escapeHTML(item.title)}</span><small class="section-navigator-snapshot">${escapeHTML(item.snapshot)}</small></span></button>`).join("")}</nav></div><button class="section-navigator-toggle" type="button" aria-expanded="false" aria-controls="sectionNavigatorPanel" aria-label="段落导航，悬停展开" title="悬停查看段落">${sections.slice(0, 5).map((_, index) => `<span class="section-navigator-line ${index === 0 ? "is-active" : ""}" data-section-marker="${index}" aria-hidden="true"></span>`).join("")}</button>`;
+    navigator.innerHTML = `<div class="section-navigator-panel" id="sectionNavigatorPanel" aria-hidden="true"><div class="section-navigator-head"><strong>段落与快照</strong><span>${sections.length} 个</span></div><nav class="section-navigator-list" aria-label="段落标题">${sections.map((item, index) => `<button class="section-navigator-item" type="button" data-section-jump="${index}" title="跳转到：${escapeHTML(item.title)}"><span class="section-navigator-index">${String(index + 1).padStart(2, "0")}</span><span class="section-navigator-copy"><span class="section-navigator-label">${escapeHTML(item.title)}</span><small class="section-navigator-snapshot">${escapeHTML(item.snapshot)}</small></span></button>`).join("")}</nav></div><div class="section-navigator-toggle" role="group" aria-expanded="false" aria-controls="sectionNavigatorPanel" aria-label="段落快捷跳转" title="点击任意标记直接跳转；悬停查看段落"><span class="section-navigator-hint">点击跳转</span>${sections.map((item, index) => `<span class="section-navigator-line ${index === 0 ? "is-active" : ""}" data-section-marker="${index}" role="button" tabindex="0" aria-label="跳转到：${escapeHTML(item.title)}" title="跳转到：${escapeHTML(item.title)}"></span>`).join("")}</div>`;
     document.body.append(navigator);
 
     const toggle = navigator.querySelector(".section-navigator-toggle");
@@ -1515,14 +1515,26 @@
     const markers = Array.from(navigator.querySelectorAll("[data-section-marker]"));
     let activeIndex = 0;
     let scrollFrame = 0;
+    let closeTimer = 0;
     let open = false;
 
     const setOpen = (nextOpen) => {
+      if (nextOpen && closeTimer) {
+        window.clearTimeout(closeTimer);
+        closeTimer = 0;
+      }
       open = nextOpen;
       navigator.classList.toggle("is-open", nextOpen);
       panel.setAttribute("aria-hidden", String(!nextOpen));
       toggle.setAttribute("aria-expanded", String(nextOpen));
-      toggle.setAttribute("aria-label", nextOpen ? "段落导航已展开" : "段落导航，悬停展开");
+      toggle.setAttribute("aria-label", nextOpen ? "段落导航已展开，点击任意标记跳转" : "点击任意标记跳转，悬停展开目录");
+    };
+    const scheduleClose = () => {
+      if (closeTimer) window.clearTimeout(closeTimer);
+      closeTimer = window.setTimeout(() => {
+        closeTimer = 0;
+        setOpen(false);
+      }, 280);
     };
     const setActive = (index) => {
       if (index === activeIndex && items[index]?.classList.contains("is-active")) return;
@@ -1536,6 +1548,11 @@
       const markerIndex = Math.min(index, markers.length - 1);
       markers.forEach((marker, itemIndex) => marker.classList.toggle("is-active", itemIndex === markerIndex));
       toggle.title = `当前：${sections[index].title}`;
+    };
+    const jumpToSection = (index) => {
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+      sections[index].element.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+      setActive(index);
     };
     const updatePosition = () => {
       const workspace = document.querySelector(".workspace");
@@ -1574,16 +1591,28 @@
     };
 
     navigator.addEventListener("pointerenter", () => setOpen(true));
-    navigator.addEventListener("pointerleave", () => setOpen(false));
+    navigator.addEventListener("pointerleave", scheduleClose);
+    panel.addEventListener("pointerenter", () => setOpen(true));
+    panel.addEventListener("pointerleave", scheduleClose);
     navigator.addEventListener("focusin", () => setOpen(true));
     navigator.addEventListener("focusout", (event) => {
       if (!navigator.contains(event.relatedTarget)) setOpen(false);
     });
-    toggle.addEventListener("click", () => setOpen(true));
+    markers.forEach((marker, index) => {
+      const activate = (event) => {
+        event.stopPropagation();
+        jumpToSection(index);
+        setOpen(false);
+      };
+      marker.addEventListener("click", activate);
+      marker.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        activate(event);
+      });
+    });
     items.forEach((button, index) => button.addEventListener("click", () => {
-      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-      sections[index].element.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
-      setActive(index);
+      jumpToSection(index);
       setOpen(false);
     }));
     window.addEventListener("scroll", onScroll, { passive: true });
@@ -1596,6 +1625,7 @@
 
     sectionNavigatorCleanup = () => {
       if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
+      if (closeTimer) window.clearTimeout(closeTimer);
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("click", onDocumentClick);
@@ -2260,6 +2290,10 @@
     return { available, selected: available.filter((path) => selected.includes(path)) };
   }
 
+  function taskCommitEntries() {
+    return task?.git?.taskEntries || [];
+  }
+
   function renderCommit(inBugfix = false) {
     if (task.git?.committed) {
       const manual = task.git.commitSource === "manual";
@@ -2267,13 +2301,16 @@
       return `<section class="section">${callout(`<strong>${manual ? "已确认人工 Commit" : "Commit 已完成"}。</strong> 提交：<code>${escapeHTML(task.git.commitId)}</code><br>${manual ? "控制台只记录当前 HEAD，没有执行 Git 写操作。" : "控制台没有执行 Push 或 Merge。"}`, "ok")}${pendingEntries.length ? callout(`<strong>Worktree 仍有 ${pendingEntries.length} 项未提交改动。</strong>这些改动没有被“确认人工提交”按钮处理，请按实际归属另行检查。`, "warning") : ""}</section><section class="section"><div class="path-list"><div class="path-row"><span>Worktree</span><strong class="mono">${escapeHTML(task.worktree.path)}</strong></div><div class="path-row"><span>分支</span><strong class="mono">${escapeHTML(task.git.branch)}</strong></div><div class="path-row"><span>Commit 来源</span><strong>${manual ? "人工提交（控制台仅确认）" : "控制台执行"}</strong></div><div class="path-row"><span>Commit Message</span><strong>${escapeHTML(task.git.message)}</strong></div></div></section>${pendingEntries.length ? `<section class="section"><h3>仍未提交的文件</h3><div class="diff-wrap"><table class="diff-table"><thead><tr><th>状态</th><th>文件</th></tr></thead><tbody>${pendingEntries.map((item) => `<tr><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("")}</tbody></table></div></section>` : ""}<div class="actions"><div class="actions-primary"><button class="primary" id="newTaskButton">新建下一条需求</button></div></div>${eventLogDetails()}`;
     }
     const entries = task.git?.entries || [];
-    const commitPaths = commitPathEntries(entries);
+    const taskEntries = task.git?.taskEntries || [];
+    const mixedEntries = task.git?.mixedEntries || [];
+    const foreignEntries = task.git?.foreignEntries || entries.filter((item) => !taskEntries.some((owned) => owned.path === item.path));
+    const commitPaths = commitPathEntries(taskEntries);
     const defaultMessage = `feat: complete ${task.worktree.name}`.slice(0, 120);
     if (!ui.commitMessage) ui.commitMessage = defaultMessage;
     return `<section class="section">${callout(`<strong>${inBugfix ? "Bug 修复的最后一道 Git 写入门" : "最后一道 Git 写入门"}。</strong> Commit 只作用于当前 Worktree。配套验收 HTML 位于配置的 docsRoot：<code>${escapeHTML(health?.paths?.docs || "")}</code>；若它在仓库外则不属于此 Git 提交。不会 Push 或 Merge。`, "warning")}</section>
-      <section class="section"><div class="section-heading"><div><p class="section-kicker">逐项选择</p><h3>本次要提交的文件 · ${escapeHTML(task.git.refreshedAt || "尚未刷新")}</h3></div><strong class="gate-progress">已选 ${commitPaths.selected.length} / ${commitPaths.available.length}</strong></div><p class="section-copy">默认全选。取消勾选的文件会保留在 Worktree，不会进入本次控制台 Commit；刷新 Git 状态后需要重新选择。</p><div class="diff-wrap"><table class="diff-table"><thead><tr><th>提交</th><th>状态</th><th>文件</th></tr></thead><tbody>${entries.length ? entries.map((item) => `<tr><td><input type="checkbox" data-commit-path="${escapeHTML(item.path)}" ${commitPaths.selected.includes(item.path) ? "checked" : ""} aria-label="选择提交 ${escapeHTML(item.path)}"></td><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("") : '<tr><td colspan="3">当前没有改动</td></tr>'}</tbody></table></div>${task.git.diffStat ? `<div class="preview"><pre>${escapeHTML(task.git.diffStat)}</pre></div>` : ""}</section>
+      <section class="section"><div class="section-heading"><div><p class="section-kicker">逐项选择</p><h3>当前任务实际修改 · ${escapeHTML(task.git.refreshedAt || "尚未刷新")}</h3></div><strong class="gate-progress">已选 ${commitPaths.selected.length} / ${commitPaths.available.length}</strong></div><p class="section-copy">只有执行前后快照确认过，且完成后未被再次改动的当前任务文件可 Stage/Commit；取消勾选的文件会保留在 Worktree。</p><div class="diff-wrap"><table class="diff-table"><thead><tr><th>提交</th><th>状态</th><th>文件</th></tr></thead><tbody>${taskEntries.length ? taskEntries.map((item) => `<tr><td><input type="checkbox" data-commit-path="${escapeHTML(item.path)}" ${commitPaths.selected.includes(item.path) ? "checked" : ""} aria-label="选择提交 ${escapeHTML(item.path)}"></td><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("") : '<tr><td colspan="3">当前任务没有可操作的实际修改</td></tr>'}</tbody></table></div>${mixedEntries.length ? `<div class="section-copy" style="margin-top:14px"><strong>混合改动（${mixedEntries.length} 个）</strong>：任务执行后又被改动，无法按文件安全拆分，已禁止 Stage/Commit。</div><div class="diff-wrap"><table class="diff-table"><thead><tr><th>状态</th><th>文件</th></tr></thead><tbody>${mixedEntries.map((item) => `<tr><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("")}</tbody></table></div>` : ""}${foreignEntries.length ? `<div class="section-copy" style="margin-top:14px"><strong>Worktree 其他改动（${foreignEntries.length} 个）</strong>：非当前任务修改，已禁止 Stage/Commit。</div><div class="diff-wrap"><table class="diff-table"><thead><tr><th>状态</th><th>文件</th></tr></thead><tbody>${foreignEntries.map((item) => `<tr><td class="diff-status">${escapeHTML(item.code)}</td><td class="mono">${escapeHTML(item.path)}</td></tr>`).join("")}</tbody></table></div>` : ""}</section>
       <section class="section"><div class="field"><label for="commitMessage">Commit Message</label><input id="commitMessage" class="mono" type="text" maxlength="120" value="${escapeHTML(ui.commitMessage)}"></div><label class="choice"><input id="commitConfirmed" type="checkbox" ${ui.commitConfirmed ? "checked" : ""}><span>我已确认文件选择、自动验证和人工验收结果。</span></label></section>
-      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button>${inBugfix ? "" : '<button id="backToVerify">返回人工验收</button>'}</div><div class="actions-primary"><button id="confirmManualCommit" ${ui.commitConfirmed ? "" : "disabled"}>确认已人工提交</button><button id="stageChanges" ${commitPaths.selected.length ? "" : "disabled"}>Stage 当前任务修改${commitPaths.selected.length ? `（${commitPaths.selected.length} 个文件）` : ""}</button><button class="primary" id="commitChanges" ${ui.commitConfirmed && commitPaths.selected.length ? "" : "disabled"}>Commit${commitPaths.selected.length ? `（${commitPaths.selected.length} 个文件）` : ""}</button></div></div><p class="hint">Stage 只暂存当前任务清单中勾选的文件，不会 Commit；“确认已人工提交”只记录当前 HEAD，不会执行 Git 写操作。</p>${eventLogDetails()}`;
+      <div class="actions"><div class="actions-secondary"><button id="refreshGit">刷新 Git 状态</button>${inBugfix ? "" : '<button id="backToVerify">返回人工验收</button>'}</div><div class="actions-primary"><button id="confirmManualCommit" ${ui.commitConfirmed ? "" : "disabled"}>确认已人工提交</button><button id="stageChanges" ${commitPaths.selected.length ? "" : "disabled"}>Stage 当前任务修改${commitPaths.selected.length ? `（${commitPaths.selected.length} 个文件）` : ""}</button><button class="primary" id="commitChanges" ${ui.commitConfirmed && commitPaths.selected.length ? "" : "disabled"}>Commit${commitPaths.selected.length ? `（${commitPaths.selected.length} 个文件）` : ""}</button></div></div><p class="hint">Stage/Commit 只处理当前任务实际修改清单；Worktree 其他改动只能查看，不能被此任务暂存或提交。“确认已人工提交”只记录当前 HEAD，不执行 Git 写操作。</p>${eventLogDetails()}`;
   }
 
   function renderBugfix() {
@@ -2632,7 +2669,7 @@
       const path = event.currentTarget.dataset.commitPath || "";
       const current = new Set(Array.isArray(ui.commitSelectedPaths)
         ? ui.commitSelectedPaths
-        : (task?.git?.entries || []).map((item) => item.path));
+        : taskCommitEntries().map((item) => item.path));
       if (event.currentTarget.checked) current.add(path);
       else current.delete(path);
       ui.commitSelectedPaths = [...current];
@@ -2933,7 +2970,7 @@
     await withAction(async () => {
       const result = await api(`/api/tasks/${task.id}/git-status`);
       ui.commitConfirmed = false;
-      ui.commitSelectedPaths = (result.task.git?.entries || []).map((item) => item.path);
+      ui.commitSelectedPaths = (result.task.git?.taskEntries || []).map((item) => item.path);
       setTask(result.task, false);
       showToast("已重新读取 Worktree Git 状态，请再次核对。" );
     });
@@ -2944,7 +2981,7 @@
     if (!ui.commitConfirmed) return showToast("请先确认真实文件列表和验收结果。", true);
     const selectedPaths = Array.isArray(ui.commitSelectedPaths)
       ? ui.commitSelectedPaths
-      : (task.git?.entries || []).map((item) => item.path);
+      : taskCommitEntries().map((item) => item.path);
     if (!selectedPaths.length) return showToast("至少选择一个要提交的文件。", true);
     const confirmed = window.confirm(`确认提交选中的 ${selectedPaths.length} 个文件？\n\n未选中的文件会保留在 Worktree，不会进入本次 Commit。`);
     if (!confirmed) return;
@@ -2961,7 +2998,7 @@
     captureVisibleFields();
     const selectedPaths = Array.isArray(ui.commitSelectedPaths)
       ? ui.commitSelectedPaths
-      : (task.git?.entries || []).map((item) => item.path);
+      : taskCommitEntries().map((item) => item.path);
     if (!selectedPaths.length) return showToast("至少选择一个要暂存的文件。", true);
     const confirmed = window.confirm(`确认 Stage 当前任务清单中选中的 ${selectedPaths.length} 个文件？\n\n只会执行 git add，不会 Commit；未选中的文件不会被暂存。`);
     if (!confirmed) return;

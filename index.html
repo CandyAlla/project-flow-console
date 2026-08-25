@@ -561,16 +561,25 @@
     .section-navigator-toggle {
       display: grid;
       place-content: center;
-      gap: 5px;
+      gap: 3px;
       width: 100%;
       min-width: 0;
       min-height: 76px;
       padding: 0;
-      border-color: transparent;
+      border: 1px solid transparent;
       border-radius: 8px;
       background: rgb(255 255 255 / 46%);
       opacity: .72;
       transition: opacity .18s ease, background-color .18s ease, box-shadow .18s ease;
+    }
+
+    .section-navigator-hint {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
     }
 
     .section-navigator-toggle:hover:not(:disabled),
@@ -583,20 +592,39 @@
 
     .section-navigator-line {
       display: block;
-      width: 11px;
-      height: 2px;
-      border-radius: 999px;
-      background: #a6b0bd;
-      transition: width .16s ease, background-color .16s ease;
+      width: 32px;
+      height: 20px;
+      padding: 8px 0;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      background-clip: content-box;
+      box-sizing: border-box;
+      cursor: pointer;
+      position: relative;
     }
 
-    .section-navigator-line:nth-child(2n) { width: 8px; }
-    .section-navigator-line.is-active { width: 14px; height: 3px; background: var(--accent); }
+    .section-navigator-line::after {
+      content: "";
+      position: absolute;
+      top: 8px;
+      left: 10px;
+      width: 12px;
+      height: 4px;
+      border-radius: 999px;
+      background: #a6b0bd;
+      transition: width .16s ease, background-color .16s ease, transform .16s ease;
+    }
+
+    .section-navigator-line:nth-of-type(2n)::after { width: 9px; }
+    .section-navigator-line:hover::after,
+    .section-navigator-line:focus-visible::after { width: 18px; background: var(--accent-strong); transform: translateX(-3px); }
+    .section-navigator-line.is-active::after { width: 18px; height: 5px; background: var(--accent); transform: translateX(-3px); }
 
     .section-navigator-panel {
       position: absolute;
       top: 50%;
-      left: calc(100% + 4px);
+      left: calc(100% - 2px);
       width: min(332px, calc(100vw - 72px));
       max-height: min(540px, calc(100vh - 36px));
       overflow: hidden;
@@ -1592,9 +1620,10 @@
       .image-drop-zone button { width: 100%; }
       .diff-wrap { overflow-x: auto; }
       .diff-table { min-width: 620px; }
-      .section-navigator { top: auto; right: 10px; bottom: 16px; left: auto; width: 48px; transform: none; }
-      .section-navigator-toggle { width: 48px; min-height: 48px; border-radius: 50%; }
-      .section-navigator-panel { top: auto; right: 56px; bottom: 0; left: auto; width: min(320px, calc(100vw - 88px)); max-height: min(480px, calc(100vh - 32px)); transform: translateY(9px) scale(.985); transform-origin: right bottom; }
+      .section-navigator { top: auto; right: 10px; bottom: 16px; left: auto; width: auto; transform: none; }
+      .section-navigator-toggle { grid-auto-flow: column; grid-template-rows: repeat(2, 20px); width: auto; min-width: 48px; min-height: 48px; padding: 4px 8px; border-radius: 18px; }
+      .section-navigator-line { width: 24px; }
+      .section-navigator-panel { top: auto; right: calc(100% + 8px); bottom: 0; left: auto; width: min(320px, calc(100vw - 88px)); max-height: min(480px, calc(100vh - 32px)); transform: translateY(9px) scale(.985); transform-origin: right bottom; }
       .section-navigator:is(:hover, .is-open) .section-navigator-panel { transform: translateY(0) scale(1); }
       .section-navigator-list { max-height: calc(min(480px, 100vh - 32px) - 48px); }
     }
