@@ -165,6 +165,7 @@ class ProjectHubTests(unittest.TestCase):
         self.assertIn('/open', app)
         self.assertIn('data-knowledge-publish', app)
         self.assertIn('"$SCRIPT_DIR/hub.py"', start)
+        self.assertIn('"/assets/favicon.ico": TOOL_DIR / "assets" / "favicon.ico"', (TOOL_DIR / "hub.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

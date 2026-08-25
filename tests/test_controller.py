@@ -640,6 +640,18 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('optgroup label="远端跟踪分支（未 Fetch）"', app_js)
         self.assertNotIn('<input id="baseBranch"', app_js)
 
+    def test_brand_icon_assets_are_referenced_and_served(self) -> None:
+        root = SERVER_PATH.parent
+        index_html = (root / "index.html").read_text(encoding="utf-8")
+        server_py = SERVER_PATH.read_text(encoding="utf-8")
+        self.assertIn('href="/assets/favicon.ico"', index_html)
+        self.assertIn('href="/assets/devconductor-cat-180.png"', index_html)
+        self.assertIn('src="/assets/devconductor-cat-64.png"', index_html)
+        self.assertIn('class="brand-mark"', index_html)
+        self.assertIn('"/assets/favicon.ico": TOOL_DIR / "assets" / "favicon.ico"', server_py)
+        for name in ("favicon.ico", "devconductor-cat-16.png", "devconductor-cat-32.png", "devconductor-cat-64.png", "devconductor-cat-180.png", "devconductor-cat-512.png", "devconductor-cat-1024.png"):
+            self.assertTrue((root / "assets" / name).is_file(), name)
+
     def test_poll_refreshes_when_runtime_state_changes_within_same_second(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         self.assertIn("selectedSummary.stage !== task.stage", app_js)

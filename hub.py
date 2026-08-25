@@ -629,7 +629,18 @@ class HubHandler(BaseHTTPRequestHandler):
                 safe_name = Path(unquote(name)).name
                 self.forward_worker(project_id, "GET", f"/task-html/{quote(safe_name)}")
                 return
-            static = {"/": TOOL_DIR / "index.html", "/index.html": TOOL_DIR / "index.html", "/app.js": TOOL_DIR / "app.js"}
+            static = {
+                "/": TOOL_DIR / "index.html",
+                "/index.html": TOOL_DIR / "index.html",
+                "/app.js": TOOL_DIR / "app.js",
+                "/assets/favicon.ico": TOOL_DIR / "assets" / "favicon.ico",
+                "/assets/devconductor-cat-16.png": TOOL_DIR / "assets" / "devconductor-cat-16.png",
+                "/assets/devconductor-cat-32.png": TOOL_DIR / "assets" / "devconductor-cat-32.png",
+                "/assets/devconductor-cat-64.png": TOOL_DIR / "assets" / "devconductor-cat-64.png",
+                "/assets/devconductor-cat-180.png": TOOL_DIR / "assets" / "devconductor-cat-180.png",
+                "/assets/devconductor-cat-512.png": TOOL_DIR / "assets" / "devconductor-cat-512.png",
+                "/assets/devconductor-cat-1024.png": TOOL_DIR / "assets" / "devconductor-cat-1024.png",
+            }
             target = static.get(path)
             if target:
                 self.serve_file(

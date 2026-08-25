@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>DevConductor · AI 开发指挥台</title>
+  <meta name="theme-color" content="#f5f7fa">
+  <link rel="icon" href="/assets/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/devconductor-cat-32.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/assets/devconductor-cat-180.png">
   <style>
     :root {
       --ink: #17202a;
@@ -119,6 +123,10 @@
       gap: 24px;
       padding: 34px 0 26px;
     }
+
+    .brand-heading { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
+    .brand-mark { flex: 0 0 auto; width: 56px; height: 56px; object-fit: contain; border-radius: 16px; filter: drop-shadow(0 5px 10px rgb(65 100 216 / 14%)); }
+    .brand-heading-copy { min-width: 0; }
 
     .eyebrow {
       margin: 0 0 6px;
@@ -1662,10 +1670,13 @@
 <body>
   <header>
     <div class="topbar">
-      <div>
-        <p class="eyebrow" id="projectEyebrow">Project · DevConductor</p>
-        <h1>AI 开发指挥台</h1>
-        <p class="lede">控制台负责需求、Plan、验收和 Git 门禁；Codex App 提供独立人工聊天。人工聊天与后台快速执行 Thread 隔离，标准流程仍保留独立 Review。</p>
+      <div class="brand-heading">
+        <img class="brand-mark" src="/assets/devconductor-cat-64.png" alt="">
+        <div class="brand-heading-copy">
+          <p class="eyebrow" id="projectEyebrow">Project · DevConductor</p>
+          <h1>AI 开发指挥台</h1>
+          <p class="lede">控制台负责需求、Plan、验收和 Git 门禁；Codex App 提供独立人工聊天。人工聊天与后台快速执行 Thread 隔离，标准流程仍保留独立 Review。</p>
+        </div>
       </div>
       <span class="prototype-badge" id="serviceBadge">正在连接本地服务</span>
     </div>
