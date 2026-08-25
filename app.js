@@ -2388,8 +2388,9 @@
   function renderKnowledge() {
     const section = task.knowledge || { status: "idle", candidates: [] };
     if (["queued", "running"].includes(section.status)) {
-      const minutes = Math.ceil(Number(health?.limits?.knowledgeSeconds || 240) / 60);
-      return `${renderProgress(section, "正在从交付证据中提炼沉淀候选")}<p class="hint">最长约 ${minutes} 分钟；只读检查代码、Plan、Commit 和验证证据，不会修改项目文件或 Git。</p>`;
+      const idleMinutes = Math.ceil(Number(health?.limits?.knowledgeSeconds || 600) / 60);
+      const hardMinutes = Math.ceil(Number(health?.limits?.knowledgeHardSeconds || 1800) / 60);
+      return `${renderProgress(section, "正在从交付证据中提炼沉淀候选")}<p class="hint">连续 ${idleMinutes} 分钟没有新进度才会自动停止；持续有进度会自动续期，单轮最长 ${hardMinutes} 分钟。只读检查代码、Plan、Commit 和验证证据，不会修改项目文件或 Git。</p>`;
     }
     if (["error", "interrupted"].includes(section.status)) {
       return `<section class="section">${callout(`<strong>沉淀提炼未完成：</strong>${escapeHTML(section.error)}`, "danger")}</section><div class="actions"><div class="actions-secondary"><button id="backToBugfix">返回 Bug 修复</button></div><div class="actions-primary"><button class="primary" id="generateKnowledge">重试生成沉淀候选</button></div></div>${eventLogDetails()}`;

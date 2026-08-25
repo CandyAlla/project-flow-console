@@ -383,6 +383,17 @@ python3 server.py
 
 Review 超时只会中断 Review，不会回滚实施结果或 Worktree 改动。页面会保留“继续上次 Code Review”入口：如果 Git 状态没有变化，则续接上次 Review；如果状态发生变化，则自动放弃旧 Review 会话并重新读取当前范围。
 
+沉淀提炼也采用两级超时：默认连续 600 秒没有新进度才停止；有命令、消息或检查事件时自动续期，单轮绝对上限为 1800 秒。可单独配置无进度超时（120–1800 秒）和绝对上限（600–3600 秒）：
+
+```bash
+PROJECT_FLOW_KNOWLEDGE_TIMEOUT=600 \
+PROJECT_FLOW_KNOWLEDGE_HARD_TIMEOUT=1800 \
+PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" \
+python3 server.py
+```
+
+沉淀阶段仍然只读，不会修改项目文件或 Git；超时后已有结果和 Worktree 改动会保留。
+
 ## 接入已有文档和 Worktree
 
 控制台支持两种已有资产入口：

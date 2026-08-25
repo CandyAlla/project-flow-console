@@ -214,9 +214,18 @@ except ValueError:
     QUICK_EXECUTION_HARD_TIMEOUT_SECONDS = max(QUICK_EXECUTION_TIMEOUT_SECONDS, 1800)
 
 try:
-    KNOWLEDGE_TIMEOUT_SECONDS = max(60, min(600, int(os.environ.get("PROJECT_FLOW_KNOWLEDGE_TIMEOUT", "240"))))
+    KNOWLEDGE_TIMEOUT_SECONDS = max(120, min(1800, int(os.environ.get("PROJECT_FLOW_KNOWLEDGE_TIMEOUT", "600"))))
 except ValueError:
-    KNOWLEDGE_TIMEOUT_SECONDS = 240
+    KNOWLEDGE_TIMEOUT_SECONDS = 600
+
+try:
+    KNOWLEDGE_HARD_TIMEOUT_SECONDS = max(
+        KNOWLEDGE_TIMEOUT_SECONDS,
+        600,
+        min(3600, int(os.environ.get("PROJECT_FLOW_KNOWLEDGE_HARD_TIMEOUT", "1800"))),
+    )
+except ValueError:
+    KNOWLEDGE_HARD_TIMEOUT_SECONDS = max(KNOWLEDGE_TIMEOUT_SECONDS, 1800)
 
 LOCK = threading.RLock()
 GIT_WRITE_LOCK = threading.Lock()
@@ -4856,6 +4865,8 @@ def knowledge_job(task_id: str) -> None:
         output,
         timeout_seconds=KNOWLEDGE_TIMEOUT_SECONDS,
         timeout_label="沉淀提炼",
+        progress_timeout=True,
+        hard_timeout_seconds=KNOWLEDGE_HARD_TIMEOUT_SECONDS,
     )
     latest = get_task_copy(task_id)
     summary, candidates = normalize_knowledge_payload(latest, payload)
@@ -5416,6 +5427,7 @@ def health_payload() -> dict[str, Any]:
             "quickExecutionSeconds": QUICK_EXECUTION_TIMEOUT_SECONDS,
             "quickExecutionHardSeconds": QUICK_EXECUTION_HARD_TIMEOUT_SECONDS,
             "knowledgeSeconds": KNOWLEDGE_TIMEOUT_SECONDS,
+            "knowledgeHardSeconds": KNOWLEDGE_HARD_TIMEOUT_SECONDS,
             "reviewIdleSeconds": REVIEW_IDLE_TIMEOUT_SECONDS,
             "reviewHardSeconds": REVIEW_HARD_TIMEOUT_SECONDS,
             "acceptanceFixSeconds": ACCEPTANCE_FIX_TIMEOUT_SECONDS,

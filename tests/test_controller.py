@@ -692,6 +692,15 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('section.status === "partial"', app_js)
         self.assertIn("PROJECT_FLOW_QUICK_HARD_TIMEOUT=1800", readme)
 
+    def test_knowledge_ui_explains_progress_timeout(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        readme = (SERVER_PATH.parent / "README.md").read_text(encoding="utf-8")
+        self.assertIn("knowledgeHardSeconds", app_js)
+        self.assertIn("连续 ${idleMinutes} 分钟没有新进度才会自动停止", app_js)
+        self.assertIn("持续有进度会自动续期", app_js)
+        self.assertIn("PROJECT_FLOW_KNOWLEDGE_TIMEOUT=600", readme)
+        self.assertIn("PROJECT_FLOW_KNOWLEDGE_HARD_TIMEOUT=1800", readme)
+
     def test_manual_verification_has_sticky_case_navigation(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
@@ -3376,6 +3385,9 @@ class ControllerTests(unittest.TestCase):
             server.knowledge_job(task_id)
 
         command = run_structured.call_args.args[2]
+        self.assertEqual(run_structured.call_args.kwargs["timeout_seconds"], server.KNOWLEDGE_TIMEOUT_SECONDS)
+        self.assertTrue(run_structured.call_args.kwargs["progress_timeout"])
+        self.assertEqual(run_structured.call_args.kwargs["hard_timeout_seconds"], server.KNOWLEDGE_HARD_TIMEOUT_SECONDS)
         self.assertIn("--sandbox", command)
         self.assertIn("read-only", command)
         self.assertNotIn("git", command)
@@ -3563,7 +3575,8 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(health["readers"]["larkCli"]["ready"])
         self.assertGreaterEqual(health["limits"]["quickExecutionSeconds"], 120)
         self.assertGreaterEqual(health["limits"]["quickExecutionHardSeconds"], health["limits"]["quickExecutionSeconds"])
-        self.assertGreaterEqual(health["limits"]["knowledgeSeconds"], 60)
+        self.assertGreaterEqual(health["limits"]["knowledgeSeconds"], 120)
+        self.assertGreaterEqual(health["limits"]["knowledgeHardSeconds"], health["limits"]["knowledgeSeconds"])
 
 
 if __name__ == "__main__":
