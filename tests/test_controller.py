@@ -552,6 +552,18 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('selectedExecutionPhase !== (task.execution?.phase || "")', app_js)
         self.assertIn('const wasViewingCurrentStage = ui.module === "flow" && ui.viewStage === previousStage', app_js)
         self.assertIn("if (wasViewingCurrentStage && task.stage !== previousStage) ui.viewStage = task.stage", app_js)
+
+    def test_frontend_task_notifications_are_opt_in_and_deduplicated(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="taskNotificationsButton"', index_html)
+        self.assertIn('Notification.requestPermission()', app_js)
+        self.assertIn('const TASK_NOTIFICATION_KEY = "dev-conductor-task-notifications-v1"', app_js)
+        self.assertIn("function observeTaskSummaryChanges", app_js)
+        self.assertIn("if (!notify || !previous) return", app_js)
+        self.assertIn("tag: `dev-conductor-task-${snapshot.key}`", app_js)
+        self.assertIn("if (!document.hidden) return", app_js)
+        self.assertIn('await refreshTaskSummaries({ notify: true })', app_js)
         self.assertIn('task.activeJob === "plan"', app_js)
         self.assertIn('renderProgress(task.plan, "正在生成 Plan 与逻辑验收 HTML")', app_js)
         self.assertIn('generatePlan && result.task?.activeJob === "plan"', app_js)

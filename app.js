@@ -5,6 +5,9 @@
 
   const UI_KEY_BASE = "project-flow-controller-v2";
   const HUB_PROJECT_KEY = "dev-conductor-active-project";
+  const TASK_NOTIFICATION_KEY = "dev-conductor-task-notifications-v1";
+  const TASK_NOTIFICATION_OWNER_KEY = "dev-conductor-task-notification-owner-v1";
+  const NOTIFICATION_TAB_ID = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let currentProjectId = localStorage.getItem(HUB_PROJECT_KEY) || "";
   const stages = [
     { id: "input", label: "需求输入", title: "选择需求接入方式", description: "可创建新需求，或填写已有需求文档、执行 Plan 与 Worktree；接入前先做只读校验。" },
@@ -104,6 +107,7 @@
   let busy = false;
   let pollTimer = null;
   let toastTimer = null;
+  let taskNotificationBaseline = null;
   let workspaceRefreshPending = false;
   let sectionNavigatorCleanup = null;
 
@@ -118,6 +122,7 @@
   const taskCountEl = document.querySelector("#taskCount");
   const taskQueueTitleEl = document.querySelector("#taskQueueTitle");
   const taskFiltersEl = document.querySelector(".task-filters");
+  const taskNotificationsButtonEl = document.querySelector("#taskNotificationsButton");
   const archiveViewButtonEl = document.querySelector("#archiveViewButton");
   const knowledgeCenterButtonEl = document.querySelector("#knowledgeCenterButton");
   const createTaskButtonEl = document.querySelector("#createTaskButton");
@@ -184,6 +189,7 @@
     saveUi();
     renderTaskConsole();
   });
+  taskNotificationsButtonEl?.addEventListener("click", toggleTaskNotifications);
   taskListEl.addEventListener("click", (event) => {
     const action = event.target.closest("[data-task-action]");
     if (action) {
@@ -416,20 +422,27 @@
     hubDashboardEl.innerHTML = `<div class="hub-dashboard-shell"><div class="hub-dashboard-head"><div><p class="eyebrow">Project Hub</p><h2>所有项目</h2><p>切换项目只改变当前查看内容；后台任务继续在各自 Worker、Profile、Git 仓库和任务记忆中运行。</p></div><button class="primary" type="button" data-hub-add-project>＋ 添加项目</button></div><div class="hub-tabs">${tabs}</div><div class="hub-dashboard-body">${summary}${content}</div></div>`;
   }
 
-  async function loadHubSection(section = hubSection) {
+  async function loadHubSection(section = hubSection, { notify = false, render = true } = {}) {
     if (!hubMode || section === "projects") return;
-    hubDataLoading = true;
-    renderHubWorkspace();
+    if (render) {
+      hubDataLoading = true;
+      renderHubWorkspace();
+    }
     try {
       const result = await api(section === "tasks" ? "/api/hub/tasks" : "/api/hub/knowledge");
-      if (section === "tasks") hubTasks = result.tasks || [];
+      if (section === "tasks") {
+        hubTasks = result.tasks || [];
+        observeTaskSummaryChanges(hubTasks, { notify, projectId: "hub" });
+      }
       else hubKnowledge = result.candidates || [];
       hubErrors = result.errors || hubErrors;
     } catch (error) {
       showToast(error.message, true);
     } finally {
-      hubDataLoading = false;
-      renderHubWorkspace();
+      if (render) {
+        hubDataLoading = false;
+        renderHubWorkspace();
+      }
     }
   }
 
@@ -798,6 +811,163 @@
     toastTimer = window.setTimeout(() => { toastEl.hidden = true; }, error ? 5200 : 2600);
   }
 
+  function taskNotificationSetting() {
+    try { return localStorage.getItem(TASK_NOTIFICATION_KEY) === "enabled"; }
+    catch (_) { return false; }
+  }
+
+  function setTaskNotificationSetting(enabled) {
+    try {
+      if (enabled) localStorage.setItem(TASK_NOTIFICATION_KEY, "enabled");
+      else localStorage.removeItem(TASK_NOTIFICATION_KEY);
+    } catch (_) { /* 隐私模式或受限浏览器不影响任务轮询。 */ }
+    renderTaskNotificationButton();
+  }
+
+  function renderTaskNotificationButton() {
+    if (!taskNotificationsButtonEl) return;
+    const supported = typeof window.Notification !== "undefined";
+    const enabled = supported && taskNotificationSetting() && Notification.permission === "granted";
+    taskNotificationsButtonEl.textContent = enabled ? "任务通知已开" : "开启任务通知";
+    taskNotificationsButtonEl.setAttribute("aria-pressed", enabled ? "true" : "false");
+    taskNotificationsButtonEl.title = !supported
+      ? "当前浏览器不支持系统通知"
+      : Notification.permission === "denied" ? "通知权限已被浏览器拒绝，请在浏览器设置中允许" : "任务状态变化时发送系统通知";
+  }
+
+  async function toggleTaskNotifications() {
+    if (typeof window.Notification === "undefined") {
+      showToast("当前浏览器不支持系统通知；页面内提示仍会保留。", true);
+      return;
+    }
+    if (taskNotificationSetting() && Notification.permission === "granted") {
+      setTaskNotificationSetting(false);
+      showToast("已关闭任务系统通知，页面内提示仍会保留。");
+      return;
+    }
+    if (Notification.permission === "denied") {
+      showToast("浏览器已拒绝通知，请在网站设置中允许后重试。", true);
+      return;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission === "granted") {
+        setTaskNotificationSetting(true);
+        showToast("已开启任务通知；任务完成或需要处理时会提醒你。");
+      } else {
+        setTaskNotificationSetting(false);
+        showToast("未开启系统通知；页面内提示仍会保留。", true);
+      }
+    } catch (error) {
+      setTaskNotificationSetting(false);
+      showToast(error?.message || "无法请求系统通知权限。", true);
+    }
+  }
+
+  function notificationOwner() {
+    try {
+      const now = Date.now();
+      const raw = localStorage.getItem(TASK_NOTIFICATION_OWNER_KEY);
+      const current = raw ? JSON.parse(raw) : null;
+      if (!current || now - Number(current.time || 0) > 15000 || current.id === NOTIFICATION_TAB_ID) {
+        localStorage.setItem(TASK_NOTIFICATION_OWNER_KEY, JSON.stringify({ id: NOTIFICATION_TAB_ID, time: now }));
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function taskNotificationKey(item, projectId = currentProjectId) {
+    return `${projectId || "project"}:${item.id}`;
+  }
+
+  function taskNotificationSnapshot(item, projectId = currentProjectId) {
+    return {
+      key: taskNotificationKey(item, projectId),
+      projectId: projectId || currentProjectId,
+      taskId: item.id,
+      title: item.title || "未命名任务",
+      state: item.state || "attention",
+      activeJob: item.activeJob || "",
+      jobState: item.jobState || "idle",
+      stage: item.stage || "",
+      executionPhase: item.executionPhase || ""
+    };
+  }
+
+  function taskNotificationMessage(previous, current) {
+    const stageLabel = stages.find((item) => item.id === current.stage)?.label || current.stage;
+    if (!previous) return null;
+    if (current.state === "error" && previous.state !== "error") return { title: "任务需要处理", body: `${current.title}：执行失败或被中断，请打开任务查看原因。`, error: true };
+    if (current.state === "done" && previous.state !== "done") return { title: "任务已完成", body: `${current.title}：Commit 已完成。`, error: false };
+    if (current.state === "queued" && previous.state !== "queued") return { title: "任务已排队", body: `${current.title}：等待后台执行资源。`, error: false };
+    if (current.state === "running") {
+      if (previous?.state !== "running" || previous.activeJob !== current.activeJob || previous.jobState !== current.jobState) {
+        const phase = current.executionPhase === "review" ? "Code Review" : jobLabel(current.activeJob);
+        return { title: "任务正在执行", body: `${current.title}：${phase}中。`, error: false };
+      }
+      if (previous?.executionPhase !== current.executionPhase && current.executionPhase) {
+        return { title: "任务进入新阶段", body: `${current.title}：${current.executionPhase === "review" ? "Code Review" : stageLabel}。`, error: false };
+      }
+    }
+    if (previous && previous.stage !== current.stage) {
+      return { title: "任务进入新阶段", body: `${current.title}：进入${stageLabel}。`, error: false };
+    }
+    if (previous && previous.state !== current.state && current.state === "attention") {
+      return { title: "任务等待你的处理", body: `${current.title}：${stageLabel}需要你的确认。`, error: false };
+    }
+    return null;
+  }
+
+  function openTaskFromNotification(snapshot) {
+    window.focus();
+    if (hubMode && snapshot.projectId && snapshot.projectId !== currentProjectId) {
+      switchProject(snapshot.projectId, snapshot.taskId);
+    } else {
+      switchTask(snapshot.taskId);
+    }
+  }
+
+  function sendTaskNotification(snapshot, message) {
+    if (!taskNotificationSetting() || typeof window.Notification === "undefined" || Notification.permission !== "granted") return;
+    if (!document.hidden) return;
+    if (!notificationOwner()) return;
+    try {
+      const notification = new Notification(message.title, {
+        body: message.body,
+        tag: `dev-conductor-task-${snapshot.key}`,
+        renotify: true,
+        silent: false
+      });
+      notification.onclick = () => {
+        notification.close();
+        openTaskFromNotification(snapshot);
+      };
+    } catch (_) {
+      // 通知构造失败时不影响轮询、任务状态和页面内 Toast。
+    }
+  }
+
+  function observeTaskSummaryChanges(items, { notify = false, projectId = currentProjectId } = {}) {
+    const next = new Map((items || []).map((item) => {
+      const snapshot = taskNotificationSnapshot(item, item.projectId || projectId);
+      return [snapshot.key, snapshot];
+    }));
+    const previous = taskNotificationBaseline;
+    taskNotificationBaseline = next;
+    if (!notify || !previous) return;
+    next.forEach((snapshot) => {
+      const change = taskNotificationMessage(previous.get(snapshot.key), snapshot);
+      if (!change) return;
+      if (!document.hidden) {
+        showToast(change.body, change.error);
+      }
+      sendTaskNotification(snapshot, change);
+    });
+  }
+
   function applyHealth(nextHealth) {
     const previousDefaultBranch = defaultUi.baseBranch;
     health = nextHealth;
@@ -926,10 +1096,11 @@
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
 
-  async function refreshTaskSummaries() {
+  async function refreshTaskSummaries({ notify = false } = {}) {
     const result = await api("/api/tasks");
     taskSummaries = result.tasks || [];
     scheduler = result.scheduler || scheduler;
+    observeTaskSummaryChanges(taskSummaries, { notify });
     return result;
   }
 
@@ -1119,15 +1290,15 @@
         if (hubMode) {
           await refreshHubProjects();
           if (hubView === "home") {
+            await loadHubSection("tasks", { notify: true, render: false });
             renderProjectRail();
             renderHubWorkspace();
             schedulePoll();
             return;
           }
         }
-        const wasActive = task?.activeJob;
         const selectedId = task?.id;
-        await refreshTaskSummaries();
+        await refreshTaskSummaries({ notify: true });
         if (ui.module === "knowledge-center" && !knowledgeLoading) {
           const knowledgeResult = await api("/api/knowledge");
           const nextCandidates = Array.isArray(knowledgeResult.candidates) ? knowledgeResult.candidates : [];
@@ -1154,10 +1325,6 @@
           task = result.task;
           if (wasViewingCurrentStage && task.stage !== previousStage) ui.viewStage = task.stage;
           workspaceRefreshPending = true;
-          if (wasActive && !task.activeJob) {
-            const section = task[wasActive];
-            showToast(section?.status === "error" ? `${jobLabel(wasActive)}失败：${section.error}` : `${jobLabel(wasActive)}已完成。`, section?.status === "error");
-          }
         }
         if (workspaceRefreshPending && !stageEditorFocused()) render();
         else renderShell();
@@ -1471,6 +1638,7 @@
   }
 
   function renderTaskConsole() {
+    renderTaskNotificationButton();
     const activeTasks = taskSummaries.filter((item) => !item.archivedAt);
     const archivedTasks = taskSummaries.filter((item) => item.archivedAt);
     const groups = {
