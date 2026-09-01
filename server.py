@@ -156,14 +156,14 @@ def resolve_lark_cli_bin() -> str:
     return ""
 
 try:
-    MAX_CONCURRENT_JOBS = max(1, min(4, int(os.environ.get("PROJECT_FLOW_CONCURRENCY", "2"))))
+    MAX_CONCURRENT_JOBS = max(1, min(8, int(os.environ.get("PROJECT_FLOW_CONCURRENCY", "8"))))
 except ValueError:
-    MAX_CONCURRENT_JOBS = 2
+    MAX_CONCURRENT_JOBS = 8
 
 try:
-    GLOBAL_CONCURRENT_JOBS = max(1, min(16, int(os.environ.get("PROJECT_FLOW_GLOBAL_CONCURRENCY", "4"))))
+    GLOBAL_CONCURRENT_JOBS = max(1, min(16, int(os.environ.get("PROJECT_FLOW_GLOBAL_CONCURRENCY", "16"))))
 except ValueError:
-    GLOBAL_CONCURRENT_JOBS = 4
+    GLOBAL_CONCURRENT_JOBS = 16
 
 GLOBAL_SLOT_DIR_VALUE = os.environ.get("PROJECT_FLOW_GLOBAL_SLOT_DIR", "").strip()
 GLOBAL_SLOT_DIR = Path(GLOBAL_SLOT_DIR_VALUE).expanduser().resolve(strict=False) if GLOBAL_SLOT_DIR_VALUE else None
@@ -1582,6 +1582,45 @@ def add_job_log(task_id: str, operation: str, message: str, kind: str = "info") 
         target["logs"] = target["logs"][-160:]
 
 
+def reconcile_completed_execution_stage(task: dict[str, Any]) -> bool:
+    """Keep the persisted flow stage aligned with a completed execution result."""
+    execution = task.get("execution")
+    if not isinstance(execution, dict) or execution.get("status") != "complete":
+        return False
+    review = execution.get("review")
+    if not isinstance(review, dict):
+        return False
+    review_ready = review.get("verdict") == "pass" or (
+        execution.get("flowMode") == "fast" and review.get("verdict") == "skipped"
+    )
+    if not review_ready:
+        return False
+
+    changed = False
+    bugfix = task.get("bugfix")
+    if execution.get("mode") == "bugfix" and isinstance(bugfix, dict):
+        if task.get("stage") != "bugfix":
+            task["stage"] = "bugfix"
+            changed = True
+        if bugfix.get("status") != "verify":
+            bugfix["status"] = "verify"
+            changed = True
+        target_index = STAGE_INDEX["bugfix"]
+    elif task.get("stage") in {"execute", "verify"}:
+        if task.get("stage") != "verify":
+            task["stage"] = "verify"
+            changed = True
+        target_index = STAGE_INDEX["verify"]
+    else:
+        return False
+
+    current_index = int(task.get("maxStageIndex") or 0)
+    if current_index < target_index:
+        task["maxStageIndex"] = target_index
+        changed = True
+    return changed
+
+
 def load_tasks() -> None:
     TASK_ROOT.mkdir(parents=True, exist_ok=True)
     for path in TASK_ROOT.glob("*/task.json"):
@@ -1633,6 +1672,8 @@ def load_tasks() -> None:
                 ):
                     execution["previousReview"] = execution["review"]
                     execution["review"] = None
+                if reconcile_completed_execution_stage(task):
+                    add_event(task, "检测到执行结果已完成，已自动恢复到人工验收阶段。", "ok")
                 task["agentMemory"] = build_agent_memory(task)
                 persist_agent_memory(task)
                 TASKS[task["id"]] = task
@@ -3127,6 +3168,8 @@ def launch_job(task_id: str, job_name: str, target: Callable[[], None]) -> None:
             traceback.print_exc()
         finally:
             with mutate_task(task_id) as task:
+                if job_name == "execution" and reconcile_completed_execution_stage(task):
+                    add_event(task, "执行结果已完成，进度已自动切换到人工验收。", "ok")
                 task["activeJob"] = None
                 task["jobState"] = "idle"
             with LOCK:

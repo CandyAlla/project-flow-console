@@ -328,8 +328,8 @@ class WorkerManager:
         self.runtime_root = runtime_root.resolve()
         self._workers: dict[str, ProjectWorker] = {}
         self._lock = threading.RLock()
-        self.project_concurrency = bounded_env_int("PROJECT_FLOW_PROJECT_CONCURRENCY", 2, 1, 4)
-        self.global_concurrency = bounded_env_int("PROJECT_FLOW_GLOBAL_CONCURRENCY", 4, 1, 16)
+        self.project_concurrency = bounded_env_int("PROJECT_FLOW_PROJECT_CONCURRENCY", 8, 1, 8)
+        self.global_concurrency = bounded_env_int("PROJECT_FLOW_GLOBAL_CONCURRENCY", 16, 1, 16)
 
     @staticmethod
     def _free_port() -> int:

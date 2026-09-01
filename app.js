@@ -77,7 +77,7 @@
   let hubToken = "";
   let hubProjects = [];
   let hubErrors = [];
-  let hubScheduler = { globalMaxConcurrentJobs: 4, projectMaxConcurrentJobs: 2, runningJobs: 0, queuedJobs: 0 };
+  let hubScheduler = { globalMaxConcurrentJobs: 16, projectMaxConcurrentJobs: 8, runningJobs: 0, queuedJobs: 0 };
   let hubView = "project";
   let hubSection = "projects";
   let hubTasks = [];
@@ -91,7 +91,7 @@
   let knowledgeLoading = false;
   let knowledgeLoaded = false;
   let knowledgeError = "";
-  let scheduler = { maxConcurrentJobs: 2, runningJobs: 0, queuedJobs: 0 };
+  let scheduler = { maxConcurrentJobs: 8, runningJobs: 0, queuedJobs: 0 };
   let health = null;
   let projectBranches = [];
   let branchLoadError = "";
@@ -1323,7 +1323,15 @@
           const wasViewingCurrentStage = ui.module === "flow" && ui.viewStage === previousStage;
           const result = await api(`/api/tasks/${selectedId}`);
           task = result.task;
-          if (wasViewingCurrentStage && task.stage !== previousStage) ui.viewStage = task.stage;
+          const executionEnteredVerification = previousStage === "execute"
+            && task.stage === "verify"
+            && task.execution?.status === "complete";
+          if (executionEnteredVerification) {
+            ui.module = "flow";
+            ui.viewStage = "verify";
+          } else if (wasViewingCurrentStage && task.stage !== previousStage) {
+            ui.viewStage = task.stage;
+          }
           workspaceRefreshPending = true;
         }
         if (workspaceRefreshPending && !stageEditorFocused()) render();
@@ -1702,8 +1710,8 @@
     schedulerNoteEl.textContent = ui.showArchived
       ? "恢复后任务会回到原阶段；删除不会清理 Worktree、Plan 或 HTML。"
       : hubMode
-        ? `本项目最多并行 ${scheduler.projectMaxConcurrentJobs || scheduler.maxConcurrentJobs || 2} 个，全局最多 ${scheduler.globalMaxConcurrentJobs || hubScheduler.globalMaxConcurrentJobs || 4} 个；切换项目不会停止执行。`
-        : `最多并行 ${scheduler.maxConcurrentJobs || 2} 个后台任务；切换查看不会停止执行。`;
+        ? `本项目最多并行 ${scheduler.projectMaxConcurrentJobs || scheduler.maxConcurrentJobs || 8} 个，全局最多 ${scheduler.globalMaxConcurrentJobs || hubScheduler.globalMaxConcurrentJobs || 16} 个；切换项目不会停止执行。`
+        : `最多并行 ${scheduler.maxConcurrentJobs || 8} 个后台任务；切换查看不会停止执行。`;
     const visible = ui.showArchived ? archivedTasks : groups[activeFilter];
     taskListEl.innerHTML = visible.length ? visible.map((item) => {
       const stage = stages.find((entry) => entry.id === item.stage)?.label || item.stage;

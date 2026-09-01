@@ -702,7 +702,8 @@ class ControllerTests(unittest.TestCase):
         server_py = SERVER_PATH.read_text(encoding="utf-8")
         self.assertIn('href="/assets/favicon.ico"', index_html)
         self.assertIn('href="/assets/devconductor-cat-180.png"', index_html)
-        self.assertIn('src="/assets/devconductor-cat-64.png"', index_html)
+        self.assertIn('src="/assets/devconductor-cat-180.png"', index_html)
+        self.assertIn('srcset="/assets/devconductor-cat-180.png 1x, /assets/devconductor-cat-512.png 2x"', index_html)
         self.assertIn('class="brand-mark"', index_html)
         self.assertIn('"/assets/favicon.ico": TOOL_DIR / "assets" / "favicon.ico"', server_py)
         for name in ("favicon.ico", "devconductor-cat-16.png", "devconductor-cat-32.png", "devconductor-cat-64.png", "devconductor-cat-180.png", "devconductor-cat-512.png", "devconductor-cat-1024.png"):
@@ -717,7 +718,32 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('selectedId === task?.id ? task?.execution?.phase || "" : ""', app_js)
         self.assertIn('selectedExecutionPhase !== (task.execution?.phase || "")', app_js)
         self.assertIn('const wasViewingCurrentStage = ui.module === "flow" && ui.viewStage === previousStage', app_js)
-        self.assertIn("if (wasViewingCurrentStage && task.stage !== previousStage) ui.viewStage = task.stage", app_js)
+        self.assertIn('const executionEnteredVerification = previousStage === "execute"', app_js)
+        self.assertIn('task.stage === "verify"', app_js)
+        self.assertIn('ui.viewStage = "verify"', app_js)
+
+    def test_completed_execution_stage_is_reconciled_to_manual_verification(self) -> None:
+        task = {
+            "stage": "execute",
+            "maxStageIndex": server.STAGE_INDEX["execute"],
+            "execution": {
+                "status": "complete",
+                "phase": "complete",
+                "flowMode": "fast",
+                "review": {"verdict": "skipped"},
+            },
+        }
+
+        self.assertTrue(server.reconcile_completed_execution_stage(task))
+        self.assertEqual(task["stage"], "verify")
+        self.assertEqual(task["maxStageIndex"], server.STAGE_INDEX["verify"])
+        self.assertFalse(server.reconcile_completed_execution_stage(task))
+
+        task["stage"] = "execute"
+        task["maxStageIndex"] = server.STAGE_INDEX["execute"]
+        task["execution"].update({"status": "needs_attention", "review": {"verdict": "needs_fix"}})
+        self.assertFalse(server.reconcile_completed_execution_stage(task))
+        self.assertEqual(task["stage"], "execute")
 
     def test_frontend_task_notifications_are_opt_in_and_deduplicated(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")

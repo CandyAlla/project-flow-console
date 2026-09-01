@@ -279,15 +279,15 @@ Hub 只负责项目注册、API 路由、聚合视图和全局并发门禁。实
 
 默认并发限制：
 
-- 单项目最多 2 个后台任务。
-- 所有项目合计最多 4 个后台任务。
+- 单项目最多 8 个后台任务。
+- 所有项目合计最多 16 个后台任务。
 - 同一个项目的 Git 写操作继续使用该 Worker 内的独占锁。
 
 可以在启动 Hub 前调整：
 
 ```bash
-PROJECT_FLOW_PROJECT_CONCURRENCY=2 \
-PROJECT_FLOW_GLOBAL_CONCURRENCY=4 \
+PROJECT_FLOW_PROJECT_CONCURRENCY=8 \
+PROJECT_FLOW_GLOBAL_CONCURRENCY=16 \
 python3 hub.py
 ```
 
@@ -489,10 +489,10 @@ skills/project-flow-setup/references/profile-schema.md
 
 ## 多任务与并行
 
-默认最多同时运行 2 个后台任务，其余任务进入队列。可以在启动前调整为 1–4：
+默认最多同时运行 8 个后台任务，其余任务进入队列。可以在启动前调整为 1–8：
 
 ```bash
-PROJECT_FLOW_CONCURRENCY=4 \
+PROJECT_FLOW_CONCURRENCY=8 \
 PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" \
 python3 server.py
 ```
@@ -593,9 +593,9 @@ python3 -m py_compile \
 
 ## 常见问题
 
-### 为什么最多只有两个后台任务？
+### 为什么最多只有八个后台任务？
 
-默认并行数是 2，避免多个 Codex 和 Git 操作同时抢占本机资源。通过 `PROJECT_FLOW_CONCURRENCY` 可调整为 1–4。
+默认并行数是 8，避免多个 Codex 和 Git 操作无限制抢占本机资源。通过 `PROJECT_FLOW_CONCURRENCY` 可调整为 1–8；使用 Project Hub 时，还会受全局并发上限 16 的限制。
 
 ### Profile 已存在，配置脚本拒绝写入怎么办？
 

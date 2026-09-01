@@ -297,11 +297,11 @@ Project Hub :4318
   └── Project C Worker → Profile C → Repo C / .runtime/C
 ```
 
-Worker 使用 Hub 分配的本机内部端口，不需要为每个 Profile 手工维护端口。默认单项目最多并行 2 个后台任务，所有项目合计最多 4 个：
+Worker 使用 Hub 分配的本机内部端口，不需要为每个 Profile 手工维护端口。默认单项目最多并行 8 个后台任务，所有项目合计最多 16 个：
 
 ```bash
-PROJECT_FLOW_PROJECT_CONCURRENCY=2 \
-PROJECT_FLOW_GLOBAL_CONCURRENCY=4 \
+PROJECT_FLOW_PROJECT_CONCURRENCY=8 \
+PROJECT_FLOW_GLOBAL_CONCURRENCY=16 \
 python3 hub.py
 ```
 
