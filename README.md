@@ -336,6 +336,8 @@ task.codexApp.cwd
 
 人工聊天与快速模式使用的后台执行 Thread 相互隔离。创建人工聊天时会启动一次短生命周期 App Server，写入名称和项目目录后等待进程完全退出、释放 thread writer，再跳转到 Codex App；已经绑定的人工聊天再次打开时不会由控制服务 `thread/resume`，因此不会和桌面 App 争用 writer。
 
+后台快速执行每轮使用独立的 App Server 进程。每轮结束（包括失败、停止和超时）后，控制服务会关闭该进程并等待 writer 释放，避免后台进程长期阻止 Codex App 归档。持久会话 ID 和历史仍保留，下一轮按需 `thread/resume`；其他并行任务不受影响。
+
 Worktree 已准备完成且目录有效时，人工聊天连接该 Worktree；否则连接 Project Profile 的 `repoRoot`。如果绑定后项目目录发生变化，控制台会在新目录创建新的人工聊天并保留旧聊天。后台快速执行仍使用 `task.sessions.app` / `task.app`，不会被人工聊天的“新建”或“断开”操作清空。
 
 已连接后还可以选择：

@@ -234,6 +234,7 @@ TASKS: dict[str, dict[str, Any]] = {}
 ACTIVE_THREADS: dict[str, threading.Thread] = {}
 ACTIVE_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 ACTIVE_APP_TURNS: dict[str, tuple[str, str]] = {}
+ACTIVE_APP_CLIENTS: dict[str, AppServerClient] = {}
 CANCEL_REQUESTED: set[str] = set()
 SESSION_TOKEN = secrets.token_urlsafe(32)
 CODEX_BIN = resolve_codex_bin()
@@ -372,7 +373,8 @@ class AppServerClient:
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
         try:
-            self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=10)
+            if self.running:
+                self._request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=10)
         except WorkflowError:
             pass
 
@@ -1735,8 +1737,23 @@ def shutdown_app_server() -> None:
     with APP_SERVER_CLIENT_LOCK:
         client = APP_SERVER_CLIENT
         APP_SERVER_CLIENT = None
+    with LOCK:
+        clients = list(ACTIVE_APP_CLIENTS.values())
     if client is not None:
-        client.close()
+        clients.append(client)
+    for active_client in clients:
+        active_client.close()
+
+
+def release_app_server_client(client: AppServerClient, task_id: str, operation: str) -> None:
+    """Best-effort cleanup must preserve the turn result and any original error."""
+    try:
+        close_isolated_app_server(client)
+    except Exception as exc:
+        try:
+            add_job_log(task_id, operation, f"后台执行 Thread 释放失败：{safe_log(exc, 1200)}", "warning")
+        except Exception:
+            pass
 
 
 def close_isolated_app_server(client: AppServerClient) -> None:
@@ -1752,7 +1769,7 @@ def close_isolated_app_server(client: AppServerClient) -> None:
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired as exc:
-            raise WorkflowError("Codex App 人工聊天已创建，但 writer 未能及时释放，请稍后重试。") from exc
+            raise WorkflowError("Codex App Server writer 未能及时释放，请稍后重试。") from exc
 
 
 def create_isolated_codex_app_chat(task: dict[str, Any], cwd: Path, *, force_new: bool) -> str:
@@ -1852,7 +1869,7 @@ def disconnect_task_codex_app_chat(task_id: str) -> dict[str, Any]:
     return get_task_copy(task_id)
 
 
-def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, Any]:
+def _ensure_task_app_thread(task_id: str, *, allow_active: bool, client: AppServerClient | None = None) -> dict[str, Any]:
     task = get_task_copy(task_id)
     if task.get("activeJob") and not allow_active:
         raise WorkflowError("任务正在执行，请等待完成后再准备后台快速执行 Thread。")
@@ -1868,7 +1885,7 @@ def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, An
         and previous_cwd == str(cwd)
     ):
         return task
-    client = get_app_server_client()
+    client = client or get_app_server_client()
     thread_id: str | None = str(existing) if existing else None
     if thread_id:
         try:
@@ -1921,7 +1938,14 @@ def _ensure_task_app_thread(task_id: str, *, allow_active: bool) -> dict[str, An
 
 
 def ensure_task_app_thread(task_id: str) -> dict[str, Any]:
-    return _ensure_task_app_thread(task_id, allow_active=True)
+    with LOCK:
+        if task_id in ACTIVE_APP_TURNS:
+            return get_task_copy(task_id)
+    client = AppServerClient(CODEX_BIN)
+    try:
+        return _ensure_task_app_thread(task_id, allow_active=False, client=client)
+    finally:
+        release_app_server_client(client, task_id, "app")
 
 
 def cancel_task(task_id: str) -> dict[str, Any]:
@@ -1935,6 +1959,7 @@ def cancel_task(task_id: str) -> dict[str, Any]:
         CANCEL_REQUESTED.add(task_id)
         process = ACTIVE_PROCESSES.get(task_id)
         app_turn = ACTIVE_APP_TURNS.get(task_id)
+        app_client = ACTIVE_APP_CLIENTS.get(task_id)
     with mutate_task(task_id) as task:
         section = task.setdefault(active_job, {})
         if active_job == "execution":
@@ -1945,8 +1970,8 @@ def cancel_task(task_id: str) -> dict[str, Any]:
         force_timer = threading.Timer(5, stop_codex_process, args=(process, True))
         force_timer.daemon = True
         force_timer.start()
-    if app_turn:
-        get_app_server_client().interrupt(*app_turn)
+    if app_turn and app_client:
+        app_client.interrupt(*app_turn)
     return get_task_copy(task_id)
 
 
@@ -3004,28 +3029,31 @@ def run_app_server_structured(
 ) -> tuple[dict[str, Any], str]:
     if not CODEX_BIN:
         raise WorkflowError(CODEX_MISSING_MESSAGE)
-    task = _ensure_task_app_thread(task_id, allow_active=True)
-    thread_id = str(task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId") or "")
-    if not thread_id:
-        raise WorkflowError("当前任务没有可用的后台执行 Thread。")
     try:
         output_schema = json.loads(schema_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise WorkflowError(f"无法读取结构化输出 Schema：{schema_path}") from exc
-    client = get_app_server_client()
-    notifications: queue.Queue[dict[str, Any]] = queue.Queue()
-    client.add_listener(thread_id, notifications)
     writable_roots = [str(cwd)]
     if allow_docs_root and DOCS_ROOT.is_dir() and DOCS_ROOT.resolve() != cwd.resolve():
         writable_roots.append(str(DOCS_ROOT))
     inputs: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for image_path in feedback_attachment_paths(task_id, attachments):
         inputs.append({"type": "localImage", "path": str(image_path)})
+    client = AppServerClient(CODEX_BIN)
+    thread_id = ""
+    notifications: queue.Queue[dict[str, Any]] = queue.Queue()
     turn_id = ""
     last_agent_message = ""
     completed: dict[str, Any] | None = None
-    add_job_log(task_id, operation, "通过持久后台执行 Thread 启动快速模式。")
+    with LOCK:
+        ACTIVE_APP_CLIENTS[task_id] = client
     try:
+        task = _ensure_task_app_thread(task_id, allow_active=True, client=client)
+        thread_id = str(task.get("sessions", {}).get("app") or task.get("app", {}).get("threadId") or "")
+        if not thread_id:
+            raise WorkflowError("当前任务没有可用的后台执行 Thread。")
+        client.add_listener(thread_id, notifications)
+        add_job_log(task_id, operation, "通过持久后台执行 Thread 启动快速模式。")
         response = client.request(
             "turn/start",
             {
@@ -3110,16 +3138,23 @@ def run_app_server_structured(
             })
         return payload, thread_id
     except Exception as exc:
-        with mutate_task(task_id) as live:
-            live.setdefault("app", {}).update({
-                "status": "error", "threadId": thread_id, "turnId": turn_id or None,
-                "deepLink": codex_app_deep_link(thread_id), "error": safe_log(exc, 2400),
-            })
+        try:
+            with mutate_task(task_id) as live:
+                live.setdefault("app", {}).update({
+                    "status": "error", "threadId": thread_id or live.get("app", {}).get("threadId"), "turnId": turn_id or None,
+                    "error": safe_log(exc, 2400),
+                })
+        except Exception:
+            pass
         raise
     finally:
-        client.remove_listener(thread_id, notifications)
+        release_app_server_client(client, task_id, operation)
+        if thread_id:
+            client.remove_listener(thread_id, notifications)
         with LOCK:
             ACTIVE_APP_TURNS.pop(task_id, None)
+            if ACTIVE_APP_CLIENTS.get(task_id) is client:
+                ACTIVE_APP_CLIENTS.pop(task_id, None)
 
 
 def launch_job(task_id: str, job_name: str, target: Callable[[], None]) -> None:
@@ -5466,7 +5501,7 @@ def health_payload() -> dict[str, Any]:
             "version": codex_version,
             "appServer": {
                 "available": codex_ready,
-                "running": bool(APP_SERVER_CLIENT and APP_SERVER_CLIENT.running),
+                "running": bool(APP_SERVER_CLIENT and APP_SERVER_CLIENT.running) or any(client.running for client in list(ACTIVE_APP_CLIENTS.values())),
             },
         },
         "features": {

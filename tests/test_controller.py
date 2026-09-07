@@ -49,6 +49,7 @@ class ControllerTests(unittest.TestCase):
         server.ACTIVE_THREADS.clear()
         server.ACTIVE_PROCESSES.clear()
         server.ACTIVE_APP_TURNS.clear()
+        server.ACTIVE_APP_CLIENTS.clear()
         server.CANCEL_REQUESTED.clear()
         server.JOB_SLOTS = threading.BoundedSemaphore(2)
 
@@ -57,6 +58,7 @@ class ControllerTests(unittest.TestCase):
         server.ACTIVE_THREADS.clear()
         server.ACTIVE_PROCESSES.clear()
         server.ACTIVE_APP_TURNS.clear()
+        server.ACTIVE_APP_CLIENTS.clear()
         server.CANCEL_REQUESTED.clear()
         server.TASK_ROOT = self.old_task_root
         server.JOB_SLOTS = self.old_job_slots
@@ -2787,7 +2789,7 @@ class ControllerTests(unittest.TestCase):
             return {}
 
         client.request.side_effect = request
-        with mock.patch.object(server, "get_app_server_client", return_value=client):
+        with mock.patch.object(server, "AppServerClient", return_value=client):
             first = server.ensure_task_app_thread(task_id)
             second = server.ensure_task_app_thread(task_id)
 
@@ -2827,7 +2829,7 @@ class ControllerTests(unittest.TestCase):
 
         client.request.side_effect = request
         with mock.patch.object(server, "REPO_ROOT", self.repo), \
-                mock.patch.object(server, "get_app_server_client", return_value=client):
+                mock.patch.object(server, "AppServerClient", return_value=client):
             before = server.ensure_task_app_thread(task_id)
             pending_worktree.mkdir(parents=True)
             with server.mutate_task(task_id) as task:
@@ -3055,6 +3057,11 @@ class ControllerTests(unittest.TestCase):
             task["app"].update({"status": "ready", "threadId": "app-thread-456", "deepLink": "codex://threads/app-thread-456"})
 
         class FakeClient:
+            process = None
+
+            def close(self):
+                pass
+
             def __init__(self, payload):
                 self.payload = payload
                 self.listener = None
@@ -3086,7 +3093,7 @@ class ControllerTests(unittest.TestCase):
         client = FakeClient(self.quick_result())
         with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
                 mock.patch.object(server, "_ensure_task_app_thread", return_value=server.get_task_copy(task_id)), \
-                mock.patch.object(server, "get_app_server_client", return_value=client):
+                mock.patch.object(server, "AppServerClient", return_value=client):
             result, thread_id = server.run_app_server_structured(
                 task_id,
                 "execution",
@@ -3104,6 +3111,169 @@ class ControllerTests(unittest.TestCase):
         self.assertNotIn("readOnlyAccess", client.turn_params["sandboxPolicy"])
         self.assertFalse(client.turn_params["sandboxPolicy"]["networkAccess"])
 
+    def test_app_server_turn_closes_only_its_client_on_every_exit(self) -> None:
+        cases = [
+            ("completed", False, None),
+            ("completed", True, None),
+            ("invalid-json", False, "不是有效 JSON"),
+            ("failed", False, "original turn failure"),
+            ("failed", True, "original turn failure"),
+            ("cancelled", False, "用户已停止"),
+            ("timeout", False, "连续 1 分钟没有新进度"),
+            ("start-failed", False, "original start failure"),
+        ]
+        for outcome, release_fails, expected_error in cases:
+            with self.subTest(outcome=outcome, release_fails=release_fails):
+                task_id = self.seed_execution_task()
+                thread_id = "app-thread-release"
+                task = server.TASKS[task_id]
+                task["sessions"]["app"] = thread_id
+                task["app"].update({"status": "ready", "threadId": thread_id})
+                server.ACTIVE_APP_TURNS["other-task"] = ("other-thread", "other-turn")
+                other_client = mock.Mock()
+                server.ACTIVE_APP_CLIENTS["other-task"] = other_client
+                client = server.AppServerClient("/mock/codex")
+                process = mock.Mock()
+                process.poll.return_value = None
+                client.process = process
+                client._initialized = True
+                calls = []
+
+                def close():
+                    if release_fails:
+                        raise server.WorkflowError("release unavailable")
+                    process.poll.return_value = 0
+                    client.process = None
+
+                def request(method, params, timeout=30):
+                    calls.append((method, params))
+                    if method != "turn/start":
+                        return {}
+                    if outcome == "start-failed":
+                        raise server.AppServerRPCError("original start failure")
+                    if outcome == "cancelled":
+                        server.CANCEL_REQUESTED.add(task_id)
+                    listener = next(iter(client._listeners[thread_id]))
+                    if outcome != "timeout":
+                        listener.put({
+                            "method": "item/completed",
+                            "params": {"item": {"type": "agentMessage", "text": "invalid" if outcome == "invalid-json" else json.dumps(self.quick_result())}},
+                        })
+                        listener.put({
+                            "method": "turn/completed",
+                            "params": {"turn": {"id": "turn-release", "status": "failed" if outcome == "failed" else "completed", "error": {"message": "original turn failure"}}},
+                        })
+                    return {"turn": {"id": "turn-release"}}
+
+                with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                        mock.patch.object(server, "_ensure_task_app_thread", return_value=server.get_task_copy(task_id)), \
+                        mock.patch.object(server, "AppServerClient", return_value=client), \
+                        mock.patch.object(client, "_request", side_effect=request), \
+                        mock.patch.object(client, "close", side_effect=close) as close_client, \
+                        mock.patch.object(server.time, "monotonic", side_effect=[0, 2] if outcome == "timeout" else None, return_value=0):
+                    arguments = (task_id, "execution", "quick task", self.repo, server.SCHEMA_ROOT / "execution.schema.json")
+                    options = {"timeout_seconds": 1, "timeout_label": "快速执行", "allow_docs_root": False}
+                    if expected_error:
+                        with self.assertRaisesRegex(server.WorkflowError, expected_error):
+                            server.run_app_server_structured(*arguments, **options)
+                    else:
+                        result, returned_thread = server.run_app_server_structured(*arguments, **options)
+                        self.assertEqual(result, self.quick_result())
+                        self.assertEqual(returned_thread, thread_id)
+
+                close_client.assert_called_once_with()
+                self.assertNotIn(task_id, server.ACTIVE_APP_TURNS)
+                self.assertNotIn(task_id, server.ACTIVE_APP_CLIENTS)
+                self.assertEqual(server.ACTIVE_APP_TURNS["other-task"], ("other-thread", "other-turn"))
+                self.assertIs(server.ACTIVE_APP_CLIENTS["other-task"], other_client)
+                other_client.close.assert_not_called()
+                self.assertEqual(client._listeners, {})
+                self.assertEqual(server.TASKS[task_id]["sessions"]["app"], thread_id)
+                if outcome in {"cancelled", "timeout"}:
+                    self.assertIn("turn/interrupt", [method for method, _ in calls])
+                if release_fails:
+                    self.assertTrue(any("释放失败" in entry["message"] for entry in server.TASKS[task_id]["execution"]["logs"]))
+                server.CANCEL_REQUESTED.discard(task_id)
+
+    def test_app_server_invalid_schema_does_not_acquire_thread(self) -> None:
+        task_id = self.seed_execution_task()
+        with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                mock.patch.object(server, "_ensure_task_app_thread") as ensure_thread:
+            with self.assertRaisesRegex(server.WorkflowError, "无法读取结构化输出 Schema"):
+                server.run_app_server_structured(
+                    task_id, "execution", "quick task", self.repo, self.root / "missing-schema.json",
+                    timeout_seconds=5, timeout_label="快速执行", allow_docs_root=False,
+                )
+        ensure_thread.assert_not_called()
+
+    def test_app_server_acquisition_failure_still_closes_its_client(self) -> None:
+        for failure in ("start", "resume", "save", "save-and-close"):
+            with self.subTest(failure=failure):
+                task_id = self.seed_execution_task()
+                if failure == "resume":
+                    server.TASKS[task_id]["sessions"]["app"] = "existing-thread"
+                client = mock.Mock()
+                client.process = None
+                if failure == "save-and-close":
+                    client.close.side_effect = server.WorkflowError("release unavailable")
+
+                def request(method, params, timeout=30):
+                    if method == f"thread/{failure}":
+                        raise server.WorkflowError("acquire failed")
+                    return {"thread": {"id": "new-thread"}}
+
+                client.request.side_effect = request
+                original_save = server.save_task_locked
+
+                def save(task):
+                    if failure.startswith("save"):
+                        raise OSError("storage failed")
+                    return original_save(task)
+
+                with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                        mock.patch.object(server, "AppServerClient", return_value=client), \
+                        mock.patch.object(server, "save_task_locked", side_effect=save):
+                    error_type = OSError if failure.startswith("save") else server.WorkflowError
+                    error_message = "storage failed" if failure.startswith("save") else "acquire failed"
+                    with self.assertRaisesRegex(error_type, error_message):
+                        server.run_app_server_structured(
+                            task_id, "execution", "quick task", self.repo, server.SCHEMA_ROOT / "execution.schema.json",
+                            timeout_seconds=5, timeout_label="快速执行", allow_docs_root=False,
+                        )
+
+                client.close.assert_called_once_with()
+                self.assertNotIn(task_id, server.ACTIVE_APP_CLIENTS)
+                self.assertNotIn("turn/start", [call.args[0] for call in client.request.call_args_list])
+
+    def test_shutdown_closes_all_active_app_clients(self) -> None:
+        first_client = mock.Mock()
+        second_client = mock.Mock()
+        legacy_client = mock.Mock()
+        server.ACTIVE_APP_CLIENTS.update({"first": first_client, "second": second_client})
+        with mock.patch.object(server, "APP_SERVER_CLIENT", legacy_client):
+            server.shutdown_app_server()
+            self.assertIsNone(server.APP_SERVER_CLIENT)
+        for client in (first_client, second_client, legacy_client):
+            client.close.assert_called_once_with()
+
+    def test_interrupt_does_not_restart_closed_app_server(self) -> None:
+        client = server.AppServerClient("/mock/codex")
+        with mock.patch.object(client, "start") as start, mock.patch.object(client, "_request") as request:
+            client.interrupt("finished-thread", "finished-turn")
+        start.assert_not_called()
+        request.assert_not_called()
+
+    def test_cancel_without_app_client_does_not_start_a_server(self) -> None:
+        task_id = self.seed_execution_task()
+        server.TASKS[task_id]["activeJob"] = "execution"
+        server.ACTIVE_APP_TURNS[task_id] = ("finished-thread", "finished-turn")
+        with mock.patch.object(server, "AppServerClient") as create_client, \
+                mock.patch.object(server, "get_app_server_client") as get_client:
+            server.cancel_task(task_id)
+        create_client.assert_not_called()
+        get_client.assert_not_called()
+        self.assertIn(task_id, server.CANCEL_REQUESTED)
+
     def test_app_server_progress_extends_idle_timeout(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000083")
         payload = self.quick_result()
@@ -3112,6 +3282,11 @@ class ControllerTests(unittest.TestCase):
             task["app"].update({"status": "ready", "threadId": "app-thread-progress"})
 
         class ProgressClient:
+            process = None
+
+            def close(self):
+                pass
+
             def __init__(self):
                 self.listener = None
 
@@ -3140,7 +3315,7 @@ class ControllerTests(unittest.TestCase):
         client = ProgressClient()
         with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
                 mock.patch.object(server, "_ensure_task_app_thread", return_value=server.get_task_copy(task_id)), \
-                mock.patch.object(server, "get_app_server_client", return_value=client), \
+                mock.patch.object(server, "AppServerClient", return_value=client), \
                 mock.patch.object(server.time, "monotonic", side_effect=[0, 4, 4, 8, 8]):
             result, _ = server.run_app_server_structured(
                 task_id,
@@ -3163,6 +3338,11 @@ class ControllerTests(unittest.TestCase):
             task["app"].update({"status": "ready", "threadId": "app-thread-hard-limit"})
 
         class NeverCompletesClient:
+            process = None
+
+            def close(self):
+                pass
+
             def __init__(self):
                 self.listener = None
                 self.interrupted = False
@@ -3186,7 +3366,7 @@ class ControllerTests(unittest.TestCase):
         client = NeverCompletesClient()
         with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
                 mock.patch.object(server, "_ensure_task_app_thread", return_value=server.get_task_copy(task_id)), \
-                mock.patch.object(server, "get_app_server_client", return_value=client), \
+                mock.patch.object(server, "AppServerClient", return_value=client), \
                 mock.patch.object(server.time, "monotonic", side_effect=[0, 4, 4, 8, 8, 11]):
             with self.assertRaisesRegex(server.WorkflowError, "绝对上限"):
                 server.run_app_server_structured(
@@ -3370,10 +3550,12 @@ class ControllerTests(unittest.TestCase):
         server.TASKS[task_id]["execution"].update({"status": "running", "phase": "implementation"})
         server.ACTIVE_APP_TURNS[task_id] = ("app-thread-cancel", "turn-cancel")
         client = mock.Mock()
+        server.ACTIVE_APP_CLIENTS[task_id] = client
 
-        with mock.patch.object(server, "get_app_server_client", return_value=client):
+        with mock.patch.object(server, "get_app_server_client") as get_shared_client:
             server.cancel_task(task_id)
 
+        get_shared_client.assert_not_called()
         client.interrupt.assert_called_once_with("app-thread-cancel", "turn-cancel")
         self.assertNotIn(task_id, server.ACTIVE_PROCESSES)
         self.assertIn(task_id, server.CANCEL_REQUESTED)
