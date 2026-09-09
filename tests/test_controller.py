@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -29,6 +30,9 @@ class ControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="project-flow-test-")
         self.root = Path(self.temp.name)
+        connections_patch = mock.patch.object(server.codex_connections, "SETTINGS_PATH", self.root / "connections.json")
+        connections_patch.start()
+        self.addCleanup(connections_patch.stop)
         self.repo = self.root / "repo"
         self.repo.mkdir()
         run(["git", "init", "-b", "main"], self.repo)
@@ -111,6 +115,41 @@ class ControllerTests(unittest.TestCase):
             "events": [],
         }
         return task_id
+
+    def configure_desktop_connections(
+        self,
+        connection_ids: tuple[str, ...] = ("api", "account"),
+        *,
+        default: str = "account",
+        unavailable: tuple[str, ...] = (),
+        include_default: bool = False,
+    ) -> None:
+        previous_patch = getattr(self, "_desktop_options_patch", None)
+        if previous_patch is not None:
+            previous_patch.stop()
+            self._desktop_options_patch = None
+        settings = {
+            "version": 2,
+            "defaultDesktopConnection": default,
+            "connections": {
+                connection_id: {
+                    "label": f"测试连接 {connection_id}",
+                    "home": str((self.root / f"missing-{connection_id}") if connection_id in unavailable else self.repo.resolve()),
+                    "config": {},
+                    "desktop": {"type": "command", "command": [sys.executable, "{url}"]},
+                }
+                for connection_id in connection_ids
+            },
+        }
+        server.codex_connections.SETTINGS_PATH.write_text(json.dumps(settings), encoding="utf-8")
+        if not include_default:
+            # Isolate configured profiles for controller selection tests; the
+            # real v2 catalog including the ambient default is tested separately.
+            options = [item for item in server.codex_connections.desktop_options() if item["id"] != "default"]
+            options_patch = mock.patch.object(server.codex_connections, "desktop_options", return_value=options)
+            options_patch.start()
+            self.addCleanup(options_patch.stop)
+            self._desktop_options_patch = options_patch
 
     def quick_result(self) -> dict[str, object]:
         return {
@@ -2853,11 +2892,11 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(server.task_app_cwd({"worktree": {"status": "ready", "path": str(candidate / "missing")}}), self.repo.resolve())
             self.assertEqual(server.task_app_cwd({"worktree": {"status": "ready", "path": ""}}), self.repo.resolve())
 
-    def test_linked_codex_app_button_refreshes_backend_binding_before_deep_link(self) -> None:
+    def test_linked_codex_app_button_uses_backend_desktop_open(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="openCodexApp"', app_js)
         self.assertIn('on("openCodexApp", "click", openCodexApp)', app_js)
-        self.assertIn('post(`/api/tasks/${task.id}/app/open`, {})', app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/app/open`, request)', app_js)
         self.assertNotIn('<a class="app-link-button primary"', app_js)
 
     def test_opening_active_app_thread_preserves_running_turn(self) -> None:
@@ -2907,6 +2946,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNone(task["sessions"]["codexApp"])
         self.assertEqual(task["codexApp"]["status"], "idle")
         self.assertIsNone(task["codexApp"]["threadId"])
+        self.assertIsNone(task["codexApp"]["connectionMode"])
         self.assertEqual(task["codexApp"]["deepLink"], "")
         self.assertEqual(task["codexApp"]["cwd"], str(self.repo.resolve()))
         self.assertTrue(any("旧聊天未删除" in item["message"] for item in task["events"]))
@@ -2936,6 +2976,8 @@ class ControllerTests(unittest.TestCase):
             calls.append((method, params))
             if method == "thread/start":
                 return {"thread": {"id": "manual-thread-new"}}
+            if method == "thread/read":
+                return {"thread": {"id": "manual-thread-new"}}
             return {}
 
         client.request.side_effect = request
@@ -2944,12 +2986,18 @@ class ControllerTests(unittest.TestCase):
 
         methods = [method for method, _ in calls]
         self.assertEqual(methods.count("thread/start"), 1)
+        self.assertEqual(methods.count("thread/inject_items"), 1)
+        self.assertEqual(methods.count("thread/read"), 1)
         self.assertNotIn("thread/resume", methods)
+        injected = next(params for method, params in calls if method == "thread/inject_items")
+        self.assertEqual(injected["threadId"], "manual-thread-new")
+        self.assertIn("Codex App 快速模式", injected["items"][0]["content"][0]["text"])
         client.close.assert_called_once_with()
         self.assertEqual(task["sessions"]["app"], "background-thread")
         self.assertEqual(task["app"]["threadId"], "background-thread")
         self.assertEqual(task["sessions"]["codexApp"], "manual-thread-new")
         self.assertEqual(task["codexApp"]["threadId"], "manual-thread-new")
+        self.assertEqual(task["codexApp"]["connectionMode"], "default")
         self.assertEqual(task["codexApp"]["deepLink"], "codex://threads/manual-thread-new")
         self.assertTrue(any("旧聊天仍保留" in item["message"] for item in task["events"]))
 
@@ -2966,7 +3014,7 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(events, ["close", "wait:5"])
 
-    def test_open_existing_codex_app_chat_does_not_resume_background_writer(self) -> None:
+    def test_open_existing_codex_app_chat_checks_storage_without_resuming_writer(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000061")
         with server.mutate_task(task_id) as task:
             task["sessions"]["codexApp"] = "manual-thread-existing"
@@ -2977,11 +3025,90 @@ class ControllerTests(unittest.TestCase):
                 "cwd": str(self.repo.resolve()),
             })
 
-        with mock.patch.object(server, "AppServerClient") as app_server:
-            task = server.ensure_task_codex_app_chat(task_id)
+        with mock.patch.object(server, "read_isolated_codex_app_chat", return_value=True) as read_chat:
+            with mock.patch.object(server, "AppServerClient") as app_server:
+                task = server.ensure_task_codex_app_chat(task_id)
 
+        read_chat.assert_called_once_with("manual-thread-existing", connection_mode="default")
         app_server.assert_not_called()
         self.assertEqual(task["codexApp"]["deepLink"], "codex://threads/manual-thread-existing")
+
+    def test_open_missing_codex_app_chat_rebuilds_binding(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000062")
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["codexApp"] = "manual-thread-missing"
+            task["codexApp"].update({
+                "status": "ready",
+                "threadId": "manual-thread-missing",
+                "deepLink": "codex://threads/manual-thread-missing",
+                "cwd": str(self.repo.resolve()),
+            })
+
+        with mock.patch.object(server, "read_isolated_codex_app_chat", return_value=False):
+            with mock.patch.object(server, "create_isolated_codex_app_chat", return_value="manual-thread-rebuilt") as create_chat:
+                task = server.ensure_task_codex_app_chat(task_id)
+
+        create_chat.assert_called_once()
+        self.assertEqual(task["sessions"]["codexApp"], "manual-thread-rebuilt")
+        self.assertEqual(task["codexApp"]["deepLink"], "codex://threads/manual-thread-rebuilt")
+        self.assertTrue(any("已自动重建" in item["message"] for item in task["events"]))
+
+    def test_missing_codex_app_chat_error_is_recoverable_but_other_errors_are_not(self) -> None:
+        missing_client = mock.Mock()
+        missing_client.process = None
+        for message in ("rollout file does not exist", "thread not loaded: manual-thread-missing"):
+            with self.subTest(message=message):
+                missing_client.request.side_effect = server.AppServerRPCError(message)
+                with mock.patch.object(server, "AppServerClient", return_value=missing_client):
+                    self.assertFalse(server.read_isolated_codex_app_chat("manual-thread-missing"))
+
+        unavailable_client = mock.Mock()
+        unavailable_client.process = None
+        unavailable_client.request.side_effect = server.AppServerRPCError("server overloaded; retry later")
+        with mock.patch.object(server, "AppServerClient", return_value=unavailable_client):
+            with self.assertRaisesRegex(server.AppServerRPCError, "server overloaded"):
+                server.read_isolated_codex_app_chat("manual-thread-existing")
+
+    def test_new_codex_app_chat_is_not_saved_when_persistence_check_fails(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000063")
+        client = mock.Mock()
+        client.process = None
+
+        def request(method, params, timeout=30):
+            if method == "thread/start":
+                return {"thread": {"id": "manual-thread-unpersisted"}}
+            if method == "thread/read":
+                return {"thread": {"id": ""}}
+            return {}
+
+        client.request.side_effect = request
+        with mock.patch.object(server, "AppServerClient", return_value=client):
+            with self.assertRaisesRegex(server.WorkflowError, "未能持久化"):
+                server.start_new_task_codex_app_chat(task_id)
+
+        task = server.get_task_copy(task_id)
+        self.assertIsNone(task["sessions"]["codexApp"])
+        self.assertIsNone(task["codexApp"]["threadId"])
+        client.request.assert_any_call(
+            "thread/delete",
+            {"threadId": "manual-thread-unpersisted"},
+            timeout=10,
+        )
+        client.close.assert_called_once_with()
+
+    def test_read_isolated_codex_app_chat_accepts_matching_stored_thread(self) -> None:
+        client = mock.Mock()
+        client.process = None
+        client.request.return_value = {"thread": {"id": "manual-thread-existing"}}
+        with mock.patch.object(server, "AppServerClient", return_value=client):
+            self.assertTrue(server.read_isolated_codex_app_chat("manual-thread-existing"))
+
+        client.request.assert_called_once_with(
+            "thread/read",
+            {"threadId": "manual-thread-existing", "includeTurns": False},
+            timeout=20,
+        )
+        client.close.assert_called_once_with()
 
     def test_app_chat_switching_is_blocked_while_task_runs(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000060")
@@ -3000,10 +3127,279 @@ class ControllerTests(unittest.TestCase):
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="newCodexAppChat"', app_js)
         self.assertIn('id="disconnectCodexApp"', app_js)
-        self.assertIn('post(`/api/tasks/${task.id}/app/new`, {})', app_js)
+        self.assertIn('post(`/api/tasks/${task.id}/app/new`, { connectionMode })', app_js)
         self.assertIn('post(`/api/tasks/${task.id}/app/disconnect`, {})', app_js)
         self.assertIn('const app = task.codexApp || {}', app_js)
-        self.assertIn('result.task?.codexApp?.deepLink', app_js)
+        self.assertIn('result.desktopOpened', app_js)
+
+    def test_desktop_chat_persists_account_mode_and_reopens_with_bound_mode(self) -> None:
+        self.configure_desktop_connections()
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000094")
+        with mock.patch.object(server, "create_isolated_codex_app_chat", return_value="account-chat") as create:
+            task = server.start_new_task_codex_app_chat(task_id, "account")
+        self.assertEqual(task["codexApp"]["connectionMode"], "account")
+        self.assertEqual(create.call_args.kwargs, {"force_new": True, "connection_mode": "account"})
+
+        with mock.patch.object(server.codex_connections, "desktop_mode", side_effect=AssertionError("saved binding must not use desktop mode")), \
+                mock.patch.object(server, "read_isolated_codex_app_chat", return_value=True) as read:
+            reopened = server.ensure_task_codex_app_chat(task_id, "api")
+        read.assert_called_once_with("account-chat", connection_mode="account")
+        self.assertEqual(reopened["codexApp"]["connectionMode"], "account")
+        self.assertEqual(reopened["app"], task["app"])
+
+    def test_single_account_connection_creates_chat_without_a_mode_selection(self) -> None:
+        self.configure_desktop_connections(("account",), default="account")
+        task_id = self.seed_execution_task()
+        with mock.patch.object(server, "create_isolated_codex_app_chat", return_value="account-chat") as create:
+            task = server.start_new_task_codex_app_chat(task_id)
+
+        self.assertEqual(create.call_args.kwargs, {"force_new": True, "connection_mode": "account"})
+        self.assertEqual(task["codexApp"]["connectionMode"], "account")
+        self.assertEqual(task["codexApp"]["connectionLabel"], "测试连接 account")
+
+    def test_new_desktop_chat_accepts_arbitrary_configured_connection_id(self) -> None:
+        self.configure_desktop_connections(("account", "team-staging"), default="account")
+        task_id = self.seed_execution_task()
+        with mock.patch.object(server, "create_isolated_codex_app_chat", return_value="team-chat") as create:
+            task = server.start_new_task_codex_app_chat(task_id, "team-staging")
+
+        self.assertEqual(create.call_args.kwargs, {"force_new": True, "connection_mode": "team-staging"})
+        self.assertEqual(task["codexApp"]["connectionMode"], "team-staging")
+        self.assertEqual(task["codexApp"]["connectionLabel"], "测试连接 team-staging")
+
+    def test_removed_desktop_connection_does_not_rebind_or_replace_existing_chat(self) -> None:
+        self.configure_desktop_connections(("account", "team"), default="account")
+        task_id = self.seed_execution_task()
+        with mock.patch.object(server, "create_isolated_codex_app_chat", return_value="team-chat"):
+            server.start_new_task_codex_app_chat(task_id, "team")
+        before = server.get_task_copy(task_id)
+        self.configure_desktop_connections(("account",), default="account")
+        with mock.patch.object(server, "read_isolated_codex_app_chat") as read, \
+                mock.patch.object(server, "create_isolated_codex_app_chat") as create:
+            with self.assertRaises(server.WorkflowError):
+                server.ensure_task_codex_app_chat(task_id, "account")
+
+        read.assert_not_called()
+        create.assert_not_called()
+        self.assertEqual(server.get_task_copy(task_id), before)
+        self.assertEqual(before["codexApp"]["connectionLabel"], "测试连接 team")
+
+    def test_explicit_empty_desktop_connection_is_rejected_before_chat_creation(self) -> None:
+        task_id = self.seed_execution_task()
+        with mock.patch.object(server, "create_isolated_codex_app_chat") as create:
+            with self.assertRaises(server.WorkflowError):
+                server.start_new_task_codex_app_chat(task_id, "")
+        create.assert_not_called()
+        self.assertIsNone(server.get_task_copy(task_id)["codexApp"]["threadId"])
+
+    def test_legacy_desktop_chat_searches_all_available_connections_and_skips_unavailable(self) -> None:
+        self.configure_desktop_connections(("account", "offline", "api", "team"), default="account", unavailable=("offline",))
+        task_id = self.seed_execution_task()
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["codexApp"] = "legacy-team-chat"
+            task["codexApp"].update({"threadId": "legacy-team-chat", "status": "ready", "cwd": str(self.repo.resolve())})
+            task["codexApp"].pop("connectionMode")
+        with mock.patch.object(server, "read_isolated_codex_app_chat", side_effect=[False, False, True]) as read, \
+                mock.patch.object(server, "create_isolated_codex_app_chat") as create:
+            reopened = server.ensure_task_codex_app_chat(task_id)
+
+        self.assertEqual(read.call_args_list, [
+            mock.call("legacy-team-chat", connection_mode=mode) for mode in ("account", "api", "team")
+        ])
+        create.assert_not_called()
+        self.assertEqual(reopened["codexApp"]["threadId"], "legacy-team-chat")
+        self.assertEqual(reopened["codexApp"]["connectionMode"], "team")
+        self.assertEqual(reopened["codexApp"]["connectionLabel"], "测试连接 team")
+
+    def test_legacy_desktop_chat_discovers_and_persists_its_profile_without_recreating(self) -> None:
+        self.configure_desktop_connections()
+        cases = (
+            ("account", None, "account", ["account"]),
+            ("account", None, "api", ["account", "api"]),
+            ("api", "account", "account", ["account"]),
+            ("account", "api", "account", ["api", "account"]),
+        )
+        for desktop_mode, selected_mode, stored_mode, expected_reads in cases:
+            with self.subTest(desktop=desktop_mode, selected=selected_mode, stored=stored_mode):
+                task_id = self.seed_execution_task()
+                with server.mutate_task(task_id) as task:
+                    task["sessions"]["codexApp"] = "legacy-chat"
+                    task["codexApp"].update({"threadId": "legacy-chat", "status": "ready", "cwd": str(self.repo.resolve())})
+                    task["codexApp"].pop("connectionMode")
+                before = server.get_task_copy(task_id)
+                with mock.patch.object(server.codex_connections, "desktop_mode", return_value=desktop_mode), \
+                        mock.patch.object(server, "read_isolated_codex_app_chat", side_effect=lambda thread_id, *, connection_mode: connection_mode == stored_mode) as read, \
+                        mock.patch.object(server, "create_isolated_codex_app_chat") as create:
+                    reopened = server.ensure_task_codex_app_chat(task_id, selected_mode)
+
+                self.assertEqual(read.call_args_list, [mock.call("legacy-chat", connection_mode=mode) for mode in expected_reads])
+                create.assert_not_called()
+                self.assertEqual(reopened["sessions"], before["sessions"])
+                self.assertEqual(reopened["app"], before["app"])
+                self.assertEqual(reopened["codexApp"]["threadId"], "legacy-chat")
+                self.assertEqual(reopened["codexApp"]["connectionMode"], stored_mode)
+                persisted = json.loads((server.task_dir(task_id) / "task.json").read_text(encoding="utf-8"))
+                self.assertEqual(persisted["codexApp"]["connectionMode"], stored_mode)
+
+    def test_missing_legacy_desktop_chat_rebuilds_in_preferred_profile(self) -> None:
+        self.configure_desktop_connections()
+        for selected_mode, expected_mode in ((None, "account"), ("api", "api")):
+            with self.subTest(selected=selected_mode):
+                task_id = self.seed_execution_task()
+                with server.mutate_task(task_id) as task:
+                    task["sessions"]["codexApp"] = "missing-legacy-chat"
+                    task["codexApp"].update({"threadId": "missing-legacy-chat", "status": "ready", "cwd": str(self.repo.resolve())})
+                    task["codexApp"].pop("connectionMode")
+                with mock.patch.object(server.codex_connections, "desktop_mode", return_value="account"), \
+                        mock.patch.object(server, "read_isolated_codex_app_chat", return_value=False) as read, \
+                        mock.patch.object(server, "create_isolated_codex_app_chat", return_value="rebuilt-chat") as create:
+                    rebuilt = server.ensure_task_codex_app_chat(task_id, selected_mode)
+
+                alternate = "api" if expected_mode == "account" else "account"
+                self.assertEqual(read.call_args_list, [
+                    mock.call("missing-legacy-chat", connection_mode=expected_mode),
+                    mock.call("missing-legacy-chat", connection_mode=alternate),
+                ])
+                self.assertEqual(create.call_args.kwargs, {"force_new": False, "connection_mode": expected_mode})
+                self.assertEqual(rebuilt["codexApp"]["connectionMode"], expected_mode)
+                self.assertEqual(rebuilt["codexApp"]["threadId"], "rebuilt-chat")
+
+    def test_legacy_desktop_chat_directory_change_rebuilds_in_discovered_profile(self) -> None:
+        self.configure_desktop_connections()
+        task_id = self.seed_execution_task()
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["codexApp"] = "legacy-chat"
+            task["codexApp"].update({"threadId": "legacy-chat", "cwd": str(self.root / "previous-repo")})
+            task["codexApp"].pop("connectionMode")
+        with mock.patch.object(server.codex_connections, "desktop_mode", return_value="account"), \
+                mock.patch.object(server, "read_isolated_codex_app_chat", side_effect=[False, True]) as read, \
+                mock.patch.object(server, "create_isolated_codex_app_chat", return_value="moved-chat") as create:
+            rebuilt = server.ensure_task_codex_app_chat(task_id)
+
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(create.call_args.kwargs, {"force_new": False, "connection_mode": "api"})
+        self.assertEqual(rebuilt["codexApp"]["connectionMode"], "api")
+        self.assertEqual(rebuilt["codexApp"]["threadId"], "moved-chat")
+        self.assertEqual(rebuilt["codexApp"]["cwd"], str(self.repo.resolve()))
+
+    def test_legacy_desktop_chat_lookup_errors_do_not_replace_binding(self) -> None:
+        self.configure_desktop_connections(("account", "offline", "api", "team"), default="account", unavailable=("offline",))
+        for responses in (
+            [server.AppServerRPCError("server overloaded")],
+            [False, server.AppServerRPCError("server overloaded")],
+            [False, False, server.AppServerRPCError("server overloaded")],
+        ):
+            with self.subTest(reads=len(responses)):
+                task_id = self.seed_execution_task()
+                with server.mutate_task(task_id) as task:
+                    task["sessions"]["codexApp"] = "legacy-chat"
+                    task["codexApp"].update({"threadId": "legacy-chat", "status": "ready", "cwd": str(self.repo.resolve())})
+                    task["codexApp"].pop("connectionMode")
+                before = server.get_task_copy(task_id)
+                with mock.patch.object(server.codex_connections, "desktop_mode", return_value="account"), \
+                        mock.patch.object(server, "read_isolated_codex_app_chat", side_effect=responses) as read, \
+                        mock.patch.object(server, "create_isolated_codex_app_chat") as create:
+                    with self.assertRaisesRegex(server.AppServerRPCError, "server overloaded"):
+                        server.ensure_task_codex_app_chat(task_id)
+
+                self.assertEqual(read.call_count, len(responses))
+                create.assert_not_called()
+                self.assertEqual(server.get_task_copy(task_id), before)
+
+    def test_legacy_desktop_chat_without_connection_config_uses_default_connection(self) -> None:
+        task_id = self.seed_execution_task()
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["codexApp"] = "legacy-chat"
+            task["codexApp"].update({"threadId": "legacy-chat", "status": "ready", "cwd": str(self.repo.resolve())})
+            task["codexApp"].pop("connectionMode")
+        with mock.patch.object(server, "read_isolated_codex_app_chat", return_value=True) as read, \
+                mock.patch.object(server, "create_isolated_codex_app_chat") as create:
+            reopened = server.ensure_task_codex_app_chat(task_id)
+
+        read.assert_called_once_with("legacy-chat", connection_mode="default")
+        create.assert_not_called()
+        self.assertEqual(reopened["codexApp"]["connectionMode"], "default")
+
+    def test_desktop_connection_validation_happens_before_creating_or_replacing_chat(self) -> None:
+        self.configure_desktop_connections()
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000095")
+        before = server.get_task_copy(task_id)
+        with mock.patch.object(server.codex_connections, "validate_desktop", side_effect=server.codex_connections.ConnectionError("请先完成初始化")):
+            with mock.patch.object(server, "create_isolated_codex_app_chat") as create:
+                with self.assertRaisesRegex(server.WorkflowError, "初始化"):
+                    server.start_new_task_codex_app_chat(task_id, "account")
+        create.assert_not_called()
+        self.assertEqual(server.get_task_copy(task_id), before)
+
+    def test_app_server_uses_background_connection_or_explicit_desktop_mode(self) -> None:
+        for mode, desktop in ((None, False), ("api", True), ("account", True), ("team", True)):
+            with self.subTest(mode=mode, desktop=desktop):
+                client = server.AppServerClient("/mock/codex", connection_mode=mode, desktop=desktop)
+                with mock.patch.object(server, "codex_app_server_spec", return_value=(["/resolved/codex"], {"TEST_CONNECTION": mode}, {})) as spec:
+                    with mock.patch.object(server.subprocess, "Popen", side_effect=PermissionError) as popen:
+                        with self.assertRaises(server.WorkflowError):
+                            client.start()
+                spec.assert_called_once_with(["/mock/codex", "app-server"], mode=mode, desktop=desktop)
+                self.assertEqual(popen.call_args.kwargs["env"], {"TEST_CONNECTION": mode})
+
+    def test_desktop_open_uses_saved_connection(self) -> None:
+        task = {"codexApp": {"connectionMode": "account", "deepLink": "codex://threads/account-chat"}}
+        with mock.patch.object(server.codex_connections, "open_desktop") as opened:
+            server.open_task_codex_app_chat(task)
+        opened.assert_called_once_with("account", "codex://threads/account-chat")
+
+    def test_background_resume_overrides_saved_account_provider(self) -> None:
+        client = server.AppServerClient("/mock/codex")
+        client._rpc_overrides = {"thread/resume": {"modelProvider": "chosen", "model": "model"}}
+        params = {"threadId": "old-account-thread", "modelProvider": "openai", "cwd": str(self.repo)}
+        with mock.patch.object(client, "start"), \
+                mock.patch.object(server.codex_connections, "rpc_overrides", side_effect=AssertionError("request must use the process snapshot")) as overrides, \
+                mock.patch.object(client, "_request", return_value={}) as request:
+            client.request("thread/resume", params, timeout=20)
+
+        overrides.assert_not_called()
+        self.assertEqual(request.call_args.args[1]["modelProvider"], "chosen")
+        self.assertEqual(request.call_args.args[1]["model"], "model")
+        self.assertEqual(request.call_args.args[1]["threadId"], "old-account-thread")
+        self.assertEqual(params["modelProvider"], "openai")
+        self.assertNotIn("model", params)
+
+    def test_desktop_app_server_requests_use_its_selected_connection_snapshot(self) -> None:
+        client = server.AppServerClient("/mock/codex", connection_mode="team", desktop=True)
+        client._rpc_overrides = {"thread/start": {"model": "team-model"}}
+        with mock.patch.object(client, "start"), \
+                mock.patch.object(server.codex_connections, "rpc_overrides", side_effect=AssertionError("request must use the process snapshot")) as overrides, \
+                mock.patch.object(client, "_request", return_value={}) as request:
+            client.request("thread/start", {"cwd": str(self.repo)}, timeout=20)
+
+        overrides.assert_not_called()
+        self.assertEqual(request.call_args.args[1]["model"], "team-model")
+
+    def test_running_app_server_retains_connection_snapshot_after_background_configuration_changes(self) -> None:
+        self.configure_desktop_connections(("account", "team"), default="account")
+        settings_path = server.codex_connections.SETTINGS_PATH
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        settings["backgroundConnection"] = "account"
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        client = server.AppServerClient("/mock/codex")
+        client.process = mock.Mock()
+        client.process.poll.return_value = None
+        client._initialized = True
+        client._rpc_overrides = {"turn/start": {"model": "account-model", "effort": "high"}}
+        with mock.patch.object(server, "codex_app_server_spec", side_effect=AssertionError("a running process must not resolve configuration again")) as spec, \
+                mock.patch.object(server.codex_connections, "rpc_overrides", side_effect=AssertionError("request must use the process snapshot")) as overrides, \
+                mock.patch.object(client, "_request", return_value={}) as request:
+            client.request("turn/start", {"threadId": "existing-thread"}, timeout=20)
+            settings["backgroundConnection"] = "team"
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+            client.request("turn/start", {"threadId": "existing-thread"}, timeout=20)
+
+        spec.assert_not_called()
+        overrides.assert_not_called()
+        self.assertEqual(request.call_args_list, [
+            mock.call("turn/start", {"threadId": "existing-thread", "model": "account-model", "effort": "high"}, 20),
+            mock.call("turn/start", {"threadId": "existing-thread", "model": "account-model", "effort": "high"}, 20),
+        ])
 
     def test_app_server_initialization_is_shared_by_concurrent_first_requests(self) -> None:
         client = server.AppServerClient("/mock/codex")
@@ -3596,6 +3992,50 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(task["knowledge"]["status"], "idle")
         self.assertEqual(task["knowledge"]["candidates"], [])
 
+    def test_load_session_only_desktop_binding_discovers_account_before_rebuilding_unknown_directory(self) -> None:
+        self.configure_desktop_connections()
+        task_id = self.seed_execution_task()
+        legacy = server.get_task_copy(task_id)
+        legacy["sessions"]["codexApp"] = "legacy-account-chat"
+        legacy.pop("codexApp")
+        target = server.task_file(task_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+        server.TASKS.clear()
+
+        server.load_tasks()
+
+        loaded = server.get_task_copy(task_id)
+        self.assertEqual(loaded["codexApp"]["threadId"], "legacy-account-chat")
+        self.assertNotIn("connectionMode", loaded["codexApp"])
+        self.assertEqual(loaded["codexApp"]["cwd"], "")
+        with mock.patch.object(server.codex_connections, "desktop_mode", return_value="account"), \
+                mock.patch.object(server, "read_isolated_codex_app_chat", return_value=True) as read, \
+                mock.patch.object(server, "create_isolated_codex_app_chat", return_value="rebuilt-account-chat") as create:
+            reopened = server.ensure_task_codex_app_chat(task_id)
+
+        read.assert_called_once_with("legacy-account-chat", connection_mode="account")
+        self.assertEqual(create.call_args.kwargs, {"force_new": False, "connection_mode": "account"})
+        self.assertEqual(reopened["codexApp"]["threadId"], "rebuilt-account-chat")
+        self.assertEqual(reopened["codexApp"]["connectionMode"], "account")
+        self.assertEqual(reopened["codexApp"]["cwd"], str(self.repo.resolve()))
+
+    def test_load_desktop_binding_preserves_explicit_connection_mode(self) -> None:
+        task_id = self.seed_execution_task()
+        saved = server.get_task_copy(task_id)
+        saved["sessions"]["codexApp"] = "saved-api-chat"
+        saved["codexApp"].update({"threadId": "saved-api-chat", "connectionMode": "api"})
+        target = server.task_file(task_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(saved, ensure_ascii=False), encoding="utf-8")
+        server.TASKS.clear()
+
+        server.load_tasks()
+
+        loaded = server.get_task_copy(task_id)
+        self.assertEqual(loaded["codexApp"]["threadId"], "saved-api-chat")
+        self.assertEqual(loaded["codexApp"]["connectionMode"], "api")
+
     def test_knowledge_generation_requires_committed_idle_task(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000072")
         with self.assertRaisesRegex(server.WorkflowError, "已完成 Commit"):
@@ -3844,6 +4284,12 @@ class ControllerTests(unittest.TestCase):
             health = server.health_payload()
 
         self.assertTrue(health["features"]["codexAppLink"])
+        self.assertFalse(health["features"]["codexConnectionModes"])
+        self.assertEqual(health["codex"]["desktopConnectionMode"], "default")
+        self.assertEqual([item["id"] for item in health["codex"]["desktopConnections"]], ["default"])
+        self.assertFalse(health["codex"]["desktopConnections"][0]["available"])
+        self.assertTrue(health["codex"]["desktopConnections"][0]["reason"])
+        self.assertIn("Codex CLI", health["codex"]["desktopConnectionError"])
         self.assertTrue(health["features"]["appServer"])
         self.assertTrue(health["features"]["quickMode"])
         self.assertTrue(health["features"]["larkCliReader"])
@@ -3853,6 +4299,71 @@ class ControllerTests(unittest.TestCase):
         self.assertGreaterEqual(health["limits"]["quickExecutionHardSeconds"], health["limits"]["quickExecutionSeconds"])
         self.assertGreaterEqual(health["limits"]["knowledgeSeconds"], 120)
         self.assertGreaterEqual(health["limits"]["knowledgeHardSeconds"], health["limits"]["knowledgeSeconds"])
+
+    def test_health_desktop_mode_selection_depends_on_available_connections(self) -> None:
+        cases = (
+            (("account",), (), False),
+            (("account", "offline"), ("offline",), False),
+            (("account", "offline", "team"), ("offline",), True),
+        )
+        for connection_ids, unavailable, supports_selection in cases:
+            with self.subTest(connections=connection_ids):
+                self.configure_desktop_connections(connection_ids, default="account", unavailable=unavailable)
+                with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                        mock.patch.object(server, "run_command", return_value=subprocess.CompletedProcess([], 0, "codex test", "")), \
+                        mock.patch.object(server, "lark_cli_status", return_value={"ready": False}):
+                    health = server.health_payload()
+
+                self.assertTrue(health["features"]["codexAppLink"])
+                self.assertEqual(health["features"]["codexConnectionModes"], supports_selection)
+                self.assertEqual(health["codex"]["desktopConnectionMode"], "account")
+                self.assertEqual([item["id"] for item in health["codex"]["desktopConnections"]], list(connection_ids))
+                self.assertEqual(
+                    [item["id"] for item in health["codex"]["desktopConnections"] if not item["available"]],
+                    list(unavailable),
+                )
+
+    def test_health_v2_catalog_includes_ambient_default_in_available_count(self) -> None:
+        self.configure_desktop_connections(("account", "offline"), default="account", unavailable=("offline",), include_default=True)
+        with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                mock.patch.object(server, "run_command", return_value=subprocess.CompletedProcess([], 0, "codex test", "")), \
+                mock.patch.object(server, "lark_cli_status", return_value={"ready": False}):
+            health = server.health_payload()
+
+        options = {item["id"]: item for item in health["codex"]["desktopConnections"]}
+        self.assertEqual(set(options), {"default", "account", "offline"})
+        self.assertTrue(options["default"]["available"])
+        self.assertTrue(options["account"]["available"])
+        self.assertFalse(options["offline"]["available"])
+        self.assertTrue(health["features"]["codexConnectionModes"])
+
+    def test_health_without_connection_config_offers_one_default_chat_connection(self) -> None:
+        with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                mock.patch.object(server, "run_command", return_value=subprocess.CompletedProcess([], 0, "codex test", "")), \
+                mock.patch.object(server, "lark_cli_status", return_value={"ready": False}):
+            health = server.health_payload()
+
+        self.assertTrue(health["features"]["codexAppLink"])
+        self.assertFalse(health["features"]["codexConnectionModes"])
+        self.assertEqual(health["codex"]["desktopConnectionMode"], "default")
+        options = health["codex"]["desktopConnections"]
+        self.assertEqual([item["id"] for item in options], ["default"])
+        self.assertTrue(options[0]["available"])
+
+    def test_health_tolerates_connection_configuration_errors(self) -> None:
+        server.codex_connections.SETTINGS_PATH.write_text("not valid JSON", encoding="utf-8")
+        with mock.patch.object(server, "CODEX_BIN", "/mock/codex"), \
+                mock.patch.object(server, "run_command", return_value=subprocess.CompletedProcess([], 0, "codex test", "")), \
+                mock.patch.object(server, "lark_cli_status", return_value={"ready": False}):
+            health = server.health_payload()
+
+        self.assertTrue(health["codex"]["ready"])
+        self.assertTrue(health["features"]["codexAppLink"])
+        self.assertFalse(health["features"]["codexConnectionModes"])
+        self.assertIsNone(health["codex"]["desktopConnectionMode"])
+        self.assertEqual(health["codex"]["desktopConnections"], [])
+        self.assertTrue(health["codex"]["desktopConnectionError"])
+        self.assertIn(health["codex"]["desktopConnectionError"], health["warnings"])
 
 
 if __name__ == "__main__":

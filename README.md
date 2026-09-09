@@ -43,7 +43,7 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 - 同时输出 Markdown Plan 和自包含的逻辑验收 HTML。
 - 创建 Worktree 前先展示真实 dry-run；也可以接入已有 Worktree。
 - 项目级 Worktree 管理：从任务队列打开“清理 Worktree”，查看当前仓库的 linked Worktree；只允许清理位于 Profile `worktreesRoot`、Git 状态干净且未被未归档任务占用的目录。清理使用 `git worktree remove`，不使用 `--force`，不删除分支。
-- 每个需求可绑定一个独立的 Codex App 人工聊天，通过 `codex://threads/<thread-id>` 打开，并可断开连接或切换到新聊天。
+- 每个需求可绑定一个独立的 Codex App 人工聊天；默认沿用现有 Codex 环境，也可按需配置单个或多个连接，打开时沿用绑定方式。
 - 快速修改复用后台执行 Thread，一轮完成实现和自检；人工聊天与后台执行隔离，避免多客户端争用同一个 writer。
 - 在任务绑定的 Worktree 中执行 Codex 和项目 Skills。
 - 将实施与 Code Review 分开，Review 不通过时进入定向修复。
@@ -606,6 +606,14 @@ python3 -m py_compile \
 ### 服务重启后任务还在吗？
 
 在。任务记录位于 `.runtime/<project-id>/tasks`。重启时正在运行的阶段会变成 `interrupted`，已有 Worktree 改动不会被清理。
+
+### 如何配置 Codex 连接？
+
+未配置连接文件时，后台和人工聊天沿用服务启动时的 Codex 环境，界面只显示默认环境，不提供无效的登录切换选项。
+
+需要单独配置后台或桌面连接时，可使用 `.runtime/codex-connections.json` 的 v2 格式。连接可以只有一条，也可使用多个自定义 ID；`backgroundConnection` 单独决定后台连接，桌面仅展示配置了打开方式的连接。已有的双入口配置通过兼容适配器继续支持。配置示例、凭据处理及入口要求见 [Codex 连接配置](docs/codex-connections.md)。
+
+人工聊天保存实际连接 ID，再次打开沿用绑定；连接不可用时显示原因，不自动改用另一个账号。凭据只注入对应子进程，不写入任务记录或日志。
 
 ### 快速模式为什么更快？
 

@@ -62,6 +62,7 @@
     planView: "logic",
     agentMemoryOpen: false,
     executionMode: "fast",
+    codexAppConnectionMode: "",
     checks: [],
     verificationRevision: 0,
     verificationNote: "",
@@ -221,7 +222,7 @@
   const taskViewKeys = [
     "module", "viewStage", "knowledgeFilter", "intakeMode", "workflowMode", "sourceType", "title", "sourceUrl", "larkReader", "sourceText", "sourceFileName", "baseBranch",
     "existingDocumentPath", "existingRequirementSource", "existingDocumentText", "existingWorktreePath", "worktreeSelectionPath", "existingPlanFileName",
-    "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "checks", "verificationRevision", "verificationNote", "commitMessage", "commitConfirmed", "commitSelectedPaths", "bugfixDescription", "askQuestion"
+    "answers", "customAnswers", "discussionNote", "planView", "agentMemoryOpen", "executionMode", "codexAppConnectionMode", "checks", "verificationRevision", "verificationNote", "commitMessage", "commitConfirmed", "commitSelectedPaths", "bugfixDescription", "askQuestion"
   ];
 
   function taskViewSnapshot(source) {
@@ -1753,12 +1754,69 @@
     return `<div class="callout ${type}"><p>${text}</p></div>`;
   }
 
+  function codexAppConnections() {
+    const connections = health?.codex?.desktopConnections;
+    return Array.isArray(connections)
+      ? connections.filter(connection => connection && typeof connection.id === "string" && connection.id)
+      : [];
+  }
+
+  function codexAppConnectionLabel(mode) {
+    const connection = codexAppConnections().find(item => item.id === mode);
+    return connection ? String(connection.label || connection.id) : mode ? `未配置连接（${mode}）` : "待识别";
+  }
+
+  function codexAppConnectionsError() {
+    if (!health?.features?.codexAppLink) return "当前服务未启用 Codex App 聊天。";
+    if (!Array.isArray(health?.codex?.desktopConnections)) return "本地服务需重启后才能使用 Codex App 聊天。";
+    if (!codexAppConnections().some(connection => connection.available === true)) {
+      return String(health?.codex?.desktopConnectionError || "没有可用的 Codex 连接，请检查连接配置。");
+    }
+    return "";
+  }
+
+  function codexAppConnectionIssue(mode) {
+    const serviceError = codexAppConnectionsError();
+    if (serviceError) return serviceError;
+    const connection = codexAppConnections().find(item => item.id === mode);
+    if (!connection) return `连接“${mode || "未选择"}”未配置，请重新选择连接。`;
+    if (connection.available !== true) return `连接“${codexAppConnectionLabel(mode)}”不可用：${connection.reason || "请检查连接配置"}。请重新选择连接。`;
+    return "";
+  }
+
+  function selectedCodexAppConnectionMode() {
+    if (typeof ui.codexAppConnectionMode === "string" && ui.codexAppConnectionMode) return ui.codexAppConnectionMode;
+    const desktopMode = health?.codex?.desktopConnectionMode;
+    if (typeof desktopMode === "string" && desktopMode) return desktopMode;
+    const available = codexAppConnections().filter(connection => connection.available === true);
+    return available.find(connection => connection.id === "default")?.id
+      || available[0]?.id || "";
+  }
+
+  async function refreshedCodexAppConnectionMode(bindingMode = "") {
+    if (!await refreshSessionToken()) throw new Error("无法确认当前 Codex 连接，请刷新页面后重试。");
+    const mode = bindingMode || selectedCodexAppConnectionMode();
+    const issue = codexAppConnectionIssue(mode);
+    if (issue) throw new Error(issue);
+    return mode;
+  }
+
+  function selectCodexAppConnectionMode(mode) {
+    const issue = codexAppConnectionIssue(mode);
+    if (issue) return showToast(issue, true);
+    ui.codexAppConnectionMode = mode;
+    saveUi();
+    render();
+  }
+
   function renderCodexAppPanel() {
     if (!task || !health?.features?.codexAppLink) return "";
     const app = task.codexApp || {};
     const threadId = String(app.threadId || task.sessions?.codexApp || "");
-    const deepLink = app.deepLink || (threadId && /^[A-Za-z0-9_-]+$/.test(threadId) ? `codex://threads/${encodeURIComponent(threadId)}` : "");
-    const linked = Boolean(threadId && deepLink);
+    const linked = Boolean(threadId);
+    const connections = codexAppConnections();
+    const connectionMode = selectedCodexAppConnectionMode();
+    const knownConnection = typeof app.connectionMode === "string" && Boolean(app.connectionMode);
     const status = ({
       idle: "尚未连接",
       ready: "已连接",
@@ -1766,18 +1824,36 @@
     })[app.status] || (linked ? "已连接" : "尚未连接");
     const switchLocked = busy || Boolean(task.activeJob);
     const switchTitle = switchLocked ? "当前任务正在执行，完成或停止后才能切换聊天" : "";
+    const serviceError = codexAppConnectionsError();
+    const selectionError = codexAppConnectionIssue(connectionMode);
+    const openError = linked && knownConnection ? codexAppConnectionIssue(app.connectionMode) : selectionError;
+    const openLocked = switchLocked || Boolean(openError);
+    const newLocked = switchLocked || Boolean(selectionError);
+    const openTitle = openError || switchTitle;
+    const newTitle = selectionError || switchTitle;
+    const selectedConfigured = connections.some(connection => connection.id === connectionMode);
+    const options = connections.map(connection => `<option value="${escapeHTML(connection.id)}" ${connectionMode === connection.id ? "selected" : ""} ${connection.available === true ? "" : "disabled"}>${escapeHTML(codexAppConnectionLabel(connection.id))}${connection.available === true ? "" : `（${escapeHTML(connection.reason || "不可用")}）`}</option>`).join("");
+    const choice = connections.length > 1
+      ? `<select id="codexAppConnectionMode" ${switchLocked || serviceError ? "disabled" : ""} title="${escapeHTML(serviceError || switchTitle)}">${selectedConfigured ? "" : '<option value="" selected disabled>请重新选择连接</option>'}${options}</select>`
+      : connections.length === 1
+        ? `<strong>${escapeHTML(codexAppConnectionLabel(connections[0].id))}</strong>${selectionError && connections[0].available === true ? `<button id="resetCodexAppConnectionMode" type="button" ${switchLocked ? "disabled" : ""}>使用此连接</button>` : ""}`
+        : "";
+    const reasons = connections.filter(connection => connection.available !== true).map(connection => `${codexAppConnectionLabel(connection.id)}：${connection.reason || "不可用"}`);
+    const notices = [...new Set([serviceError, selectionError, openError, ...reasons].filter(Boolean))];
+    const connectionSelector = task.archivedAt ? ""
+      : `<div class="field"><label${connections.length > 1 ? ' for="codexAppConnectionMode"' : ""}>${linked ? "新聊天连接" : "聊天连接"}</label>${choice}${notices.map(notice => `<small>${escapeHTML(notice)}</small>`).join("")}</div>`;
     const action = task.archivedAt
       ? '<span class="app-link-button disabled">任务已归档</span>'
       : linked
-        ? `<div class="app-thread-actions"><button class="app-link-button primary" id="openCodexApp" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">打开 Codex App</button><div class="app-thread-tools"><button id="newCodexAppChat" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">新建聊天</button><button class="danger" id="disconnectCodexApp" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">断开连接</button></div></div>`
-        : `<button class="primary" id="openCodexApp" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">新建聊天并在 Codex App 打开</button>`;
+        ? `<div class="app-thread-actions"><button class="app-link-button primary" id="openCodexApp" type="button" ${openLocked ? "disabled" : ""} title="${escapeHTML(openTitle)}">打开 Codex App</button><div class="app-thread-tools"><button id="newCodexAppChat" type="button" ${newLocked ? "disabled" : ""} title="${escapeHTML(newTitle)}">新建聊天</button><button class="danger" id="disconnectCodexApp" type="button" ${switchLocked ? "disabled" : ""} title="${escapeHTML(switchTitle)}">断开连接</button></div></div>`
+        : `<button class="primary" id="openCodexApp" type="button" ${openLocked ? "disabled" : ""} title="${escapeHTML(openTitle)}">新建聊天并在 Codex App 打开</button>`;
     const workspace = app.cwd || (task.worktree?.status === "ready" ? task.worktree.path : health?.paths?.repo);
     return `<section class="codex-app-panel ${linked ? "linked" : ""}">
       <div class="codex-app-copy"><div class="codex-app-title"><span class="app-status-dot" aria-hidden="true"></span><div><p class="section-kicker">Codex App 人工聊天</p><h3>${escapeHTML(status)}</h3></div></div>
       <p>${linked ? "这个需求已经绑定独立的人工聊天。它与后台快速执行 Thread 隔离，可安全地在 Codex App 中继续交流。" : "为这个需求创建独立人工聊天；它会连接到当前项目或 Worktree，不占用后台快速执行 Thread。"}</p>
-      <div class="codex-app-meta"><span>${linked ? "当前连接目录" : "项目目录"} <code>${escapeHTML(workspace || "尚未绑定")}</code></span>${threadId ? `<span>Thread <code>${escapeHTML(`${threadId.slice(0, 12)}…`)}</code></span>` : ""}</div>
+      <div class="codex-app-meta">${linked ? `<span>连接 <strong>${escapeHTML(codexAppConnectionLabel(app.connectionMode))}</strong></span>` : ""}<span>${linked ? "当前连接目录" : "项目目录"} <code>${escapeHTML(workspace || "尚未绑定")}</code></span>${threadId ? `<span>Thread <code>${escapeHTML(`${threadId.slice(0, 12)}…`)}</code></span>` : ""}</div>
       ${app.error ? `<p class="app-error">${escapeHTML(app.error)}</p>` : ""}</div>
-      <div class="codex-app-action">${action}<small>${linked ? "可继续当前聊天，或保留旧聊天后新建一个" : "只建立连接，不会执行 Plan"}</small></div>
+      <div class="codex-app-action">${connectionSelector}${action}<small>${linked ? knownConnection ? "打开使用当前绑定的连接；选择项用于新建聊天" : "打开时识别旧聊天；找不到时按所选连接重建" : "只建立连接，不会执行 Plan"}</small></div>
     </section>`;
   }
 
@@ -2621,6 +2697,13 @@
     });
     on("createWorktree", "click", createWorktree);
     on("openCodexApp", "click", openCodexApp);
+    on("codexAppConnectionMode", "change", (event) => {
+      selectCodexAppConnectionMode(event.target.value);
+    });
+    on("resetCodexAppConnectionMode", "click", () => {
+      const connections = codexAppConnections();
+      if (connections.length === 1) selectCodexAppConnectionMode(connections[0].id);
+    });
     on("newCodexAppChat", "click", newCodexAppChat);
     on("disconnectCodexApp", "click", disconnectCodexApp);
     on("executePlan", "click", () => executePlan(""));
@@ -2896,27 +2979,32 @@
   }
 
   async function openCodexApp() {
+    const serviceError = codexAppConnectionsError();
+    if (serviceError) return showToast(serviceError, true);
     await withAction(async () => {
-      const result = await post(`/api/tasks/${task.id}/app/open`, {});
-      const deepLink = result.task?.codexApp?.deepLink;
+      const linked = Boolean(task.codexApp?.threadId || task.sessions?.codexApp);
+      const knownConnection = typeof task.codexApp?.connectionMode === "string" && Boolean(task.codexApp.connectionMode);
+      const connectionMode = await refreshedCodexAppConnectionMode(linked && knownConnection ? task.codexApp.connectionMode : "");
+      const request = linked && knownConnection ? {} : { connectionMode };
+      const result = await post(`/api/tasks/${task.id}/app/open`, request);
       setTask(result.task, false);
-      if (!deepLink) throw new Error("服务已建立 Codex App 人工聊天，但没有返回可打开的链接。");
-      showToast("已在当前项目目录打开独立 Codex App 人工聊天。" );
-      window.location.href = deepLink;
+      if (result.desktopOpened !== true) throw new Error("人工聊天已建立，但尚未确认在桌面打开，请重试打开。");
+      showToast(`已使用${codexAppConnectionLabel(result.task?.codexApp?.connectionMode)}打开人工聊天。`);
     });
   }
 
   async function newCodexAppChat() {
+    const serviceError = codexAppConnectionsError();
+    if (serviceError) return showToast(serviceError, true);
     if (task?.activeJob) return showToast("当前任务正在执行，完成或停止后才能新建聊天。", true);
-    const confirmed = window.confirm("为当前需求新建一个 Codex App 聊天？\n\n旧聊天不会删除，但控制台后续会改为复用新聊天。");
-    if (!confirmed) return;
     await withAction(async () => {
-      const result = await post(`/api/tasks/${task.id}/app/new`, {});
-      const deepLink = result.task?.codexApp?.deepLink;
+      const connectionMode = await refreshedCodexAppConnectionMode();
+      const confirmed = window.confirm(`使用${codexAppConnectionLabel(connectionMode)}为当前需求新建聊天？\n\n旧聊天不会删除，但控制台后续会改为复用新聊天。`);
+      if (!confirmed) return;
+      const result = await post(`/api/tasks/${task.id}/app/new`, { connectionMode });
       setTask(result.task, false);
-      if (!deepLink) throw new Error("新聊天已创建，但没有返回可打开的链接。");
-      showToast("已在当前项目目录新建 Codex App 聊天。" );
-      window.location.href = deepLink;
+      if (result.desktopOpened !== true) throw new Error("新聊天已创建，但尚未确认在桌面打开，请重试打开。");
+      showToast(`已使用${codexAppConnectionLabel(result.task?.codexApp?.connectionMode)}新建人工聊天。`);
     });
   }
 

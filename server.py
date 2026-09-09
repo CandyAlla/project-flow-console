@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import quote, unquote, urlparse
 
+import codex_connections
+
 from memory_client import (
     MemoryClient,
     MemoryClientError,
@@ -138,6 +140,20 @@ def resolve_codex_bin() -> str:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return ""
+
+
+def codex_process_spec(command: list[str], *, mode: str | None = None, desktop: bool = False) -> tuple[list[str], dict[str, str]]:
+    try:
+        return codex_connections.resolve(command, mode=mode, desktop=desktop)
+    except codex_connections.ConnectionError as exc:
+        raise WorkflowError(str(exc)) from exc
+
+
+def codex_app_server_spec(command: list[str], *, mode: str | None = None, desktop: bool = False) -> tuple[list[str], dict[str, str], dict[str, dict[str, Any]]]:
+    try:
+        return codex_connections.app_server_spec(command, mode=mode, desktop=desktop)
+    except codex_connections.ConnectionError as exc:
+        raise WorkflowError(str(exc)) from exc
 
 
 def resolve_lark_cli_bin() -> str:
@@ -257,8 +273,10 @@ class AppServerRPCError(WorkflowError):
 class AppServerClient:
     """Small persistent JSONL client for the official Codex app-server protocol."""
 
-    def __init__(self, codex_bin: str) -> None:
+    def __init__(self, codex_bin: str, *, connection_mode: str | None = None, desktop: bool = False) -> None:
         self.codex_bin = codex_bin
+        self.connection_mode = connection_mode
+        self.desktop = desktop
         self.process: subprocess.Popen[str] | None = None
         self._initialized = False
         self._lifecycle_lock = threading.RLock()
@@ -268,6 +286,7 @@ class AppServerClient:
         self._pending: dict[int, dict[str, Any]] = {}
         self._listeners: dict[str, set[queue.Queue[dict[str, Any]]]] = {}
         self._stderr_lines: list[str] = []
+        self._rpc_overrides: dict[str, dict[str, Any]] = {}
 
     @property
     def running(self) -> bool:
@@ -284,8 +303,12 @@ class AppServerClient:
                 return
             self._initialized = False
             try:
+                command, environment, rpc_overrides = codex_app_server_spec(
+                    [self.codex_bin, "app-server"], mode=self.connection_mode, desktop=self.desktop,
+                )
                 process = subprocess.Popen(
-                    [self.codex_bin, "app-server"],
+                    command,
+                    env=environment,
                     text=True,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -298,6 +321,7 @@ class AppServerClient:
             except PermissionError as exc:
                 raise WorkflowError(f"Codex CLI 不可执行：{safe_log(self.codex_bin)}") from exc
             self.process = process
+            self._rpc_overrides = rpc_overrides
             self._stderr_lines = []
             threading.Thread(target=self._reader_loop, name="project-flow-app-server-reader", daemon=True).start()
             threading.Thread(target=self._stderr_loop, name="project-flow-app-server-stderr", daemon=True).start()
@@ -330,7 +354,8 @@ class AppServerClient:
 
     def request(self, method: str, params: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
         self.start()
-        return self._request(method, params, timeout)
+        overrides = self._rpc_overrides.get(method, {})
+        return self._request(method, {**params, **overrides}, timeout)
 
     def _request(self, method: str, params: dict[str, Any], timeout: int) -> dict[str, Any]:
         with self._state_lock:
@@ -1653,7 +1678,11 @@ def load_tasks() -> None:
                 app.setdefault("cwd", "")
                 app.setdefault("logs", [])
                 app.setdefault("error", "")
-                codex_app = task.setdefault("codexApp", default_codex_app_chat())
+                if "codexApp" not in task:
+                    task["codexApp"] = default_codex_app_chat()
+                    if task["sessions"].get("codexApp"):
+                        task["codexApp"].pop("connectionMode", None)
+                codex_app = task["codexApp"]
                 codex_app["threadId"] = codex_app.get("threadId") or task["sessions"].get("codexApp")
                 if not codex_app.get("status") or (codex_app.get("status") == "idle" and codex_app.get("threadId")):
                     codex_app["status"] = "ready" if codex_app.get("threadId") else "idle"
@@ -1718,6 +1747,7 @@ def default_codex_app_chat(cwd: Any = "") -> dict[str, Any]:
         "threadId": None,
         "deepLink": "",
         "cwd": str(cwd or ""),
+        "connectionMode": None,
         "error": "",
     }
 
@@ -1772,11 +1802,45 @@ def close_isolated_app_server(client: AppServerClient) -> None:
             raise WorkflowError("Codex App Server writer 未能及时释放，请稍后重试。") from exc
 
 
-def create_isolated_codex_app_chat(task: dict[str, Any], cwd: Path, *, force_new: bool) -> str:
+def _codex_app_chat_missing(error: AppServerRPCError) -> bool:
+    """Return whether app-server reports a binding with no persisted thread."""
+    message = str(error).casefold()
+    # Current app-server falls back to its loaded-thread lookup when no stored
+    # rollout exists. This RPC error differs from a valid thread's notLoaded status.
+    return message.startswith("thread not loaded:") or any(
+        marker in message
+        for marker in (
+            "rollout file does not exist",
+            "rollout not found",
+            "thread not found",
+            "thread does not exist",
+        )
+    )
+
+
+def read_isolated_codex_app_chat(thread_id: str, *, connection_mode: str | None = None) -> bool:
+    """Check a desktop-owned chat through the stored-thread API without resuming it."""
+    client = AppServerClient(CODEX_BIN, connection_mode=connection_mode, desktop=True)
+    try:
+        response = client.request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": False},
+            timeout=20,
+        )
+        return str((response.get("thread") or {}).get("id") or "") == thread_id
+    except AppServerRPCError as exc:
+        if _codex_app_chat_missing(exc):
+            return False
+        raise
+    finally:
+        close_isolated_app_server(client)
+
+
+def create_isolated_codex_app_chat(task: dict[str, Any], cwd: Path, *, force_new: bool, connection_mode: str | None = None) -> str:
     """Create a desktop-owned chat without sharing the automation app-server writer."""
     if not CODEX_BIN:
         raise WorkflowError(CODEX_MISSING_MESSAGE)
-    client = AppServerClient(CODEX_BIN)
+    client = AppServerClient(CODEX_BIN, connection_mode=connection_mode, desktop=True)
     thread_id = ""
     try:
         response = client.request(
@@ -1793,6 +1857,28 @@ def create_isolated_codex_app_chat(task: dict[str, Any], cwd: Path, *, force_new
         thread_id = str((response.get("thread") or {}).get("id") or "")
         if not thread_id:
             raise WorkflowError("Codex App Server 未返回人工聊天 Thread ID。")
+        client.request(
+            "thread/inject_items",
+            {
+                "threadId": thread_id,
+                "items": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": (
+                                    f"已连接 DevConductor 需求「{safe_log(task.get('title'), 80)}」。"
+                                    "你可以直接在这里继续讨论或处理这个需求。"
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            },
+            timeout=10,
+        )
         try:
             suffix = f" · 新聊天 {datetime.now().strftime('%m-%d %H:%M')}" if force_new else ""
             client.request(
@@ -1802,6 +1888,18 @@ def create_isolated_codex_app_chat(task: dict[str, Any], cwd: Path, *, force_new
             )
         except WorkflowError:
             pass
+        persisted = client.request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": False},
+            timeout=10,
+        )
+        if str((persisted.get("thread") or {}).get("id") or "") != thread_id:
+            raise WorkflowError("Codex App 人工聊天未能持久化，请重试。")
+    except Exception:
+        if thread_id:
+            with contextlib.suppress(WorkflowError):
+                client.request("thread/delete", {"threadId": thread_id}, timeout=10)
+        raise
     finally:
         close_isolated_app_server(client)
     return thread_id
@@ -1817,16 +1915,44 @@ def _ensure_codex_app_chat_switch_allowed(task_id: str) -> dict[str, Any]:
     return task
 
 
-def _prepare_task_codex_app_chat(task_id: str, *, force_new: bool) -> dict[str, Any]:
+def _prepare_task_codex_app_chat(task_id: str, *, force_new: bool, connection_mode: str | None = None) -> dict[str, Any]:
     task = _ensure_codex_app_chat_switch_allowed(task_id)
     cwd = task_app_cwd(task)
     section = task.get("codexApp") if isinstance(task.get("codexApp"), dict) else {}
     existing = str(task.get("sessions", {}).get("codexApp") or section.get("threadId") or "")
+    saved_mode = section.get("connectionMode")
+    legacy_found: bool | None = None
+    try:
+        mode = saved_mode if existing and not force_new and saved_mode else (
+            connection_mode if connection_mode is not None else codex_connections.desktop_mode()
+        )
+        codex_connections.validate_desktop(mode)
+        options = codex_connections.desktop_options()
+        if existing and not force_new and not saved_mode:
+            legacy_found = False
+            candidates = [mode, *(item["id"] for item in options if item["available"] and item["id"] != mode)]
+            for candidate in candidates:
+                if candidate != mode:
+                    codex_connections.validate_desktop(candidate)
+                if read_isolated_codex_app_chat(existing, connection_mode=candidate):
+                    mode = candidate
+                    legacy_found = True
+                    break
+    except codex_connections.ConnectionError as exc:
+        raise WorkflowError(str(exc)) from exc
+    label = next((item["label"] for item in options if item["id"] == mode), mode)
     previous_cwd = str(section.get("cwd") or "")
     if existing and not force_new and previous_cwd == str(cwd):
-        return task
+        if legacy_found is True or (legacy_found is None and read_isolated_codex_app_chat(existing, connection_mode=mode)):
+            if legacy_found:
+                with mutate_task(task_id) as live:
+                    live.setdefault("codexApp", default_codex_app_chat()).update({
+                        "connectionMode": mode, "connectionLabel": label,
+                    })
+                return get_task_copy(task_id)
+            return task
 
-    thread_id = create_isolated_codex_app_chat(task, cwd, force_new=force_new)
+    thread_id = create_isolated_codex_app_chat(task, cwd, force_new=force_new, connection_mode=mode)
     deep_link = codex_app_deep_link(thread_id)
     if not deep_link:
         raise WorkflowError("Codex App 人工聊天已创建，但 Thread ID 无法生成安全链接。")
@@ -1837,10 +1963,14 @@ def _prepare_task_codex_app_chat(task_id: str, *, force_new: bool) -> dict[str, 
             "threadId": thread_id,
             "deepLink": deep_link,
             "cwd": str(cwd),
+            "connectionMode": mode,
+            "connectionLabel": label,
             "error": "",
         })
         if force_new:
             add_event(live, f"已新建 Codex App 人工聊天；项目目录：{cwd}；旧聊天仍保留。", "ok")
+        elif existing and previous_cwd == str(cwd):
+            add_event(live, f"原 Codex App 人工聊天记录已失效，已自动重建；项目目录：{cwd}。", "warning")
         elif existing and previous_cwd != str(cwd):
             add_event(live, f"项目目录已变化，已新建对应目录的 Codex App 人工聊天：{cwd}。", "ok")
         else:
@@ -1848,12 +1978,20 @@ def _prepare_task_codex_app_chat(task_id: str, *, force_new: bool) -> dict[str, 
     return get_task_copy(task_id)
 
 
-def ensure_task_codex_app_chat(task_id: str) -> dict[str, Any]:
-    return _prepare_task_codex_app_chat(task_id, force_new=False)
+def ensure_task_codex_app_chat(task_id: str, connection_mode: str | None = None) -> dict[str, Any]:
+    return _prepare_task_codex_app_chat(task_id, force_new=False, connection_mode=connection_mode)
 
 
-def start_new_task_codex_app_chat(task_id: str) -> dict[str, Any]:
-    return _prepare_task_codex_app_chat(task_id, force_new=True)
+def start_new_task_codex_app_chat(task_id: str, connection_mode: str | None = None) -> dict[str, Any]:
+    return _prepare_task_codex_app_chat(task_id, force_new=True, connection_mode=connection_mode)
+
+
+def open_task_codex_app_chat(task: dict[str, Any]) -> None:
+    section = task.get("codexApp") or {}
+    try:
+        codex_connections.open_desktop(section.get("connectionMode"), section.get("deepLink") or "")
+    except codex_connections.ConnectionError as exc:
+        raise WorkflowError(str(exc)) from exc
 
 
 def disconnect_task_codex_app_chat(task_id: str) -> dict[str, Any]:
@@ -2841,9 +2979,11 @@ def run_codex_structured(
     with LOCK:
         if task_id in CANCEL_REQUESTED:
             raise WorkflowError("用户已停止当前任务。")
+    command, environment = codex_process_spec(command)
     try:
         process = subprocess.Popen(
             command,
+            env=environment,
             cwd=cwd,
             text=True,
             stdout=subprocess.PIPE,
@@ -5484,6 +5624,21 @@ def health_payload() -> dict[str, Any]:
     warnings = []
     if not codex_ready:
         warnings.append(CODEX_MISSING_MESSAGE if not CODEX_BIN else codex_version)
+    desktop_connection_mode = None
+    desktop_connections = []
+    desktop_connection_error = ""
+    try:
+        desktop_connections = codex_connections.desktop_options()
+        desktop_connection_mode = codex_connections.desktop_mode()
+    except codex_connections.ConnectionError as exc:
+        desktop_connections = []
+        desktop_connection_error = str(exc)
+        warnings.append(desktop_connection_error)
+    if not codex_ready:
+        cli_error = CODEX_MISSING_MESSAGE if not CODEX_BIN else codex_version
+        desktop_connections = [{**item, "available": False, "reason": cli_error} for item in desktop_connections]
+        if not desktop_connection_error:
+            desktop_connection_error = cli_error
     missing_facts = [relative for relative in PROJECT_FACTS if not (REPO_ROOT / relative).exists()]
     if missing_facts:
         warnings.append("Project Profile 中这些事实入口当前不存在：" + "、".join(missing_facts))
@@ -5499,6 +5654,9 @@ def health_payload() -> dict[str, Any]:
         "codex": {
             "ready": codex_ready,
             "version": codex_version,
+            "desktopConnectionMode": desktop_connection_mode,
+            "desktopConnections": desktop_connections,
+            "desktopConnectionError": desktop_connection_error,
             "appServer": {
                 "available": codex_ready,
                 "running": bool(APP_SERVER_CLIENT and APP_SERVER_CLIENT.running) or any(client.running for client in list(ACTIVE_APP_CLIENTS.values())),
@@ -5509,6 +5667,7 @@ def health_payload() -> dict[str, Any]:
             "ask": True,
             "bugfixInPlace": True,
             "codexAppLink": True,
+            "codexConnectionModes": sum(1 for item in desktop_connections if item["available"]) > 1,
             "appServer": True,
             "quickMode": True,
             "larkCliReader": True,
@@ -5758,13 +5917,17 @@ class WorkflowHandler(BaseHTTPRequestHandler):
             if task.get("archivedAt"):
                 raise WorkflowError("任务已归档，请先恢复后再继续执行。")
             if action == "app/open":
-                self.send_json({"ok": True, "task": ensure_task_codex_app_chat(task_id)})
+                opened = ensure_task_codex_app_chat(task_id, payload.get("connectionMode"))
+                open_task_codex_app_chat(opened)
+                self.send_json({"ok": True, "task": opened, "desktopOpened": True})
                 return
             if action == "app/disconnect":
                 self.send_json({"ok": True, "task": disconnect_task_codex_app_chat(task_id)})
                 return
             if action == "app/new":
-                self.send_json({"ok": True, "task": start_new_task_codex_app_chat(task_id)})
+                opened = start_new_task_codex_app_chat(task_id, payload.get("connectionMode"))
+                open_task_codex_app_chat(opened)
+                self.send_json({"ok": True, "task": opened, "desktopOpened": True})
                 return
             if action == "ask":
                 message_id = prepare_ask_request(task_id, str(payload.get("question") or ""))

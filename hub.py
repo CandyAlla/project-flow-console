@@ -414,7 +414,10 @@ class WorkerManager:
     def _raw_request(
         self, worker: ProjectWorker, method: str, path: str, body: bytes, headers: dict[str, str]
     ) -> tuple[int, dict[str, str], bytes]:
-        connection = self._connection(worker.port)
+        # A desktop connection may wait for the user's existing App to quit
+        # normally before opening the selected login mode.
+        timeout = 180 if path.endswith(("/app/open", "/app/new")) else 30
+        connection = self._connection(worker.port, timeout=timeout)
         try:
             connection.request(method, path, body=body or None, headers=headers)
             response = connection.getresponse()
