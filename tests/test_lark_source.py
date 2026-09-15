@@ -125,7 +125,7 @@ class LarkSourceTests(unittest.TestCase):
         body = '<title>需求</title><cite type="doc" doc-id="Doc123" title="' + title + '"/>'
         result = lark_source.fetch_document(self.url, mock.Mock(return_value=self.document(body)))
         self.assertEqual(result["coverage"], "complete")
-        self.assertEqual(result["missingAttachments"], ["引用文档《" + title + "》：未读取（附件可选）。"])
+        self.assertEqual(result["missingAttachments"], ["引用文档《" + title + "》：未读取。"])
         self.assertNotIn("表格标识", result["missingAttachments"][0])
 
     def test_rejects_untrusted_or_malformed_url_before_calling_cli(self):

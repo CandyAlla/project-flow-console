@@ -7,8 +7,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-READERS = frozenset({"chrome_mcp", "lark_cli"})
-METHODS = frozenset({"desktop_import", "automated"})
+READERS = frozenset({"manual_import", "chrome_mcp", "lark_cli"})
+METHODS = frozenset({"manual_import", "desktop_import", "automated"})
+DEFAULT_READERS = frozenset({"auto", "manual_import", "lark_cli", "codex_read_only"})
+ATTACHMENT_POLICIES = frozenset({"optional", "required"})
+SETTINGS_FIELDS = frozenset({"defaultReader", "attachmentPolicy"})
 MAX_BODY_LENGTH = 240_000
 MAX_TITLE_LENGTH = 500
 MAX_SECTION_COUNT = 200
@@ -23,16 +26,38 @@ _ERROR_MESSAGES = {
     "codex_auth_missing": "读取环境缺少 Codex 账号认证。请在用于读取的 Codex 环境检查账号登录与插件授权，然后单独重试读取。",
     "plugin_load_failed": "Codex 浏览器插件加载失败。请在桌面设置的 Computer Use 中检查插件安装与受信任路径，然后单独重试读取。",
     "chrome_not_connected": "读取环境尚未连接 Chrome。请打开 Chrome 并检查控制扩展连接，然后单独重试读取。",
-    "reader_unavailable": "所选文档读取通道当前不可用。请检查读取环境，或在桌面完成读取后导入文档正文。",
+    "reader_unavailable": "所选文档读取通道当前不可用。请检查读取环境，或使用手工导入提供文档正文。",
     "document_login_required": "文档站点要求登录。请在读取所用环境登录该文档站点，然后单独重试读取。",
     "document_permission_denied": "当前文档账号没有访问权限。请确认原始链接及该账号的文档权限，然后单独重试读取。",
-    "read_incomplete": "文档正文读取不完整。请补齐正文和缺失章节后重新读取或导入；未读附件不影响进入需求讨论。",
-    "read_failed": "文档读取失败。请检查读取环境后单独重试，或在桌面完成读取后导入文档正文。",
+    "read_incomplete": "文档读取未满足当前策略。请补齐缺失正文、章节或要求必读的附件后重新读取或导入。",
+    "read_failed": "文档读取失败。请检查读取环境后单独重试，或使用手工导入提供文档正文。",
 }
 
 
 class SourceReadError(ValueError):
     """The submitted document does not satisfy the snapshot contract."""
+
+
+def normalize_attachment_policy(value: Any) -> str:
+    """Accept only the supported attachment requirements."""
+    if not isinstance(value, str) or value not in ATTACHMENT_POLICIES:
+        raise SourceReadError("附件读取策略无效，仅支持 optional 或 required。")
+    return value
+
+
+def normalize_settings(value: Any = None) -> dict[str, str]:
+    """Validate optional profile settings without accepting executable config."""
+    if value is None:
+        value = {}
+    if not isinstance(value, dict) or set(value) - SETTINGS_FIELDS:
+        raise SourceReadError("sourceReading 必须是对象，且仅支持 defaultReader 和 attachmentPolicy。")
+    reader = value.get("defaultReader", "auto")
+    if not isinstance(reader, str) or reader not in DEFAULT_READERS:
+        raise SourceReadError("默认文档读取通道无效，仅支持 auto、manual_import、lark_cli 或 codex_read_only。")
+    return {
+        "defaultReader": reader,
+        "attachmentPolicy": normalize_attachment_policy(value.get("attachmentPolicy", "optional")),
+    }
 
 
 def default_state() -> dict[str, Any]:
@@ -86,8 +111,8 @@ def validate_snapshot(
 ) -> dict[str, Any]:
     """Validate a complete or partial document without trusting reader metadata.
 
-    Coverage describes the main document. Unread attachments are retained as
-    context, but only incomplete body/sections block the planning gate.
+    Coverage describes the main document. Unread attachments are retained;
+    the task's attachment policy determines whether they block readiness.
     URL, reader, timestamp and digest are bound by this function.
     """
     if not requires_read(source) or not _valid_url(source.get("url")):
@@ -132,8 +157,9 @@ def validate_snapshot(
     }
 
 
-def snapshot_ready(snapshot: Any) -> bool:
-    """Require complete body/sections; attachments are optional context."""
+def snapshot_ready(snapshot: Any, *, attachment_policy: str = "optional") -> bool:
+    """Require complete body/sections and apply the task's attachment policy."""
+    attachment_policy = normalize_attachment_policy(attachment_policy)
     if not isinstance(snapshot, dict) or snapshot.get("coverage") != "complete":
         return False
     body = snapshot.get("body")
@@ -144,6 +170,7 @@ def snapshot_ready(snapshot: Any) -> bool:
         and isinstance(snapshot.get("missingSections"), list)
         and snapshot["missingSections"] == []
         and isinstance(snapshot.get("missingAttachments"), list)
+        and (attachment_policy == "optional" or snapshot["missingAttachments"] == [])
     )
 
 

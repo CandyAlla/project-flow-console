@@ -1558,7 +1558,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(verification["checks"], [False, True])
         self.assertEqual(verification["revision"], 7)
 
-    def test_lark_links_default_to_chrome_mcp_without_accepting_spoofed_hosts(self) -> None:
+    def test_lark_links_default_to_manual_import_without_accepting_spoofed_hosts(self) -> None:
         self.assertTrue(server.is_lark_url("https://example.feishu.cn/docx/abc"))
         self.assertTrue(server.is_lark_url("https://example.larksuite.com/wiki/abc"))
         self.assertFalse(server.is_lark_url("https://feishu.cn.example.com/docx/abc"))
@@ -1582,7 +1582,7 @@ class ControllerTests(unittest.TestCase):
                 server.initial_discussion_job(task["id"])
 
         launch_job.assert_not_called()
-        self.assertEqual(task["source"]["reader"], "chrome_mcp")
+        self.assertEqual(task["source"]["reader"], "manual_import")
         prompt = run_codex.call_args.args[2][-1]
         self.assertIn("需求材料已通过独立读取步骤准备", prompt)
         self.assertIn("不要把连接重试当作产品澄清问题", prompt)
@@ -1609,7 +1609,7 @@ class ControllerTests(unittest.TestCase):
 
         prompt = server.source_reader_prompt(task)
         self.assertEqual(task["source"]["reader"], "lark_cli")
-        self.assertIn("$lark-shared、$lark-wiki 与 $lark-doc", prompt)
+        self.assertIn("Agent Skills 是可选帮助", prompt)
         self.assertIn("禁止创建、更新、覆盖、移动、分享、评论、发送消息", prompt)
         self.assertIn("不要改用 Chrome MCP", prompt)
 
@@ -1634,10 +1634,10 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(state["sourceRead"]["status"], "blocked")
         self.assertEqual(state["sourceRead"]["errorCode"], "reader_unavailable")
         self.assertEqual(state["discussion"]["status"], "idle")
-        with self.assertRaisesRegex(server.WorkflowError, "飞书读取方式"):
+        with self.assertRaisesRegex(server.WorkflowError, "文档读取方式"):
             server.create_task({**payload, "larkReader": "unknown_reader"})
 
-    def test_lark_cli_status_requires_reader_skills_as_well_as_auth(self) -> None:
+    def test_lark_cli_status_does_not_require_optional_skills(self) -> None:
         command_result = subprocess.CompletedProcess(["lark-cli"], 0, "lark-cli 1.0.82", "")
         auth_result = subprocess.CompletedProcess(["lark-cli"], 0, json.dumps({"identities": {"user": {"available": True}}}), "")
         with mock.patch.object(server, "resolve_lark_cli_bin", return_value="/opt/homebrew/bin/lark-cli"), \
@@ -1648,18 +1648,16 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(status["installed"])
         self.assertTrue(status["authenticated"])
         self.assertFalse(status["skillsInstalled"])
-        self.assertFalse(status["ready"])
+        self.assertTrue(status["ready"])
+        self.assertEqual(status["errorCode"], "")
+        self.assertIn("不影响控制台读取", status["message"])
         self.assertIn("definitely-missing-lark-skill", status["missingSkills"])
 
     def test_lark_reader_selector_is_optional_and_preserves_typing(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
-        self.assertIn('larkReader: "chrome_mcp"', app_js)
-        self.assertIn('data-lark-reader="chrome_mcp"', app_js)
-        self.assertIn('data-lark-reader="lark_cli"', app_js)
-        self.assertIn('options.hidden = !isLarkLink(event.target.value)', app_js)
-        self.assertIn('larkReader: ui.larkReader', app_js)
-        self.assertIn("Chrome 桌面读取", app_js)
-        self.assertIn("复制桌面只读读取提示", app_js)
+        self.assertIn("sourceReader:", app_js)
+        self.assertIn("manual_import", app_js)
+        self.assertIn("attachmentPolicy", app_js)
         self.assertIn("重试 Lark CLI 读取", app_js)
 
     def test_generated_html_normalizes_escaped_tag_newlines_only(self) -> None:

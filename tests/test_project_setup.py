@@ -80,6 +80,20 @@ class ProjectProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(server.WorkflowError, "worktreesRoot"):
             server.validate_project_profile(profile, require_repo=False)
 
+    def test_profile_normalizes_reading_defaults_and_preserves_explicit_settings(self) -> None:
+        original = self.profile()
+        normalized = server.validate_project_profile(original, require_repo=False)
+        self.assertEqual(normalized["sourceReading"], {"defaultReader": "auto", "attachmentPolicy": "optional"})
+        self.assertNotIn("sourceReading", original)
+        original["sourceReading"] = {"defaultReader": "manual_import", "attachmentPolicy": "required"}
+        normalized = server.validate_project_profile(original, require_repo=False)
+        self.assertEqual(normalized["sourceReading"], original["sourceReading"])
+
+    def test_profile_rejects_arbitrary_reader_commands_and_invalid_policy(self) -> None:
+        for settings in ({"command": "custom reader"}, {"defaultReader": "/custom/bin/reader"}, {"attachmentPolicy": False}, []):
+            with self.subTest(settings=settings), self.assertRaisesRegex(server.WorkflowError, "文档读取配置"):
+                server.validate_project_profile({**self.profile(), "sourceReading": settings}, require_repo=False)
+
     def test_profile_loads_and_normalizes_a_real_git_root(self) -> None:
         path = self.root / "sample.json"
         path.write_text(json.dumps(self.profile()), encoding="utf-8")

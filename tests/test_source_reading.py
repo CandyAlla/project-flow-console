@@ -34,8 +34,50 @@ class SourceReadingTests(unittest.TestCase):
         state["logs"].append("one task")
         self.assertEqual(reading.default_state()["logs"], [])
 
+    def test_missing_settings_preserve_compatible_defaults(self) -> None:
+        expected = {"defaultReader": "auto", "attachmentPolicy": "optional"}
+        for value in (None, {}):
+            with self.subTest(value=value):
+                self.assertEqual(reading.normalize_settings(value), expected)
+        settings = reading.normalize_settings()
+        settings["defaultReader"] = "manual_import"
+        self.assertEqual(reading.normalize_settings(), expected)
+
+    def test_supported_settings_are_normalized_without_mutating_input(self) -> None:
+        for reader in ("auto", "manual_import", "lark_cli", "codex_read_only"):
+            for policy in ("optional", "required"):
+                with self.subTest(reader=reader, policy=policy):
+                    source = {"defaultReader": reader, "attachmentPolicy": policy}
+                    normalized = reading.normalize_settings(source)
+                    self.assertEqual(normalized, source)
+                    self.assertIsNot(normalized, source)
+        self.assertEqual(reading.normalize_settings({"attachmentPolicy": "required"}), {
+            "defaultReader": "auto", "attachmentPolicy": "required",
+        })
+        self.assertEqual(reading.normalize_settings({"defaultReader": "manual_import"}), {
+            "defaultReader": "manual_import", "attachmentPolicy": "optional",
+        })
+
+    def test_invalid_settings_and_executable_configuration_are_rejected(self) -> None:
+        variants = [False, 1, [], "manual_import", {"command": "credential-secret"}, {"path": "/private/credential-secret"}, {"attachmentPolcy": "required"}]
+        for field in ("defaultReader", "attachmentPolicy"):
+            for value in (None, True, 1, [], {}, "", "unknown", "credential-secret", " OPTIONAL "):
+                variants.append({field: value})
+        variants.append({"defaultReader": "chrome_mcp"})
+        for value in variants:
+            with self.subTest(value=value), self.assertRaises(reading.SourceReadError) as caught:
+                reading.normalize_settings(value)
+            self.assertNotIn("credential-secret", str(caught.exception))
+
+    def test_attachment_policy_validation_is_strict(self) -> None:
+        for value in ("optional", "required"):
+            self.assertEqual(reading.normalize_attachment_policy(value), value)
+        for value in (None, True, False, [], {}, 1, "", "REQUIRED", " required", "unknown"):
+            with self.subTest(value=value), self.assertRaises(reading.SourceReadError):
+                reading.normalize_attachment_policy(value)
+
     def test_only_supported_link_readers_require_reading(self) -> None:
-        for reader in ("chrome_mcp", "lark_cli"):
+        for reader in ("manual_import", "chrome_mcp", "lark_cli"):
             self.assertTrue(reading.requires_read({**self.source, "reader": reader}))
         for source in (None, [], "link", {}, {**self.source, "type": "text"}, {**self.source, "reader": "codex_read_only"}, {**self.source, "reader": []}):
             with self.subTest(source=source):
@@ -52,6 +94,15 @@ class SourceReadingTests(unittest.TestCase):
         self.assertTrue(reading.snapshot_ready(snapshot))
         snapshot["sections"].append("another section")
         self.assertEqual(self.payload, original)
+
+    def test_manual_import_accepts_content_from_any_supported_link_source(self) -> None:
+        for reader in ("manual_import", "chrome_mcp", "lark_cli"):
+            with self.subTest(reader=reader):
+                self.source["reader"] = reader
+                snapshot = self.validate(method="manual_import")
+                self.assertEqual(snapshot["reader"], reader)
+                self.assertEqual(snapshot["method"], "manual_import")
+                self.assertTrue(reading.snapshot_ready(snapshot))
 
     def test_content_is_trimmed_without_rewriting_body(self) -> None:
         snapshot = self.validate({**self.payload, "title": "  标题  ", "body": " \n实际正文\n  保留缩进\n ", "sections": ["  章节  "]})
@@ -124,6 +175,27 @@ class SourceReadingTests(unittest.TestCase):
         self.assertEqual(snapshot["coverage"], "complete")
         self.assertEqual(snapshot["missingAttachments"], ["参考文档", "截图"])
         self.assertTrue(reading.snapshot_ready(snapshot))
+
+    def test_required_attachments_block_readiness_without_changing_body_coverage(self) -> None:
+        snapshot = self.validate({**self.payload, "missingAttachments": ["功能流程截图"]})
+        self.assertEqual(snapshot["coverage"], "complete")
+        self.assertTrue(reading.snapshot_ready(snapshot, attachment_policy="optional"))
+        self.assertFalse(reading.snapshot_ready(snapshot, attachment_policy="required"))
+        self.assertEqual(snapshot["missingAttachments"], ["功能流程截图"])
+        complete = self.validate()
+        self.assertTrue(reading.snapshot_ready(complete, attachment_policy="required"))
+
+    def test_required_attachments_never_relax_body_requirements(self) -> None:
+        valid = self.validate()
+        for changes in ({"body": ""}, {"coverage": "partial"}, {"missingSections": ["埋点"]}, {"missingAttachments": None}):
+            with self.subTest(changes=changes):
+                self.assertFalse(reading.snapshot_ready({**valid, **changes}, attachment_policy="required"))
+
+    def test_readiness_rejects_invalid_policy_even_without_a_snapshot(self) -> None:
+        for snapshot in (None, self.validate()):
+            for policy in (None, [], "requred"):
+                with self.subTest(policy=policy), self.assertRaises(reading.SourceReadError):
+                    reading.snapshot_ready(snapshot, attachment_policy=policy)
 
     def test_metadata_cannot_be_spoofed_or_missing(self) -> None:
         for method in ("clipboard", [], None, ""):
@@ -198,6 +270,14 @@ class SourceReadingTests(unittest.TestCase):
         code, message = reading.classify_error("lark_credentials_unavailable credential-secret-123")
         self.assertEqual(code, "lark_credentials_unavailable")
         self.assertNotIn("credential-secret-123", message)
+
+    def test_generic_error_guidance_does_not_require_a_specific_import_provider(self) -> None:
+        for code in ("reader_unavailable", "read_incomplete", "read_failed"):
+            with self.subTest(code=code):
+                _, message = reading.classify_error(code)
+                for forbidden in ("Chrome", "桌面", "未读附件不影响"):
+                    self.assertNotIn(forbidden, message)
+        self.assertIn("必读的附件", reading.classify_error("read_incomplete")[1])
 
     def test_schema_has_a_strict_document_contract_and_all_categories(self) -> None:
         schema = json.loads((Path(__file__).resolve().parents[1] / "schemas" / "source-read.schema.json").read_text(encoding="utf-8"))

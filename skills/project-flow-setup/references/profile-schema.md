@@ -24,6 +24,8 @@ python3 server.py --profile /absolute/path/to/profile.json
 | `planRelativeDir` | relative path | Destination inside each Worktree; no `..` |
 | `projectFacts` | string array | Repository-relative read entrypoints; no `..` |
 | `planTemplate` | string | Optional repository-relative planning template |
+| `sourceReading.defaultReader` | string | Optional: `auto` (default), `manual_import`, `lark_cli`, or `codex_read_only`; resolved for each new link task |
+| `sourceReading.attachmentPolicy` | string | Optional: `optional` (default) or `required`; copied into each new link task |
 | `skills` | object | Arrays for `discussion`, `plan`, `execution`, `acceptanceFix`, `review` |
 | `verification.sources` | string array | Logs, dashboards, test runners, or other evidence sources |
 | `verification.policy` | string | Project-specific automatic/manual verification boundary |
@@ -40,6 +42,36 @@ python3 server.py --profile /absolute/path/to/profile.json
 Skill names must be lowercase kebab-case. Profiles cannot declare shell commands, hooks, environment mutation, fetch/push behavior, or arbitrary providers.
 
 `repositoryUrl` is normalized into a runtime-only `repositoryKey` such as `github.com/team/project`. HTTPS, SSH, and scp-style forms for the same remote resolve to one key. Absolute filesystem paths and `file://` remotes are rejected as shared identity.
+
+## Source Reading Defaults
+
+The entire `sourceReading` object is optional. Omitting it is equivalent to:
+
+```json
+{
+  "sourceReading": {
+    "defaultReader": "auto",
+    "attachmentPolicy": "optional"
+  }
+}
+```
+
+| Default reader | Lark links | Other links |
+|---|---|---|
+| `auto` | `manual_import` | `codex_read_only` with `optional`; `manual_import` with `required` |
+| `manual_import` | `manual_import` | `manual_import` |
+| `lark_cli` | `lark_cli` | Falls back to `manual_import` |
+| `codex_read_only` | Falls back to `manual_import` | `codex_read_only` with `optional`; falls back to `manual_import` with `required` |
+
+`manual_import` accepts document content obtained through any authorized source; it does not require Chrome or a Codex desktop session. `lark_cli` supports Feishu/Lark `/docx/` and `/wiki/` links and requires an available CLI and authenticated `user` identity. Missing Lark Skills are diagnostic notices, not a readiness gate. `codex_read_only` reads a link during discussion and is intended for ordinary public links without the separate material gate.
+
+The input form can override the reader and attachment policy for a new task. Defaults are resolved before the concrete values are saved in that task's `source`. An explicitly selected incompatible reader is rejected instead of silently replaced. Profile defaults do not retroactively change existing tasks; tasks without a stored attachment policy retain `optional`.
+
+`optional` records unread attachments and references without blocking otherwise complete body coverage. `required` blocks discussion and planning while any entry remains in `missingAttachments`; all unread attachments and references must be supplied. Both policies require a complete, nonempty body and no missing body sections when the material gate applies.
+
+While a task is idle in discussion, the user can explicitly switch between `manual_import` and `lark_cli`, subject to link compatibility, and adjust the attachment policy. Switching readers retains earlier material revisions and discussion history but requires a fresh read or save before continuing. Changing policy re-evaluates the saved snapshot. A task that already has `sourceRead` cannot switch back to `codex_read_only` to bypass the material gate. Legacy `chrome_mcp` tasks retain the manual-import path.
+
+`sourceReading` accepts only these bounded choices; it cannot specify custom shell commands, provider commands, executable paths, or credential locations.
 
 ## Runtime Isolation
 

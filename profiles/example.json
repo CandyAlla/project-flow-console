@@ -16,6 +16,10 @@
     "README.md"
   ],
   "planTemplate": "",
+  "sourceReading": {
+    "defaultReader": "auto",
+    "attachmentPolicy": "optional"
+  },
   "skills": {
     "discussion": [
       "discussion-only",

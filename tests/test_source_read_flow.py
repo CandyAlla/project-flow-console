@@ -74,19 +74,203 @@ class SourceReadFlowTests(unittest.TestCase):
             "coverage": "complete", **changes,
         }
 
-    def test_chrome_creation_waits_for_desktop_import_without_launching_codex(self) -> None:
+    def test_link_creation_waits_for_manual_import_without_launching_codex(self) -> None:
         with mock.patch.object(server, "launch_job") as launch:
             task = server.create_task({
                 "title": "读取活动入口需求", "sourceType": "link",
                 "sourceUrl": "https://example.feishu.cn/docx/actual-document", "baseBranch": "main",
             })
         self.assertEqual(task["sourceRead"]["status"], "blocked")
-        self.assertEqual(task["sourceRead"]["errorCode"], "desktop_import_required")
+        self.assertEqual(task["sourceRead"]["errorCode"], "manual_import_required")
+        self.assertEqual(task["source"]["reader"], "manual_import")
         self.assertEqual(task["discussion"]["status"], "idle")
         self.assertIsNone(task["discussion"]["threadId"])
         self.assertIsNone(task["sourceRead"]["snapshot"])
         launch.assert_not_called()
         server.run_codex_structured.assert_not_called()
+
+    def test_profile_defaults_are_resolved_and_frozen_on_each_new_task(self) -> None:
+        payload = {"title": "读取通用文档", "sourceType": "link", "sourceUrl": "https://docs.example.com/requirements"}
+        with mock.patch.object(server, "PROJECT_PROFILE", {"sourceReading": {"defaultReader": "manual_import", "attachmentPolicy": "required"}}), mock.patch.object(server, "launch_job"):
+            first = server.create_task(payload)
+            self.assertEqual(first["source"]["reader"], "manual_import")
+            self.assertEqual(first["source"]["attachmentPolicy"], "required")
+        with mock.patch.object(server, "PROJECT_PROFILE", {"sourceReading": {"defaultReader": "auto", "attachmentPolicy": "optional"}}), mock.patch.object(server, "launch_job") as launch:
+            second = server.create_task(payload)
+            self.assertEqual(second["source"]["reader"], "codex_read_only")
+            self.assertNotIn("sourceRead", second)
+            self.assertEqual(launch.call_args.args[1], "discussion")
+            self.assertEqual(server.source_attachment_policy(server.get_task_copy(first["id"])), "required")
+
+    def test_reader_defaults_fall_back_to_a_valid_material_path(self) -> None:
+        public_url = "https://docs.example.com/requirements"
+        lark_url = "https://example.feishu.cn/docx/Abc123"
+        cases = (
+            ("auto", public_url, "optional", "codex_read_only"),
+            ("auto", public_url, "required", "manual_import"),
+            ("auto", lark_url, "optional", "manual_import"),
+            ("lark_cli", public_url, "optional", "manual_import"),
+            ("codex_read_only", lark_url, "optional", "manual_import"),
+            ("codex_read_only", public_url, "required", "manual_import"),
+        )
+        for default, url, policy, expected in cases:
+            with self.subTest(default=default, url=url, policy=policy), mock.patch.object(server, "PROJECT_PROFILE", {"sourceReading": {"defaultReader": default}}):
+                self.assertEqual(server.resolve_source_reader(url, None, policy), expected)
+        for requested, url, policy in (("lark_cli", public_url, "optional"), ("codex_read_only", lark_url, "optional"), ("codex_read_only", public_url, "required")):
+            with self.subTest(reader=requested, policy=policy), self.assertRaises(server.WorkflowError):
+                server.resolve_source_reader(url, requested, policy)
+
+    def test_manual_import_accepts_non_lark_sources_and_records_generic_method(self) -> None:
+        with mock.patch.object(server, "launch_job") as launch:
+            task = server.create_task({"title": "外部文档", "sourceType": "link", "sourceUrl": "https://docs.example.com/spec", "sourceReader": "manual_import"})
+        imported = server.import_source_document(task["id"], self.document(task["id"]))
+        self.assertEqual(imported["sourceRead"]["status"], "ready")
+        self.assertEqual(imported["sourceRead"]["snapshot"]["method"], "manual_import")
+        self.assertNotIn("Chrome", imported["sourceRead"]["error"])
+        launch.assert_not_called()
+
+    def test_required_attachments_block_every_discussion_and_plan_entry(self) -> None:
+        task_id = self.seed_source_task("manual_import")
+        server.configure_source_reading(task_id, {"reader": "manual_import", "attachmentPolicy": "required"})
+        task = server.import_source_document(task_id, self.document(task_id, missingAttachments=["核心交互图"]))
+        self.assertEqual(task["sourceRead"]["snapshot"]["coverage"], "complete")
+        self.assertEqual(task["sourceRead"]["errorCode"], "attachments_required")
+        for action in ("discussion", "discussion/retry", "plan", "plan/direct"):
+            with self.subTest(action=action), self.assertRaises(server.WorkflowError):
+                server.ensure_flow_action_allowed(task, action)
+        approval = copy.deepcopy(task)
+        approval["stage"] = "plan"
+        with self.assertRaises(server.WorkflowError):
+            server.ensure_flow_action_allowed(approval, "plan/approve")
+        with self.assertRaises(server.WorkflowError):
+            server.continue_from_source(task_id)
+        # A stale or forged ready flag must not bypass the attachment policy.
+        task["sourceRead"]["status"] = "ready"
+        with self.assertRaises(server.WorkflowError):
+            server.require_source_ready(task)
+
+    def test_policy_changes_recheck_saved_material_and_require_discussion_again(self) -> None:
+        task_id = self.seed_source_task("manual_import")
+        task = server.import_source_document(task_id, self.document(task_id, missingAttachments=["设计稿"]))
+        revision = task["sourceRead"]["revision"]
+        with server.mutate_task(task_id) as live:
+            live["discussion"].update({"status": "ready", "sourceRevision": revision})
+        strict = server.configure_source_reading(task_id, {"reader": "manual_import", "attachmentPolicy": "required"})
+        self.assertEqual(strict["sourceRead"]["errorCode"], "attachments_required")
+        self.assertEqual(strict["sourceRead"]["revision"], revision)
+        self.assertEqual(strict["discussion"]["threadId"], "original-discussion-thread")
+        relaxed = server.configure_source_reading(task_id, {"reader": "manual_import", "attachmentPolicy": "optional"})
+        self.assertEqual(relaxed["sourceRead"]["status"], "ready")
+        self.assertNotIn("sourceRevision", relaxed["discussion"])
+        with self.assertRaises(server.WorkflowError):
+            server.require_source_applied(relaxed)
+        with mock.patch.object(server, "launch_job") as launch:
+            server.continue_from_source(task_id)
+        self.assertEqual(launch.call_args.args[:2], (task_id, "discussion"))
+
+    def test_explicit_reader_switch_preserves_history_and_requires_fresh_confirmation(self) -> None:
+        task_id = self.seed_source_task("lark_cli")
+        with server.mutate_task(task_id) as live:
+            snapshot = server.source_reading.validate_snapshot(live["source"], self.document(task_id), read_at=server.now_iso(), method="automated")
+            server.store_source_snapshot(live, snapshot)
+        old = server.get_task_copy(task_id)
+        changed = server.configure_source_reading(task_id, {"reader": "manual_import", "attachmentPolicy": "optional"})
+        self.assertTrue(changed["sourceRead"]["refreshRequired"])
+        self.assertEqual(changed["sourceRead"]["snapshot"], old["sourceRead"]["snapshot"])
+        self.assertEqual(changed["discussion"]["messages"], old["discussion"]["messages"])
+        with self.assertRaises(server.WorkflowError):
+            server.require_source_ready(changed)
+        imported = server.import_source_document(task_id, self.document(task_id))
+        self.assertEqual(imported["sourceRead"]["revision"], old["sourceRead"]["revision"] + 1)
+        self.assertFalse(imported["sourceRead"]["refreshRequired"])
+        self.assertEqual(imported["sourceRead"]["status"], "ready")
+
+    def test_policy_change_cannot_reactivate_material_after_explicit_retry(self) -> None:
+        task_id = self.seed_source_task("manual_import")
+        server.import_source_document(task_id, self.document(task_id))
+        server.prepare_source_retry(task_id)
+        changed = server.configure_source_reading(task_id, {"reader": "manual_import", "attachmentPolicy": "required"})
+        self.assertTrue(changed["sourceRead"]["refreshRequired"])
+        with self.assertRaises(server.WorkflowError):
+            server.require_source_ready(changed)
+
+    def test_legacy_tasks_keep_optional_policy_when_profile_defaults_change(self) -> None:
+        task_id = self.seed_source_task()
+        with mock.patch.object(server, "PROJECT_PROFILE", {"sourceReading": {"attachmentPolicy": "required"}}):
+            task = server.import_source_document(task_id, self.document(task_id, missingAttachments=["可选参考"]))
+            self.assertEqual(task["sourceRead"]["status"], "ready")
+            self.assertEqual(task["sourceRead"]["snapshot"]["method"], "desktop_import")
+            self.assertEqual(server.source_attachment_policy(task), "optional")
+            server.require_source_ready(task)
+
+    def test_legacy_reader_can_be_migrated_without_losing_confirmed_material(self) -> None:
+        task_id = self.seed_source_task()
+        before = server.import_source_document(task_id, self.document(task_id))
+        with server.mutate_task(task_id) as live:
+            live["discussion"].update({"status": "ready", "sourceRevision": before["sourceRead"]["revision"]})
+        migrated = server.configure_source_reading(task_id, {"reader": "manual_import", "attachmentPolicy": "optional"})
+        self.assertEqual(migrated["source"]["reader"], "manual_import")
+        self.assertEqual(migrated["sourceRead"]["snapshot"], before["sourceRead"]["snapshot"])
+        self.assertEqual(migrated["discussion"]["status"], "ready")
+        server.require_source_ready(migrated)
+        server.require_source_applied(migrated)
+        retried = server.prepare_source_retry(task_id)
+        self.assertEqual(retried["sourceRead"]["errorCode"], "manual_import_required")
+        self.assertNotIn("Chrome", retried["sourceRead"]["error"])
+
+    def test_complete_required_material_is_ready_but_needs_explicit_discussion(self) -> None:
+        task_id = self.seed_source_task("manual_import")
+        server.configure_source_reading(task_id, {"reader": "manual_import", "attachmentPolicy": "required"})
+        task = server.import_source_document(task_id, self.document(task_id, body="完整正文，含已读取附件的规则与数据。"))
+        server.require_source_ready(task)
+        self.assertEqual(task["sourceRead"]["status"], "ready")
+        with self.assertRaises(server.WorkflowError):
+            server.require_source_applied(task)
+        self.assertIn("附件和引用全部读取", server.source_prompt(task))
+
+    def test_configuration_is_guarded_and_does_not_start_external_reading(self) -> None:
+        task_id = self.seed_source_task("manual_import")
+        settings = {"reader": "lark_cli", "attachmentPolicy": "required"}
+        with mock.patch.object(server, "launch_job") as launch, mock.patch.object(server, "lark_cli_status", side_effect=AssertionError("configuration must not probe credentials")):
+            changed = server.configure_source_reading(task_id, settings)
+        self.assertEqual(changed["source"]["reader"], "lark_cli")
+        launch.assert_not_called()
+        for update in ({"activeJob": "ask"}, {"archivedAt": "archived"}, {"stage": "plan"}):
+            with self.subTest(update=update):
+                before = server.get_task_copy(task_id)
+                with server.mutate_task(task_id) as live:
+                    live.update(update)
+                guarded = server.get_task_copy(task_id)
+                with self.assertRaises(server.WorkflowError):
+                    server.configure_source_reading(task_id, {"reader": "manual_import", "attachmentPolicy": "optional"})
+                self.assertEqual(server.get_task_copy(task_id), guarded)
+                server.TASKS[task_id] = before
+
+    def test_configuration_rejects_invalid_policy_and_gate_bypasses_atomically(self) -> None:
+        task_id = self.seed_source_task("manual_import")
+        before = server.get_task_copy(task_id)
+        for payload in (
+            {"reader": "codex_read_only", "attachmentPolicy": "optional"},
+            {"reader": [], "attachmentPolicy": "required"},
+            {"reader": "manual_import", "attachmentPolicy": "skip"},
+            {"reader": "manual_import", "attachmentPolicy": "required", "command": "anything"},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(server.WorkflowError):
+                server.configure_source_reading(task_id, payload)
+            self.assertEqual(server.get_task_copy(task_id), before)
+
+    def test_lark_required_policy_cannot_lose_host_reader_attachment_gaps(self) -> None:
+        task_id = self.seed_source_task("lark_cli")
+        server.configure_source_reading(task_id, {"reader": "lark_cli", "attachmentPolicy": "required"})
+        material = {**self.document(task_id), "missingAttachments": ["需求图片"], "rawResults": {}}
+        result = {"status": "ready", "document": self.document(task_id), "errorCode": "", "error": ""}
+        with mock.patch.object(server.lark_source, "fetch_document", return_value=material), mock.patch.object(server, "run_codex_structured", return_value=(result, "reader-thread")) as inspect:
+            server.source_read_job(task_id)
+        task = server.get_task_copy(task_id)
+        self.assertEqual(task["sourceRead"]["snapshot"]["coverage"], "complete")
+        self.assertEqual(task["sourceRead"]["snapshot"]["missingAttachments"], ["需求图片"])
+        self.assertEqual(task["sourceRead"]["errorCode"], "attachments_required")
+        self.assertIn("当前任务要求附件和引用全部读取", inspect.call_args.args[2][-1])
 
     def test_blocked_read_prevents_discussion_plan_direct_and_approval(self) -> None:
         task_id = self.seed_source_task()
@@ -133,7 +317,7 @@ class SourceReadFlowTests(unittest.TestCase):
         self.assertEqual(launch.call_args.args[:2], (task_id, "discussion"))
         prompt = server.source_prompt(task)
         self.assertIn("外部参考文档", prompt)
-        self.assertIn("用户允许仅依据已保存正文继续", prompt)
+        self.assertIn("用户允许不读取附件和引用文档", prompt)
 
     def test_complete_import_persists_revisions_and_preserves_original_session(self) -> None:
         task_id = self.seed_source_task()
@@ -216,7 +400,7 @@ class SourceReadFlowTests(unittest.TestCase):
         launch.assert_not_called()
         task = server.get_task_copy(task_id)
         self.assertEqual(task["sourceRead"]["status"], "blocked")
-        self.assertEqual(task["sourceRead"]["errorCode"], "desktop_import_required")
+        self.assertEqual(task["sourceRead"]["errorCode"], "manual_import_required")
         self.assertEqual(task["sourceRead"]["snapshot"], before["sourceRead"]["snapshot"])
         self.assertEqual(task["sourceRead"]["revision"], before["sourceRead"]["revision"])
         self.assertEqual(task["discussion"], before["discussion"])

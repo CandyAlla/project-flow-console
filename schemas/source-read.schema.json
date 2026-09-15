@@ -19,11 +19,11 @@
               "items": { "type": "string", "minLength": 1, "maxLength": 500 }
             },
             "missingAttachments": {
-              "description": "Unread optional attachments and document references. Preserve the list; these do not block readiness or make body coverage partial.",
+              "description": "Unread attachments and document references. Preserve the list; the task attachment policy determines whether these block readiness.",
               "type": "array", "maxItems": 200,
               "items": { "type": "string", "minLength": 1, "maxLength": 500 }
             },
-            "coverage": { "type": "string", "enum": ["complete", "partial"], "description": "Coverage of the main document body and sections only. Unread attachments or references are optional and do not make this partial." }
+            "coverage": { "type": "string", "enum": ["complete", "partial"], "description": "Coverage of the main document body and sections only. Unread attachments or references do not make this partial; readiness is evaluated separately using the task attachment policy." }
           },
           "required": ["title", "url", "body", "sections", "missingSections", "missingAttachments", "coverage"],
           "additionalProperties": false

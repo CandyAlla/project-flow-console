@@ -136,16 +136,31 @@ codex --version
 
 Codex App 是可选项。没有安装 Codex App 时，仍可使用基于 `codex exec` 的标准流程。
 
-### 可选：读取飞书需求文档
+### 可选：读取链接需求文档
 
-飞书链接先进入独立的文档读取步骤，保存正文并确认章节覆盖后，再手动开始讨论。可选择以下方式：
+链接需求可先保存正文、核对覆盖和附件策略，再手动开始讨论。默认情况下，飞书 / Lark 链接采用正文导入，普通公开链接由后台 Codex 在讨论中直接只读访问。
 
-- **Chrome 桌面读取**：在现有 Codex 桌面任务中读取，再导入正文并确认覆盖。当前后台 Chrome 通道尚未验证，安装扩展或浏览器已登录不代表控制台能自动调用。
-- **官方 Lark CLI**：安装 `lark-cli` 及 `lark-shared`、`lark-wiki`、`lark-doc` Skills，并完成当前用户的飞书授权。控制台检查 CLI、Skills 和用户授权均可用后，才开放该选项。
+- **通用正文导入**：从有权限的浏览器、文档工具或其他渠道获取正文，再导入并核对覆盖；无需 Chrome、插件或 Codex 桌面。旧 `chrome_mcp` 任务继续支持导入。控制台没有实现后台自动 Chrome 读取。
+- **官方 Lark CLI**：安装 `lark-cli` 并完成当前用户的飞书授权，可自动读取支持的飞书 / Lark 文档链接。可用性以可执行文件和 `user` 授权为准；`lark-shared`、`lark-wiki`、`lark-doc` Skills 缺失仅显示诊断提示。
 
 Lark CLI 由服务进程直接调用，需能在启动控制台的用户及环境下访问本机凭据。可在同一启动终端检查 `lark-cli --version` 和 `lark-cli auth status --json`；若控制台找不到 CLI，可设置 `PROJECT_FLOW_LARK_CLI_BIN` 为可执行文件的绝对路径后重启服务。状态检查通过仍需实际文档权限，内嵌表格还可能需要表格只读权限。
 
-读取成功后，后台 Codex 仅核验已保存材料的正文与章节覆盖。未读附件和引用会保留记录，不阻止正文完整的材料进入讨论。Codex 连接与 Lark 凭据的区别见 [Codex 连接配置](codex-connections.md#文档读取的环境边界)。
+读取成功后，后台 Codex 仅核验已保存材料的正文与章节覆盖。附件默认可选，未读附件和引用保留提示；任务选择附件必读时，必须补齐全部未读项才能继续。讨论阶段空闲时可显式切换导入 / Lark CLI 或调整附件策略；切换读取方式须重新读取或保存，调整策略会重新判断已存材料是否就绪。Codex 连接与 Lark 凭据的区别见 [Codex 连接配置](codex-connections.md#文档读取的环境边界)。
+
+项目可在 Profile 增加以下可选默认值，新任务仍可覆盖：
+
+```json
+{
+  "sourceReading": {
+    "defaultReader": "auto",
+    "attachmentPolicy": "optional"
+  }
+}
+```
+
+`defaultReader` 支持 `auto`、`manual_import`、`lark_cli`、`codex_read_only`。`auto` 对 Lark 链接选择导入，对普通公开链接选择 Codex 直接只读；附件必读时选择导入。`lark_cli` 默认值遇其他链接会回退导入；`codex_read_only` 默认值遇 Lark 或附件必读也会回退导入。用户显式选择不适用的组合会报错。配置只包含这些固定选项，不允许自定义命令或路径。
+
+这些默认值固化到新任务，旧任务不随 Profile 变更收紧；未保存附件策略的旧任务仍为 `optional`。已有独立材料步骤的任务不能改为直接只读来绕过门禁。完整配置与任务规则见 [链接文档读取](../README.md#链接文档读取)及 [Profile Schema](../skills/project-flow-setup/references/profile-schema.md#source-reading-defaults)。
 
 ## 五、下载控制台
 

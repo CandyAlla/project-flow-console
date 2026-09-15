@@ -150,9 +150,9 @@ class LarkSourceProcessTests(unittest.TestCase):
 
 
 class LarkCliStatusTests(unittest.TestCase):
-    def status(self, auth, *, returncode=0, error=""):
+    def status(self, auth, *, returncode=0, error="", version_returncode=0):
         results = [
-            subprocess.CompletedProcess([], 0, "lark-cli 1.0", ""),
+            subprocess.CompletedProcess([], version_returncode, "lark-cli 1.0", ""),
             subprocess.CompletedProcess([], returncode, json.dumps(auth), error),
         ]
         with mock.patch.object(server, "resolve_lark_cli_bin", return_value="/test/bin/lark-cli"), \
@@ -173,6 +173,12 @@ class LarkCliStatusTests(unittest.TestCase):
         self.assertTrue(status["authenticated"])
         self.assertTrue(status["ready"])
         self.assertEqual(status["errorCode"], "")
+
+    def test_broken_cli_is_unavailable_even_when_user_auth_is_present(self) -> None:
+        status = self.status({"identities": {"user": {"available": True}}}, version_returncode=1)
+        self.assertTrue(status["authenticated"])
+        self.assertFalse(status["ready"])
+        self.assertEqual(status["errorCode"], "reader_unavailable")
 
     def test_keychain_failure_has_safe_lark_guidance(self) -> None:
         status = self.status({}, returncode=1, error="keychain Get failed: keychain not initialized; credential-secret-123")

@@ -133,8 +133,8 @@ def fetch_document(url: str, call: Callable[[list[str]], dict[str, Any]]) -> dic
 
     ``call`` receives argv after the CLI executable and must return decoded JSON
     or raise SourceReadError. It must not execute arbitrary document instructions.
-    Coverage describes the document body; unread attachments remain explicit
-    notices and do not prevent discussion of the available body.
+    Coverage describes the document body; unread attachments remain explicit.
+    The caller applies the task's attachment policy to these observed gaps.
     """
     _validate_url(url)
     response = call(["docs", "+fetch", "--doc", url, "--as", "user", "--doc-format", "xml", "--detail", "full"])
@@ -221,10 +221,10 @@ def fetch_document(url: str, call: Callable[[list[str]], dict[str, Any]]) -> dic
         if tag != "sheet":
             if tag == "cite" and attrs.get("title", "").strip():
                 label = "引用文档《" + attrs["title"].strip() + "》"
-            _add(missing_attachments, label + "：未读取（附件可选）。")
+            _add(missing_attachments, label + "：未读取。")
             continue
         if not _IDENTIFIER.fullmatch(token) or not _IDENTIFIER.fullmatch(sheet_id):
-            _add(missing_attachments, label + "：无法解析表格标识，未读取（附件可选）。")
+            _add(missing_attachments, label + "：无法解析表格标识，未读取。")
             continue
         key = (token, sheet_id)
         if key in seen_sheets:

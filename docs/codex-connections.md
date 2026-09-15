@@ -52,10 +52,13 @@
 ## 文档读取的环境边界
 
 - 官方 Lark CLI 由控制台服务直接调用，以 `user` 身份读取正文和内嵌表格，使用服务继承的环境及本机飞书凭据。`backgroundConnection` 中的 Codex 目录和凭据覆盖不会应用到 Lark CLI。
-- Lark CLI 读取后，后台 Codex 连接只检查已保存材料的正文与章节覆盖，不再次访问飞书或读取认证文件。Lark 授权有效和 Codex 连接可用需要分别检查。
-- Chrome 路径需要在现有 Codex 桌面任务中读取后导入正文，并由用户确认覆盖完整；当前后台 Chrome 调用尚未验证。保存材料后，再点击“使用材料，开始讨论”或“使用材料，恢复讨论”。
+- Lark CLI 可用性检查要求可执行文件和 `user` 授权有效；`lark-shared`、`lark-wiki`、`lark-doc` Skills 缺失仅作诊断提示。Lark 读取后，后台 Codex 只检查已保存材料，不再次访问飞书或读取认证文件。Lark 授权有效和 Codex 连接可用需要分别检查。
+- 通用正文导入（`manual_import`）接受用户从有权限的渠道取得的文档内容，覆盖情况由用户核对，无需 Chrome 或 Codex 桌面。旧 `chrome_mcp` 任务兼容该流程；控制台没有新增后台自动 Chrome 读取。保存后，材料满足当前策略即可开始或恢复讨论。
+- 普通公开链接可使用 `codex_read_only`，由后台 Codex 在讨论中只读访问；飞书 / Lark 链接和附件必读任务须先通过导入或 Lark CLI 准备材料。
 
-遇到 `lark_credentials_unavailable`，检查启动服务的用户及钥匙串访问环境；遇到 `codex_auth_missing`，检查实际使用的 Codex 环境。按页面错误处理对应环节后再重试，文档读取重试会保留已保存材料和原讨论会话。
+Profile 的 `sourceReading` 只定义新任务的默认读取方式与附件策略；任务保存自己的选择，不受之后的 Profile 默认值变更影响。它不选择 Codex 连接，也不配置命令或凭据路径。默认解析、附件必读及旧任务兼容规则见 [链接文档读取](../README.md#链接文档读取)。
+
+遇到 `lark_credentials_unavailable`，检查启动服务的用户及本机凭据存储访问环境（macOS 包括钥匙串）；遇到 `codex_auth_missing`，检查实际使用的 Codex 环境。按页面错误处理对应环节后再重试，文档读取重试会保留已保存材料和原讨论会话。讨论阶段空闲时也可显式切换正文导入 / Lark CLI；切换后须重新读取或保存材料，再继续讨论。
 
 ## 独立桌面入口
 

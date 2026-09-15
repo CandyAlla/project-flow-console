@@ -21,6 +21,7 @@ class ErrorDisplayTests(unittest.TestCase):
             "escapeHTML", "formatTime", "currentStageId", "callout", "sectionError",
             "eventLogDetails", "hasSourceReadStep", "sourceReadyForDiscussion",
             "renderDiscuss", "renderDiscussionContent", "estimateProgress", "renderProgress",
+            "renderSourceConfiguration", "sourceConfigurationLocked", "isLarkLink",
         )
         functions = []
         for name in names:
