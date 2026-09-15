@@ -490,6 +490,9 @@
     .step.current { background: var(--accent-soft); color: var(--accent); }
     button.step.current:hover:not(:disabled) { background: var(--accent-soft); }
     .step.current .step-number { border-color: var(--accent); background: var(--accent); color: #fff; }
+    .step.active-stage { color: var(--accent); }
+    .step.active-stage .step-state { border-color: #b9c8f3; background: var(--accent-soft); color: var(--accent); }
+    .step.readonly-view:not(.active-stage) .step-state { border-color: var(--line-strong); background: var(--soft); color: var(--muted); }
 
     .ask-module-nav { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
     .ask-module-nav small { display: block; padding: 0 10px 5px 47px; color: var(--muted); font-size: .72rem; }
@@ -543,6 +546,32 @@
     }
 
     .workspace-header p { max-width: var(--reading); margin: 8px 0 0; color: var(--muted); }
+
+    .task-worktree-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin: -4px 0 20px;
+      padding: 12px 13px 12px 15px;
+      border: 1px solid #c5cff0;
+      border-left: 4px solid var(--accent);
+      border-radius: 9px;
+      background: #f5f7ff;
+    }
+
+    .task-worktree-banner[hidden] { display: none; }
+    .task-worktree-banner.is-ready { border-color: #b6dac8; border-left-color: var(--ok); background: #f2fbf6; }
+    .task-worktree-banner.is-error { border-color: #e1b9bd; border-left-color: var(--danger); background: #fff6f7; }
+    .task-worktree-copy { display: grid; min-width: 0; gap: 3px; }
+    .task-worktree-label { color: var(--muted); font-size: .72rem; font-weight: 750; letter-spacing: .035em; text-transform: uppercase; }
+    .task-worktree-identity { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 9px; min-width: 0; }
+    .task-worktree-name { min-width: 0; overflow-wrap: anywhere; color: #24324a; font-size: .95rem; }
+    .task-worktree-status { padding: 2px 7px; border: 1px solid #c5cff0; border-radius: 999px; color: var(--accent); font-size: .68rem; font-weight: 750; white-space: nowrap; }
+    .task-worktree-banner.is-ready .task-worktree-status { border-color: #a7d7bf; color: var(--ok); }
+    .task-worktree-banner.is-error .task-worktree-status { border-color: #d9a6ab; color: var(--danger); }
+    .task-worktree-details { overflow: hidden; color: var(--muted); font-size: .73rem; text-overflow: ellipsis; white-space: nowrap; }
+    .task-worktree-banner button { flex: 0 0 auto; min-height: 34px; padding-inline: 11px; white-space: nowrap; }
 
     .workspace-body {
       max-width: 900px;
@@ -1169,6 +1198,17 @@
     .execution-mode-card:nth-child(2) .mode-card-head em { background: var(--warning-soft); color: var(--warning); }
     .reader-mode-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
     .reader-mode-grid { margin: 10px 0; }
+    .source-read-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+    .source-read-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }
+    .source-read-fields textarea { min-height: 120px; }
+    .source-read-confirm { display: flex; align-items: flex-start; gap: 10px; padding: 14px; border: 1px solid var(--line); background: #f7faff; line-height: 1.65; cursor: pointer; }
+    .source-read-confirm input { flex: 0 0 auto; margin-top: 6px; }
+    .source-read-preview { margin: 16px 0; border: 1px solid var(--line); padding: 14px; }
+    .source-read-preview summary { font-weight: 700; cursor: pointer; overflow-wrap: anywhere; }
+    .source-read-meta { display: grid; gap: 6px; margin-top: 12px; color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+    .source-read-preview .preview { max-height: 480px; overflow: auto; }
+    .source-read-preview .preview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .source-read-summary > .hint { margin-left: 10px; }
     .review-gaps { margin: 12px 0 0; padding-left: 1.2rem; color: var(--warning); font-size: .85rem; }
 
     .knowledge-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
@@ -1642,6 +1682,9 @@
       .status-line { align-items: flex-start; }
       .status-text { min-width: 0; }
       .status-line button { flex: 0 0 auto; }
+      .task-worktree-banner { align-items: stretch; flex-direction: column; gap: 10px; }
+      .task-worktree-details { overflow-wrap: anywhere; white-space: normal; }
+      .task-worktree-banner button { width: 100%; }
       .prototype-badge { max-width: 100%; white-space: normal; }
       .source-tabs, .view-tabs { display: grid; grid-template-columns: 1fr; width: 100%; }
       .source-tabs button, .view-tabs button { width: 100%; }
@@ -1733,6 +1776,14 @@
 
       <article class="workspace" aria-live="polite">
         <div class="workspace-header">
+          <div class="task-worktree-banner" id="taskWorktreeBanner" hidden>
+            <div class="task-worktree-copy">
+              <span class="task-worktree-label">当前需求 Worktree</span>
+              <div class="task-worktree-identity"><strong class="task-worktree-name mono" id="taskWorktreeName">尚未分配</strong><span class="task-worktree-status" id="taskWorktreeStatus">待创建</span></div>
+              <span class="task-worktree-details mono" id="taskWorktreeDetails"></span>
+            </div>
+            <button class="small ghost" id="copyTaskWorktreePath" type="button">复制路径</button>
+          </div>
           <h2 id="stageTitle">选择需求接入方式</h2>
           <p id="stageDescription">可创建新需求，或填写已有需求文档、执行 Plan 与 Worktree；接入前先做只读校验。</p>
         </div>

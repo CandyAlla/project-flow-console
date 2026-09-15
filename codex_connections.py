@@ -117,6 +117,14 @@ def desktop_mode() -> str:
     return _desktop_mode(_settings())
 
 
+def background_connection() -> dict[str, str]:
+    """Describe the background selection without resolving or exposing credentials."""
+    settings = _settings()
+    mode = _selected(settings, None, False)
+    connection = settings["connections"].get(mode) or {}
+    return {"id": mode, "label": connection.get("label", mode) if mode != "default" else "默认 Codex 环境"}
+
+
 def desktop_options() -> list[dict[str, Any]]:
     """Describe desktop availability without exposing local paths or credentials."""
     settings = _settings()

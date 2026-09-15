@@ -136,6 +136,17 @@ codex --version
 
 Codex App 是可选项。没有安装 Codex App 时，仍可使用基于 `codex exec` 的标准流程。
 
+### 可选：读取飞书需求文档
+
+飞书链接先进入独立的文档读取步骤，保存正文并确认章节覆盖后，再手动开始讨论。可选择以下方式：
+
+- **Chrome 桌面读取**：在现有 Codex 桌面任务中读取，再导入正文并确认覆盖。当前后台 Chrome 通道尚未验证，安装扩展或浏览器已登录不代表控制台能自动调用。
+- **官方 Lark CLI**：安装 `lark-cli` 及 `lark-shared`、`lark-wiki`、`lark-doc` Skills，并完成当前用户的飞书授权。控制台检查 CLI、Skills 和用户授权均可用后，才开放该选项。
+
+Lark CLI 由服务进程直接调用，需能在启动控制台的用户及环境下访问本机凭据。可在同一启动终端检查 `lark-cli --version` 和 `lark-cli auth status --json`；若控制台找不到 CLI，可设置 `PROJECT_FLOW_LARK_CLI_BIN` 为可执行文件的绝对路径后重启服务。状态检查通过仍需实际文档权限，内嵌表格还可能需要表格只读权限。
+
+读取成功后，后台 Codex 仅核验已保存材料的正文与章节覆盖。未读附件和引用会保留记录，不阻止正文完整的材料进入讨论。Codex 连接与 Lark 凭据的区别见 [Codex 连接配置](codex-connections.md#文档读取的环境边界)。
+
 ## 五、下载控制台
 
 建议将工具克隆到独立的 `tools` 目录，不要放进目标项目仓库：
@@ -326,6 +337,10 @@ python3 server.py --port 4318
 cd ~/Developer/tools/dev-conductor
 git pull --ff-only
 ```
+
+更新代码后，等待后台任务结束，正常停止并重新启动 Hub 或单项目服务，再刷新页面。重复点击 `start.command` 会复用已运行服务，不会替它加载新代码；修改 `CODEX_HOME`、CLI 路径或其他启动环境变量，也需要从目标环境重新启动服务。Codex 独立连接的配置生效规则见 [Codex 连接配置](codex-connections.md)。
+
+如果已保存的文档材料可继续讨论，页面却仍显示旧提示，先完整刷新页面（macOS 为 `⌘R`）核对当前状态。导入表单中尚未保存的草稿会随刷新丢失，应先保存。
 
 本机 Profile、任务状态和上传截图默认不会进入 Git：
 

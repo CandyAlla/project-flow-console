@@ -70,6 +70,13 @@ class CodexConnectionTests(unittest.TestCase):
     def write_settings(self) -> None:
         self.settings_path.write_text(json.dumps(self.settings), encoding="utf-8")
 
+    def test_background_description_keeps_legacy_api_without_reading_credentials(self) -> None:
+        self.state_path.write_text(json.dumps({"homes_ready": True, "active": "chatgpt"}))
+        with mock.patch.object(connections, "_credential", side_effect=AssertionError("credentials must not be loaded")):
+            self.assertEqual(connections.background_connection(), {"id": "api", "label": "API 登录版"})
+        self.settings_path.unlink()
+        self.assertEqual(connections.background_connection(), {"id": "default", "label": "默认 Codex 环境"})
+
     def test_api_overrides_are_toml_scalars_and_credentials_stay_in_child_environment(self) -> None:
         original = ["/bin/codex", "exec", "--json", "prompt"]
         with mock.patch.dict(os.environ, {"CODEX_HOME": "/original/home", "OPENAI_API_KEY": "old-secret", "TEST_CODEX_API_KEY": "old-key"}):

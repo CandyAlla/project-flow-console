@@ -2,13 +2,15 @@
 
 > **AI 开发指挥台 · 从需求到可信提交**
 
-> [本机部署指南与目录选择策略](docs/local-deployment.md) · [共享 Memory Hub 与 Codex Plugin](docs/memory-hub.md)
+> [本机部署指南与目录选择策略](docs/local-deployment.md) · [Codex 连接配置](docs/codex-connections.md) · [共享 Memory Hub 与 Codex Plugin](docs/memory-hub.md) · [更新日志](CHANGELOG.md)
 
 DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 
 它通过 Project Profile 适配不同 Git 项目，把下面这些原本散落在对话、终端和文档里的步骤，收拢成一条可恢复、可人工审批的工作流：
 
 > 需求输入 → 轻量执行单或完整讨论 / Plan → Git Worktree → 快速修改或标准执行 → 人工验收 → Commit → Bug 返修 → AI 沉淀审核
+
+飞书 / Lark 链接需求先在讨论页完成独立的文档读取或正文导入，确认正文覆盖后，再开始或恢复讨论。
 
 每条任务还提供独立的 **Ask · 只读问答** 模块，可以随时询问当前实现、状态来源、相关文件和修改影响；Ask 不属于流程阶段，不会修改文件或改变任务状态。
 
@@ -37,11 +39,13 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 ## 主要能力
 
 - 输入网页链接、上传文档或直接粘贴需求内容。
+- 飞书 / Lark 链接先保存原文和章节覆盖，再进入讨论；未读附件单独提示，读取失败可单独重试。
 - 新需求的 Worktree 基准从 Profile 主仓库实时读取，以分组下拉框展示本地分支和已有远端跟踪分支；不会自动 Fetch。
 - 明确的小改动可选“轻量直改”，本地生成最小执行单并跳过 discussion、完整 Plan Agent 和逻辑 HTML。
 - 模糊、跨模块或高风险需求保留只读 discussion / ask-first，再生成完整执行 Plan。
-- 同时输出 Markdown Plan 和自包含的逻辑验收 HTML。
+- 同时输出 Markdown Plan 和自包含的逻辑验收 HTML；HTML 自动绘制节点连线蓝图，展示需求主流程、判断条件与异常/回退分支，并与验收项对应。
 - 创建 Worktree 前先展示真实 dry-run；也可以接入已有 Worktree。
+- 任务顶部持续显示 Worktree 名称、状态、分支和路径，并支持复制路径；非当前流程阶段只允许回看。
 - 项目级 Worktree 管理：从任务队列打开“清理 Worktree”，查看当前仓库的 linked Worktree；只允许清理位于 Profile `worktreesRoot`、Git 状态干净且未被未归档任务占用的目录。清理使用 `git worktree remove`，不使用 `--force`，不删除分支。
 - 每个需求可绑定一个独立的 Codex App 人工聊天；默认沿用现有 Codex 环境，也可按需配置单个或多个连接，打开时沿用绑定方式。
 - 快速修改复用后台执行 Thread，一轮完成实现和自检；人工聊天与后台执行隔离，避免多客户端争用同一个 writer。
@@ -73,8 +77,8 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 
 可选：
 
-- Node.js：只在执行 `app.js` 语法检查时需要。
-- Chrome MCP / `$chrome:control-chrome`：读取需要登录态的飞书或 Lark 文档时需要。
+- Node.js：用于 `app.js` 语法检查和部分前端逻辑测试。
+- Codex 桌面的 Chrome 插件：在已有桌面任务中读取需要登录态的飞书文档，再将完整正文导入控制台；后台 Chrome 自动调用尚未验证。
 - 官方 [Lark CLI](https://github.com/larksuite/cli) 与 `lark-shared`、`lark-wiki`、`lark-doc` Skills：通过飞书开放平台接口读取 Wiki / 文档时需要。
 - 项目 Skills：Profile 中引用的 Skill 必须已能被 Codex 发现。
 
@@ -86,6 +90,9 @@ DevConductor 是一个运行在本机的、多项目 AI 开发指挥台。
 DevConductor/
 ├── hub.py                         # 多项目 Hub、Worker 路由与全局并发门禁
 ├── server.py
+├── source_reading.py               # 正文快照校验、覆盖门禁与读取错误分类
+├── lark_source.py                  # Lark 原文及内嵌表格解析
+├── codex_connections.py            # 后台与桌面 Codex 连接配置
 ├── memory_hub.py                  # 可独立部署的共享记忆 HTTP 服务
 ├── memory_client.py               # 工作流侧 Memory Hub 客户端
 ├── app.js
@@ -94,6 +101,8 @@ DevConductor/
 ├── profiles/
 │   └── example.json                  # 不含个人路径的通用 Profile 模板
 ├── schemas/                          # Codex 结构化输出协议
+├── docs/                             # 部署、连接与共享记忆说明
+│   └── examples/plan-blueprint.html   # Plan 逻辑蓝图样式示例
 ├── scripts/
 │   └── create_git_worktree.py        # 通用 Git Worktree provider
 ├── skills/
@@ -107,6 +116,7 @@ DevConductor/
 
 ```text
 .runtime/<project-id>/tasks/
+.runtime/<project-id>/tasks/<task-id>/source/  # 正文版本快照与 Lark 原始读取结果
 .runtime/hub/projects.json         # 工具目录外 Profile 的本机路径引用
 .runtime/hub/logs/                 # 各项目 Worker 日志
 .runtime/hub/job-slots/            # 跨项目并发锁
@@ -298,6 +308,7 @@ python3 hub.py
 | 阶段 | 发生什么 | 写入边界 |
 |---|---|---|
 | 需求输入 | 输入链接、文件、正文，或接入已有文档和 Worktree | 上传文件仅进入本地任务目录 |
+| 文档读取（讨论前置） | 飞书 / Lark 链接先读取或导入原文，核对正文和章节覆盖；保存后单独开始讨论 | 正文、覆盖记录和原始接口结果仅保存到本地任务目录 |
 | 讨论澄清 | 标准需求由 Codex 读取项目事实并提出 1–3 个高返工问题；轻量直改跳过 | 严格只读 |
 | Plan 验收 | 标准需求生成 Markdown Plan 和逻辑 HTML；轻量直改本地生成最小执行单 | 服务落地草案，不实施代码 |
 | Worktree | 先预览，再创建或绑定隔离 Worktree | 需要单独点击批准 |
@@ -309,6 +320,8 @@ python3 hub.py
 | Ask | 基于当前任务、Plan、持久记忆和 Worktree 回答实现问题 | 严格只读，不修改文件，不改变流程阶段 |
 
 任务在后台运行时可以切换查看其他需求。服务重启后，进行中的操作会标记为中断，已有文档和 Worktree 改动会保留，可从对应阶段重试。
+
+左侧导航区分“当前”阶段与只读回看。回看非当前阶段时，输入和执行入口会锁定，可点击“返回当前阶段”继续处理；返修使流程退回执行时，页面会跟随实际阶段。任务顶部的 Worktree 信息栏可用于确认本次执行目录和分支，路径生成后即可复制。
 
 任务队列顶部的“开启任务通知”会请求浏览器系统通知权限。通知默认关闭；只有用户授权后才启用。控制台页面需要保持打开，系统通知才会持续工作；页面处于前台时只显示 Toast，后台时才弹系统通知，多标签页会通过本地租约避免重复提醒。
 
@@ -361,7 +374,7 @@ Worktree 已准备完成且目录有效时，人工聊天连接该 Worktree；�
 - 不自动 Push 或 Merge。
 - 标准流程的 Code Review 采用“无新进展超时 + 绝对上限”；有命令、消息或检查事件时自动续期。
 
-快速模式只是省去第二个独立 Review，不会把“未 Review”伪装成“Review 通过”。用户停止快速任务时，服务只中断当前需求的 Turn，不会结束其他需求共享的 App Server 进程。
+快速模式只是省去第二个独立 Review，不会把“未 Review”伪装成“Review 通过”。用户停止快速任务时，服务中断当前需求的 Turn，并在收尾时关闭该轮独立 App Server；其他任务继续运行。
 
 已有 `.runtime`、任务、Worktree 以及 discussion / execution / review / ask session 会在加载时兼容迁移；不使用快速模式时，原有标准流程行为保持不变。
 
@@ -384,6 +397,22 @@ python3 server.py
 ```
 
 Review 超时只会中断 Review，不会回滚实施结果或 Worktree 改动。页面会保留“继续上次 Code Review”入口：如果 Git 状态没有变化，则续接上次 Review；如果状态发生变化，则自动放弃旧 Review 会话并重新读取当前范围。
+
+人工验收返修若停在“执行已部分完成”，且已有人工验收清单，可以选择：
+
+- 继续现有修改并完成自检：从当前 Git Diff 和断点补齐剩余工作。
+- 接受当前断点，返回人工验收：等待执行停止后，点击此按钮并确认。本轮自动自检仍视为未完整结束，Review 标记为 `skipped`；原验收勾选会保留，但验收通过状态会重置，仍需完成门禁并再次确认。
+
+普通执行断点或缺少验收清单时不提供“接受当前断点”入口。提交人工验收前，页面会先读取最新任务状态；如果任务已回到执行中，则刷新到当前阶段，等待执行结束后再验收。
+
+Ask 只读问答默认连续 120 秒没有新进度才停止；持续有命令、消息或检查事件时自动续期，默认绝对上限为 600 秒。无进度超时可配置为 60–600 秒，绝对上限可配置为 300–1800 秒，且不低于无进度超时。Ask 禁用子代理，并要求最多执行 8 次有明确路径范围的只读检查，优先使用当前任务记忆和最近变更文件。失败或超时后会解除旧 Ask 会话绑定，下一次提问从干净会话开始：
+
+```bash
+PROJECT_FLOW_ASK_TIMEOUT=120 \
+PROJECT_FLOW_ASK_HARD_TIMEOUT=600 \
+PROJECT_FLOW_PROFILE="$PWD/profiles/my-project.json" \
+python3 server.py
+```
 
 沉淀提炼也采用两级超时：默认连续 600 秒没有新进度才停止；有命令、消息或检查事件时自动续期，单轮绝对上限为 1800 秒。可单独配置无进度超时（120–1800 秒）和绝对上限（600–3600 秒）：
 
@@ -523,10 +552,25 @@ python3 server.py
 
 当输入 `feishu.cn`、`larksuite.com` 或 `larkoffice.com` 链接时，输入区会显示两种可选读取方式：
 
-- `Chrome 登录态`（默认）：通过 `$read-feishu-doc` 与 `$chrome:control-chrome` 复用当前 Chrome 登录态只读打开页面，无需配置飞书应用。读取时核对最终 URL、标题和访问状态，对照目录补读虚拟化/懒加载章节，并保留正文、表格、列表、代码块和警告；无法覆盖的章节会明确标记。
-- `官方 Lark CLI`：通过 `$lark-shared`、`$lark-wiki`、`$lark-doc` 和飞书开放平台接口读取。页面结构变化不会影响接口读取，但首次需要安装、配置应用并完成用户授权。
+- `Chrome 桌面读取`（默认）：先在已有 Codex 桌面任务中用 Chrome 读取精确链接，再导入标题、完整正文和正文覆盖情况。控制台提供可复制的只读读取提示。需对照目录补读虚拟化/懒加载章节，并保留正文中的表格、列表和代码块；附件可不读取，记录未读项即可。仅安装扩展或登录账号不能证明后台可调用，状态保持“未验证”。
+- `官方 Lark CLI`：支持上述站点的 `/docx/` 和 `/wiki/` 文档链接。控制台服务使用现有飞书用户授权，执行固定的 `docs +fetch` 读取原文，并对可解析的内嵌表格尝试 `sheets +csv-get`；未取得的附件和引用会保留记录，不阻断完整正文进入讨论。Codex 在只读沙箱中检查已保存的正文覆盖，不再在沙箱内访问钥匙串。首次需要安装、配置应用并完成用户授权。
 
-Lark CLI、三个只读 Skills 或授权任一未就绪时，该读取器会在界面中禁用，不影响 Chrome MCP 和其他需求来源。按官方 AI Agent 快速开始完成一次配置：
+上述飞书 / Lark 链接任务先进入文档读取步骤，读取后展示正文预览、原始链接、读取时间、正文章节覆盖情况和未读附件记录，再由用户开始或恢复 Ask-first。正文非空、覆盖完整且没有缺失正文章节时即可继续；未读附件不会阻断讨论或规划。读取完成页与讨论页会明确提示附件尚未读取，本次讨论仅依据已保存内容，不把附件内容视为已知事实。
+
+选择 Chrome 桌面读取时：
+
+1. 点击“复制桌面只读读取提示”，粘贴到已有 Codex 桌面任务中读取精确链接。
+2. 填写文档标题、完整正文、已读章节、缺失正文章节和未读附件；对照原文后确认正文及章节覆盖完整。
+3. 点击“保存正文与覆盖情况”。未保存草稿只在当前页面内存中，刷新或关闭页面会丢失；也可以先保存未完整的正文，稍后补齐。
+4. 材料就绪后，点击“使用材料，开始讨论”或“使用材料，恢复讨论”。桌面导入的正文完整性由用户确认，不代表系统重新核验了网页或附件。
+
+选择 Lark CLI 时，创建任务后自动开始读取与覆盖核验，材料就绪后同样需要点击“使用材料”才会开始讨论。页面展示后续讨论使用的后台连接名称，桌面聊天的连接选择不会改变它。后台 Codex 认证与飞书用户授权分别检查，详见 [连接配置与读取环境](docs/codex-connections.md)。
+
+正文最多 240000 个字符；每次保存生成任务目录下的 `source/document-<revision>.md`，快照元数据保存在 `task.json`。Lark 原始读取结果另存为 `source/lark-read-<id>.json`。后续 Discussion 和 Plan 使用同一份正文文件并核对 SHA-256，不重复在线读取，也不切换后台连接或迁移旧讨论会话。
+
+读取失败时只重试读取步骤。Lark 本机钥匙串访问失败、Codex 认证缺失、插件加载失败、文档站点登录及权限不足分别报告，不再转成需求澄清问题。预检必须确认飞书 user 身份可用，只有 bot 可用时不能开启读取。若补读内嵌表格遇到 `sheets:spreadsheet:read` 权限缺失，会保留正文并记录未读项，不自动扩大权限。图片、画板、Base、内嵌表格等附件未读取或未读完整，不影响使用已完整读取的正文继续讨论；正文被截断、正文为空或正文章节缺失仍会阻断讨论和规划。显式重新读取会暂停使用旧材料；确认新正文后恢复原讨论会话。新正文必须先经过讨论，才能用于生成 Plan。原始接口结果保存在任务目录；正文不会作为命令行参数传入，也不会被模型摘要替换。
+
+Lark CLI、三个只读 Skills 或授权任一未就绪时，该读取器会在输入界面中禁用，不影响 Chrome 桌面导入和其他需求来源。若提交时或读取过程中失效，任务仍保留，可在恢复环境后单独重试读取。按官方 AI Agent 快速开始完成一次配置：
 
 ```bash
 npx @larksuite/cli@latest install
@@ -538,7 +582,7 @@ lark-cli auth status
 
 也可以通过 `PROJECT_FLOW_LARK_CLI_BIN` 指定 `lark-cli` 的绝对路径。授权链接必须由用户本人打开确认，不要把 `appSecret`、access token 或 refresh token 填入控制台。
 
-两种读取方式都被限制为需求读取：不会编辑、评论、分享、移动或上传内容，也不会在 discussion 中自动扩大授权。如果读取器未连接、未登录、缺少只读权限或无法访问文档，任务会返回明确阻塞；此时可以切换另一种读取方式，或改用上传文档、粘贴正文。
+两种读取方式都被限制为需求读取：不会编辑、评论、分享、移动或上传飞书内容，也不会自动扩大授权或切换读取方式。导入正文只写本地任务材料。需要选择另一种读取方式时新建相应需求，原任务和已保存材料保留。
 
 ## Git 安全边界
 
@@ -586,14 +630,34 @@ python3 -m unittest discover -s tests -v
 ```bash
 node --check app.js
 python3 -m py_compile \
+  hub.py \
   server.py \
+  codex_connections.py \
+  source_reading.py \
+  lark_source.py \
   scripts/create_git_worktree.py \
   skills/project-flow-setup/scripts/configure_project.py
 ```
 
 测试覆盖控制器门禁、任务队列、归档恢复、Git 指纹、人工验收、Commit、返修、后台执行 Thread 复用、Codex App 人工聊天隔离、快速模式、旧任务迁移、Profile 校验、配置脚本，以及通用 Worktree provider。
 
+文档读取测试覆盖正文与来源校验、附件可选、固定 CLI 命令、取消与超时、讨论恢复及规划门禁；另有 Ask 会话恢复、具体错误展示和返修断点验收测试。Lark / Codex 读取使用模拟结果，前端测试检查界面逻辑；这些测试不替代真实账号、钥匙串和浏览器端到端验收。
+
 ## 常见问题
+
+### HTML 文档支持蓝图绘制吗？
+
+标准需求的 Plan 生成会要求 HTML 包含内联 SVG 逻辑蓝图。默认采用暖米白文档与深森林绿点阵、大网格画布；紧凑矩形节点包含状态小标签、职责标题和 1–2 行说明，按实际阶段、职责归属或前后关系分区，以正交连线、箭头和分支标签说明关系，避免大菱形流程图。图下提供完整文字等价说明，以及节点职责、边界和对应验收项。
+
+蓝图支持离线查看；320px 窄屏下正文不横向溢出，蓝图可单独原生滚动，打印使用白底完整图。HTML 预览的 CSP 禁止脚本，因此只使用可用的原生控件和锚点，不添加无效的缩放、拖拽或全屏按钮，不需要安装图表库。
+
+可直接打开 [蓝图样式示例](docs/examples/plan-blueprint.html) 查看效果；示例展示控制台的方案验收过程，实际生成时绘制的是各自需求的业务逻辑。更新服务后，新增的标准 Plan 生成会采用这套要求；已落地的 HTML 不会自动改写。轻量直改仍跳过完整 Plan 和 HTML。
+
+### 正文已保存，页面仍提示无法讨论怎么办？
+
+先确认保存的材料显示正文覆盖完整、没有缺失正文章节。未读附件本身不会阻断讨论。若服务已更新且材料已经就绪，但旧标签页仍显示过时提示，先保存导入草稿，再刷新页面（macOS：`⌘R`），然后点击“使用材料”；重新读取文档不会更新旧页面中的脚本。
+
+若仍有读取错误，展开“查看真实状态记录”核对具体原因。Codex 认证缺失、Lark 钥匙串访问失败和文档权限不足需要分别处理，不能仅凭“读取失败”判断为飞书未登录。
 
 ### 为什么最多只有八个后台任务？
 
@@ -607,13 +671,19 @@ python3 -m py_compile \
 
 在。任务记录位于 `.runtime/<project-id>/tasks`。重启时正在运行的阶段会变成 `interrupted`，已有 Worktree 改动不会被清理。
 
-### 如何配置 Codex 连接？
+### Codex 提示缺少环境变量，反复重试仍失败怎么办？
 
 未配置连接文件时，后台和人工聊天沿用服务启动时的 Codex 环境，界面只显示默认环境，不提供无效的登录切换选项。
 
 需要单独配置后台或桌面连接时，可使用 `.runtime/codex-connections.json` 的 v2 格式。连接可以只有一条，也可使用多个自定义 ID；`backgroundConnection` 单独决定后台连接，桌面仅展示配置了打开方式的连接。已有的双入口配置通过兼容适配器继续支持。配置示例、凭据处理及入口要求见 [Codex 连接配置](docs/codex-connections.md)。
 
 人工聊天保存实际连接 ID，再次打开沿用绑定；连接不可用时显示原因，不自动改用另一个账号。凭据只注入对应子进程，不写入任务记录或日志。
+
+如果错误包含 `Missing environment variable`，请检查 Codex 当前 provider 的 `env_key`，并确保启动 DevConductor 的进程已导出这个变量。Hub 启动项目 Worker 时继承自身环境，Worker 再将环境传给 Codex；在另一个终端或 Codex App 中配置变量不会更新已经运行的 Hub。
+
+等后台任务结束后，停止旧服务，再从已配置该变量的终端运行 `./start.command`，刷新页面后重试。旧服务仍在时，`start.command` 只会打开现有页面。密钥应通过环境变量提供，不要填进需求、Profile 或任务日志。具体配置见 [Codex 官方配置参考](https://developers.openai.com/codex/config-reference/)。
+
+控制台会保留 Codex JSON 失败事件及 stderr 的具体原因；失败后仍可展开“查看真实状态记录”查看该阶段日志。
 
 ### 快速模式为什么更快？
 

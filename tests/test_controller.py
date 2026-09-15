@@ -627,7 +627,10 @@ class ControllerTests(unittest.TestCase):
             "plan": {"finalPath": "/tmp/plan.md", "markdown": "# Plan"},
             "paths": {},
             "worktree": {"status": "ready", "path": str(self.repo), "branch": "main"},
-            "execution": {"status": "complete", "result": {}, "review": {}, "logs": []},
+            "execution": {
+                "status": "complete", "result": {}, "review": {}, "logs": [],
+                "roundChangedFiles": ["Assets/Scripts/DebugPanel.cs"],
+            },
             "verification": {"approved": False},
             "git": {"committed": False},
             "bugfix": {"status": "idle"},
@@ -647,11 +650,60 @@ class ControllerTests(unittest.TestCase):
         command = run_codex.call_args.args[2]
         self.assertIn("--sandbox", command)
         self.assertIn("read-only", command)
+        self.assertEqual(command[command.index("--disable") + 1], "multi_agent")
+        prompt = command[-1]
+        self.assertIn("Assets/Scripts/DebugPanel.cs", prompt)
+        self.assertIn("禁止启动、委派或等待任何子代理", prompt)
+        self.assertIn("最多执行 8 次", prompt)
+        self.assertTrue(run_codex.call_args.kwargs["progress_timeout"])
+        self.assertEqual(run_codex.call_args.kwargs["hard_timeout_seconds"], server.ASK_HARD_TIMEOUT_SECONDS)
         task = server.get_task_copy(task_id)
         self.assertEqual(task["stage"], "verify")
         self.assertEqual(task["ask"]["status"], "ready")
         self.assertEqual(task["ask"]["messages"][0]["answer"], "状态保存在任务 JSON 中。")
         self.assertEqual(task["sessions"]["ask"], "ask-thread")
+
+    def test_ask_retry_drops_failed_thread_before_starting(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000045")
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["ask"] = "failed-ask-thread"
+            task["ask"].update({"status": "error", "threadId": "failed-ask-thread", "error": "timeout"})
+
+        server.prepare_ask_request(task_id, "重新说明使用方法")
+
+        task = server.get_task_copy(task_id)
+        self.assertIsNone(task["sessions"]["ask"])
+        self.assertIsNone(task["ask"]["threadId"])
+
+    def test_ask_failure_clears_saved_thread_binding(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000046")
+        with server.mutate_task(task_id) as task:
+            task["sessions"]["ask"] = "saved-ask-thread"
+            task["ask"].update({"status": "ready", "threadId": "saved-ask-thread"})
+        message_id = server.prepare_ask_request(task_id, "这个功能怎么使用？")
+
+        with mock.patch.object(server, "run_codex_structured", side_effect=server.WorkflowError("timeout")):
+            with self.assertRaisesRegex(server.WorkflowError, "timeout"):
+                server.ask_job(task_id, message_id)
+
+        task = server.get_task_copy(task_id)
+        self.assertIsNone(task["sessions"]["ask"])
+        self.assertIsNone(task["ask"]["threadId"])
+
+    def test_ask_started_thread_is_not_persisted_before_success(self) -> None:
+        task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000047")
+
+        found = server.record_codex_event(
+            task_id,
+            "ask",
+            {"type": "thread.started", "thread_id": "incomplete-ask-thread"},
+            "ask",
+        )
+
+        task = server.get_task_copy(task_id)
+        self.assertEqual(found, "incomplete-ask-thread")
+        self.assertIsNone(task["sessions"]["ask"])
+        self.assertIsNone(task["ask"]["threadId"])
 
     def test_prepare_bugfix_rejects_stale_git_state_without_losing_commit(self) -> None:
         task_id = self.seed_task()
@@ -856,10 +908,23 @@ class ControllerTests(unittest.TestCase):
     def test_manual_verification_submit_uses_same_case_gate_as_rendering(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         submit = app_js.split("async function approveVerification", 1)[1].split("async function refreshGit", 1)[0]
-        self.assertIn("task?.execution?.result?.manual_cases || []", submit)
+        self.assertIn("latest?.execution?.result?.manual_cases || []", submit)
         self.assertIn("执行结果缺少人工验收用例，请退回执行补充后再通过。", submit)
         self.assertIn("requiredManualIndexes(cases)", submit)
         self.assertIn("allManualCasesAreGate(cases)", submit)
+
+    def test_manual_verification_refreshes_stale_page_before_submit(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        submit = app_js.split("async function approveVerification", 1)[1].split("async function refreshGit", 1)[0]
+
+        refresh = 'const latest = (await api(`/api/tasks/${taskId}`)).task;'
+        approval = 'post(`/api/tasks/${taskId}/verification`'
+        self.assertIn(refresh, submit)
+        self.assertIn(approval, submit)
+        self.assertLess(submit.index(refresh), submit.index(approval))
+        self.assertIn('latest?.activeJob || (latest?.stage !== "verify" && !bugfixVerification)', submit)
+        self.assertIn("任务已经重新进入执行，页面已刷新；执行完成后再进行人工验收。", submit)
+        self.assertIn("setTask(latest, true)", submit)
 
     def test_manual_verification_rework_persists_and_rehydrates_checks(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
@@ -1505,18 +1570,23 @@ class ControllerTests(unittest.TestCase):
                 "sourceUrl": "https://example.feishu.cn/docx/abc",
                 "baseBranch": "main",
             })
+            self.assertEqual(task["sourceRead"]["status"], "blocked")
+            with self.assertRaisesRegex(server.WorkflowError, "正文尚未完整读取"):
+                server.initial_discussion_job(task["id"])
+            server.import_source_document(task["id"], {
+                "title": "飞书策划文档", "url": task["source"]["url"], "body": "# 完整需求\n\n实际规则与交互。",
+                "sections": ["完整需求"], "missingSections": [], "missingAttachments": [], "coverage": "complete",
+            })
             payload = {"summary": "ready", "worktree_slug": "lark-document-review", "confirmed_facts": [], "assumptions": [], "questions": [], "ready_for_plan": True}
             with mock.patch.object(server, "run_codex_structured", return_value=(payload, "discussion-thread")) as run_codex:
                 server.initial_discussion_job(task["id"])
 
-        launch_job.assert_called_once()
+        launch_job.assert_not_called()
         self.assertEqual(task["source"]["reader"], "chrome_mcp")
         prompt = run_codex.call_args.args[2][-1]
-        self.assertIn("$read-feishu-doc 与 $chrome:control-chrome", prompt)
-        self.assertIn("$chrome:control-chrome", prompt)
-        self.assertIn("不要改用 curl、Web Search、其他浏览器", prompt)
-        self.assertIn("对照目录检查飞书虚拟化或懒加载内容", prompt)
-        self.assertIn("不得查看或输出 Cookie、浏览器存储、密码或 Token", prompt)
+        self.assertIn("需求材料已通过独立读取步骤准备", prompt)
+        self.assertIn("不要把连接重试当作产品澄清问题", prompt)
+        self.assertNotIn("$chrome:control-chrome", prompt)
         self.assertIn("名称必须能单独看出任务含义", prompt)
 
     def test_lark_links_can_use_ready_official_cli_in_read_only_mode(self) -> None:
@@ -1537,13 +1607,13 @@ class ControllerTests(unittest.TestCase):
                 "baseBranch": "main",
             })
 
-        prompt = server.source_prompt(task)
+        prompt = server.source_reader_prompt(task)
         self.assertEqual(task["source"]["reader"], "lark_cli")
         self.assertIn("$lark-shared、$lark-wiki 与 $lark-doc", prompt)
         self.assertIn("禁止创建、更新、覆盖、移动、分享、评论、发送消息", prompt)
         self.assertIn("不要改用 Chrome MCP", prompt)
 
-    def test_lark_cli_reader_rejects_unready_or_unknown_selection(self) -> None:
+    def test_lark_cli_reader_preserves_task_when_unready_and_rejects_unknown_selection(self) -> None:
         unavailable = {
             "installed": False,
             "authenticated": False,
@@ -1557,17 +1627,22 @@ class ControllerTests(unittest.TestCase):
             "sourceUrl": "https://example.feishu.cn/wiki/abc",
             "baseBranch": "main",
         }
-        with mock.patch.object(server, "lark_cli_status", return_value=unavailable), \
-                self.assertRaisesRegex(server.WorkflowError, "Lark CLI 暂不可用"):
-            server.create_task({**payload, "larkReader": "lark_cli"})
+        with mock.patch.object(server, "lark_cli_status", return_value=unavailable), mock.patch.object(server, "launch_job"):
+            task = server.create_task({**payload, "larkReader": "lark_cli"})
+            server.source_read_job(task["id"])
+        state = server.get_task_copy(task["id"])
+        self.assertEqual(state["sourceRead"]["status"], "blocked")
+        self.assertEqual(state["sourceRead"]["errorCode"], "reader_unavailable")
+        self.assertEqual(state["discussion"]["status"], "idle")
         with self.assertRaisesRegex(server.WorkflowError, "飞书读取方式"):
             server.create_task({**payload, "larkReader": "unknown_reader"})
 
     def test_lark_cli_status_requires_reader_skills_as_well_as_auth(self) -> None:
         command_result = subprocess.CompletedProcess(["lark-cli"], 0, "lark-cli 1.0.82", "")
+        auth_result = subprocess.CompletedProcess(["lark-cli"], 0, json.dumps({"identities": {"user": {"available": True}}}), "")
         with mock.patch.object(server, "resolve_lark_cli_bin", return_value="/opt/homebrew/bin/lark-cli"), \
                 mock.patch.object(server, "LARK_READER_SKILLS", ("definitely-missing-lark-skill",)), \
-                mock.patch.object(server, "run_command", return_value=command_result):
+                mock.patch.object(server, "run_command", side_effect=[command_result, auth_result]):
             status = server.lark_cli_status()
 
         self.assertTrue(status["installed"])
@@ -1583,9 +1658,9 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('data-lark-reader="lark_cli"', app_js)
         self.assertIn('options.hidden = !isLarkLink(event.target.value)', app_js)
         self.assertIn('larkReader: ui.larkReader', app_js)
-        self.assertIn("Chrome 登录态", app_js)
-        self.assertIn("会对照目录检查懒加载章节", app_js)
-        self.assertIn("官方 Lark CLI 正在只读获取飞书需求", app_js)
+        self.assertIn("Chrome 桌面读取", app_js)
+        self.assertIn("复制桌面只读读取提示", app_js)
+        self.assertIn("重试 Lark CLI 读取", app_js)
 
     def test_generated_html_normalizes_escaped_tag_newlines_only(self) -> None:
         html = '<!doctype html>\\n<html>\\n<head><script>const line = "\\\\n";</script>\\n</head>\\n<body>ok</body>\\n</html>'
@@ -1780,6 +1855,20 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('post("/api/worktrees/remove", { path })', app_js)
         self.assertIn("不删除分支", app_js)
 
+    def test_task_header_keeps_current_worktree_identity_visible(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="taskWorktreeBanner"', index_html)
+        self.assertIn('id="taskWorktreeName"', index_html)
+        self.assertIn('id="taskWorktreeStatus"', index_html)
+        self.assertIn('id="taskWorktreeDetails"', index_html)
+        self.assertIn('id="copyTaskWorktreePath"', index_html)
+        self.assertIn("renderTaskWorktreeBanner();", app_js)
+        self.assertIn('const name = String(worktree.name || "").trim()', app_js)
+        self.assertIn('const details = [branch ? `分支 ${branch}` : "", path || "等待生成路径"]', app_js)
+        self.assertIn('showToast("Worktree 路径已复制。")', app_js)
+
     def test_existing_asset_intake_ui_supports_plan_drop_and_worktree_select(self) -> None:
         app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
         self.assertIn('data-document-drop-zone', app_js)
@@ -1898,14 +1987,38 @@ class ControllerTests(unittest.TestCase):
         index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
 
         self.assertIn("function isCompletedStageView", app_js)
+        self.assertIn("function isReadOnlyStageView", app_js)
         self.assertIn("function activeFlowStageId", app_js)
+        self.assertIn('if (stageId === activeFlowStageId()) return false;', app_js)
         self.assertIn("function lockCompletedStageView", app_js)
         self.assertIn('ui.module === "flow" && isCompletedStage(stageId)', app_js)
-        self.assertIn('class="flow-stage-view ${completedStageView ? "completed-stage-view" : ""}"', app_js)
-        self.assertIn('if (completedStageView) lockCompletedStageView(stageContentEl)', app_js)
-        self.assertIn("已完成阶段，只读回看", app_js)
+        self.assertIn('stageId !== activeFlowStageId()', app_js)
+        self.assertIn('class="flow-stage-view ${readOnlyStageView ? "completed-stage-view" : ""}"', app_js)
+        self.assertIn('if (readOnlyStageView) lockCompletedStageView(stageContentEl)', app_js)
+        self.assertIn('completedStageView ? "已完成阶段" : "非当前阶段"', app_js)
         self.assertIn(".completed-stage-view .actions { display: none; }", index_html)
         self.assertIn("已完成阶段仅可只读回看", index_html)
+
+    def test_flow_navigation_distinguishes_active_stage_from_read_only_view(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        index_html = (SERVER_PATH.parent / "index.html").read_text(encoding="utf-8")
+        render_steps = app_js.split("function renderSteps", 1)[1].split("function callout", 1)[0]
+
+        self.assertIn("const activeStage = activeFlowStageId();", render_steps)
+        self.assertIn('const actual = item.id === activeStage;', render_steps)
+        self.assertIn('const state = actual ? "当前"', render_steps)
+        self.assertIn('readOnlyView ? "回看"', render_steps)
+        self.assertIn('actual ? \'aria-current="step"\'', render_steps)
+        self.assertIn(".step.active-stage", index_html)
+        self.assertIn(".step.readonly-view:not(.active-stage)", index_html)
+
+    def test_restored_future_stage_view_follows_current_stage_after_rework(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        set_task = app_js.split("function setTask", 1)[1].split("function summaryFromTask", 1)[0]
+
+        self.assertIn("const activeStage = activeFlowStageId();", set_task)
+        self.assertIn("requestedIndex > activeIndex", set_task)
+        self.assertIn("ui.viewStage = activeStage", set_task)
 
     def test_flow_writes_are_rejected_outside_the_current_stage(self) -> None:
         completed_task = {
@@ -2380,6 +2493,58 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("[PROMPT]", message)
         self.assertIn("try '--help'", message)
 
+    def test_structured_codex_error_prioritizes_json_and_deduplicates_stderr(self) -> None:
+        task_id = self.seed_task()
+        error_message = "Missing environment variable: `CODEX_NEWAPI_KEY`."
+        process = mock.Mock()
+        process.stdout = iter([
+            json.dumps({"type": "error", "message": error_message}) + "\n",
+            json.dumps({"type": "turn.failed", "error": {"message": error_message}}) + "\n",
+        ])
+        process.stderr = iter([error_message + "\n", "Check the configured provider environment.\n"])
+        process.wait.return_value = 1
+        output = self.root / "missing-discussion-output.json"
+
+        with mock.patch.object(server.subprocess, "Popen", return_value=process):
+            with self.assertRaises(server.WorkflowError) as context:
+                server.run_codex_structured(task_id, "execution", ["codex"], self.repo, output)
+
+        self.assertEqual(str(context.exception).splitlines(), [
+            error_message, "Check the configured provider environment.",
+        ])
+        logs = server.get_task_copy(task_id)["execution"]["logs"]
+        self.assertEqual([item["message"] for item in logs if item["kind"] == "error"], [error_message, error_message])
+
+    def test_structured_codex_reports_stdout_error_without_stderr(self) -> None:
+        for error in ({"message": "Provider is unavailable."}, {"error": {"message": "Provider is unavailable."}}):
+            with self.subTest(error=error):
+                task_id = self.seed_task()
+                process = mock.Mock()
+                process.stdout = iter([json.dumps({"type": "error", **error}) + "\n"])
+                process.stderr = iter(())
+                process.wait.return_value = 1
+
+                with mock.patch.object(server.subprocess, "Popen", return_value=process):
+                    with self.assertRaisesRegex(server.WorkflowError, "Provider is unavailable"):
+                        server.run_codex_structured(task_id, "execution", ["codex"], self.repo, self.root / "output.json")
+
+    def test_structured_codex_turn_failed_rejects_output_even_with_zero_exit(self) -> None:
+        for error in ({"message": "Request failed."}, {}):
+            with self.subTest(error=error):
+                task_id = self.seed_task()
+                process = mock.Mock()
+                process.stdout = iter([
+                    json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": '{"summary":"old result"}'}}) + "\n",
+                    json.dumps({"type": "turn.failed", "error": error}) + "\n",
+                ])
+                process.stderr = iter(())
+                process.wait.return_value = 0
+
+                with mock.patch.object(server.subprocess, "Popen", return_value=process):
+                    with self.assertRaises(server.WorkflowError) as context:
+                        server.run_codex_structured(task_id, "execution", ["codex"], self.repo, self.root / "output.json")
+                self.assertEqual(str(context.exception), error.get("message") or "Codex 返回失败事件。")
+
     def test_run_implementation_passes_images_to_new_and_resumed_codex_sessions(self) -> None:
         task_id = "00000000-0000-0000-0000-000000000042"
         server.TASKS[task_id] = {"id": task_id, "worktree": {"path": str(self.repo)}}
@@ -2697,6 +2862,72 @@ class ControllerTests(unittest.TestCase):
         task = server.get_task_copy(task_id)
         self.assertTrue(task["verification"]["approved"])
         self.assertEqual(task["stage"], "commit")
+
+    def test_accept_partial_acceptance_fix_returns_to_manual_verification(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000090"
+        server.TASKS[task_id] = {
+            "id": task_id,
+            "updatedAt": "",
+            "stage": "execute",
+            "maxStageIndex": server.STAGE_INDEX["verify"],
+            "activeJob": None,
+            "jobState": "idle",
+            "worktree": {"status": "ready", "path": str(self.repo)},
+            "execution": {
+                "status": "partial",
+                "phase": "implementation",
+                "mode": "acceptance_fix",
+                "flowMode": "fast",
+                "result": {"manual_cases": [{"title": "A"}, {"title": "B"}]},
+                "checkpoint": {"changedFiles": ["feature.cs"], "reason": "超时"},
+                "error": "达到绝对上限",
+            },
+            "verification": {"approved": False, "checks": [True, False], "revision": 6},
+            "events": [],
+        }
+
+        with mock.patch.object(server, "refresh_git_task") as refresh_git:
+            task = server.accept_partial_acceptance_fix(task_id)
+
+        refresh_git.assert_called_once_with(task_id)
+        self.assertEqual(task["stage"], "verify")
+        self.assertEqual(task["execution"]["status"], "complete")
+        self.assertEqual(task["execution"]["review"]["verdict"], "skipped")
+        self.assertEqual(task["verification"]["checks"], [True, False])
+        self.assertEqual(task["verification"]["revision"], 7)
+        self.assertEqual(task["execution"]["partialAcceptance"]["previousError"], "达到绝对上限")
+        self.assertNotIn("checkpoint", task["execution"])
+        self.assertIn("返回人工验收", task["events"][-1]["message"])
+
+    def test_accept_partial_execution_rejects_non_acceptance_fix(self) -> None:
+        task_id = "00000000-0000-0000-0000-000000000091"
+        server.TASKS[task_id] = {
+            "id": task_id,
+            "updatedAt": "",
+            "stage": "execute",
+            "activeJob": None,
+            "execution": {
+                "status": "partial",
+                "mode": "standard",
+                "result": {"manual_cases": [{"title": "A"}]},
+            },
+            "events": [],
+        }
+
+        with self.assertRaisesRegex(server.WorkflowError, "只有人工验收返修"):
+            server.accept_partial_acceptance_fix(task_id)
+
+    def test_partial_acceptance_fix_ui_has_explicit_manual_override(self) -> None:
+        app_js = (SERVER_PATH.parent / "app.js").read_text(encoding="utf-8")
+        render_execute = app_js.split("function renderExecute", 1)[1].split("function textItems", 1)[0]
+        handler = app_js.split("async function acceptPartialExecution", 1)[1].split("async function cancelActiveJob", 1)[0]
+
+        self.assertIn('section.mode === "acceptance_fix"', render_execute)
+        self.assertIn('id="acceptPartialExecution"', render_execute)
+        self.assertIn("接受当前断点，返回人工验收", render_execute)
+        self.assertIn("本轮自动自检没有完整结束", handler)
+        self.assertIn('/execute/accept-partial', handler)
+        self.assertIn('on("acceptPartialExecution", "click", acceptPartialExecution)', app_js)
 
     def test_bugfix_verification_enters_commit_without_leaving_bugfix_module(self) -> None:
         task_id = "00000000-0000-0000-0000-000000000045"
@@ -3659,17 +3890,6 @@ class ControllerTests(unittest.TestCase):
         start.assert_not_called()
         request.assert_not_called()
 
-    def test_cancel_without_app_client_does_not_start_a_server(self) -> None:
-        task_id = self.seed_execution_task()
-        server.TASKS[task_id]["activeJob"] = "execution"
-        server.ACTIVE_APP_TURNS[task_id] = ("finished-thread", "finished-turn")
-        with mock.patch.object(server, "AppServerClient") as create_client, \
-                mock.patch.object(server, "get_app_server_client") as get_client:
-            server.cancel_task(task_id)
-        create_client.assert_not_called()
-        get_client.assert_not_called()
-        self.assertIn(task_id, server.CANCEL_REQUESTED)
-
     def test_app_server_progress_extends_idle_timeout(self) -> None:
         task_id = self.seed_execution_task("00000000-0000-0000-0000-000000000083")
         payload = self.quick_result()
@@ -3954,6 +4174,17 @@ class ControllerTests(unittest.TestCase):
         get_shared_client.assert_not_called()
         client.interrupt.assert_called_once_with("app-thread-cancel", "turn-cancel")
         self.assertNotIn(task_id, server.ACTIVE_PROCESSES)
+        self.assertIn(task_id, server.CANCEL_REQUESTED)
+
+    def test_cancel_without_app_client_does_not_start_a_server(self) -> None:
+        task_id = self.seed_execution_task()
+        server.TASKS[task_id]["activeJob"] = "execution"
+        server.ACTIVE_APP_TURNS[task_id] = ("finished-thread", "finished-turn")
+        with mock.patch.object(server, "AppServerClient") as create_client, \
+                mock.patch.object(server, "get_app_server_client") as get_client:
+            server.cancel_task(task_id)
+        create_client.assert_not_called()
+        get_client.assert_not_called()
         self.assertIn(task_id, server.CANCEL_REQUESTED)
 
     def test_load_tasks_migrates_legacy_app_thread_without_changing_stage(self) -> None:

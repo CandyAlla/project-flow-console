@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "properties": {
+    "status": { "type": "string", "enum": ["ready", "blocked"] },
+    "document": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "url": { "type": "string", "minLength": 1 },
+            "body": { "type": "string", "minLength": 1, "maxLength": 240000 },
+            "sections": {
+              "type": "array", "maxItems": 200,
+              "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+            },
+            "missingSections": {
+              "type": "array", "maxItems": 200,
+              "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+            },
+            "missingAttachments": {
+              "description": "Unread optional attachments and document references. Preserve the list; these do not block readiness or make body coverage partial.",
+              "type": "array", "maxItems": 200,
+              "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+            },
+            "coverage": { "type": "string", "enum": ["complete", "partial"], "description": "Coverage of the main document body and sections only. Unread attachments or references are optional and do not make this partial." }
+          },
+          "required": ["title", "url", "body", "sections", "missingSections", "missingAttachments", "coverage"],
+          "additionalProperties": false
+        },
+        { "type": "null" }
+      ]
+    },
+    "errorCode": {
+      "type": "string",
+      "enum": ["", "lark_credentials_unavailable", "codex_auth_missing", "plugin_load_failed", "chrome_not_connected", "reader_unavailable", "document_login_required", "document_permission_denied", "read_incomplete", "read_failed"]
+    },
+    "error": { "type": "string" }
+  },
+  "required": ["status", "document", "errorCode", "error"],
+  "additionalProperties": false
+}

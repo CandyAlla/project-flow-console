@@ -74,8 +74,8 @@ def task_state(task: dict[str, Any]) -> str:
         return "queued" if task.get("jobState") == "queued" else "running"
     if task.get("git", {}).get("committed"):
         return "done"
-    sections = [task.get(name) for name in ("discussion", "plan", "worktree", "execution")]
-    if any(isinstance(section, dict) and section.get("status") in {"error", "interrupted"} for section in sections):
+    sections = [task.get(name) for name in ("sourceRead", "discussion", "plan", "worktree", "execution")]
+    if any(isinstance(section, dict) and section.get("status") in {"blocked", "error", "interrupted", "partial"} for section in sections):
         return "error"
     return "attention"
 

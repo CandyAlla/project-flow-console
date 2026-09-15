@@ -19,7 +19,10 @@
       "items": { "type": "string" }
     },
     "markdown": { "type": "string" },
-    "html": { "type": "string" }
+    "html": {
+      "type": "string",
+      "description": "完整、自包含且与需求和 Markdown 一致的逻辑验收 HTML。默认暖米白文档、深森林绿点阵与大网格主画布；紧凑矩形节点含状态小标签、职责标题及 1–2 行说明，按真实关系分区，以内联 SVG 正交连线、箭头及分支标签表达逻辑，避免大菱形。图下提供完整文字等价说明及节点职责、边界、对应验收项。320px 正文无横向溢出，仅蓝图容器可原生滚动；打印白底完整图。CSP 禁止脚本，不依赖脚本或远程资源，不添加无效控制按钮。"
+    }
   },
   "required": ["summary", "scope", "non_scope", "acceptance", "risks", "markdown", "html"],
   "additionalProperties": false

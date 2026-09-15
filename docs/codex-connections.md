@@ -30,7 +30,7 @@
 | 字段 | 含义 |
 | --- | --- |
 | `version` | 新配置使用 `2` |
-| `backgroundConnection` | 后台讨论、Plan、Ask、执行和 Review 使用的连接 ID；省略为 `default` |
+| `backgroundConnection` | 后台文档覆盖核验、讨论、Plan、Ask、执行和 Review 使用的连接 ID；省略为 `default` |
 | `defaultDesktopConnection` | 新聊天默认选择的连接 ID；省略为 `default` |
 | `connections` | 可为空，也可以只有一条或多条；ID 自定义，`default` 保留给默认环境 |
 | `label` | 界面显示的连接名称 |
@@ -43,9 +43,19 @@
 
 后台连接与桌面选择相互独立。例如将 `backgroundConnection` 设为 `automation`，并配置一个没有 `desktop` 的 `automation` 连接，后台就会使用它，桌面聊天仍可以使用默认环境。
 
+文档读取页面会显示后续讨论使用的后台连接名称；桌面聊天的连接选择不会改变它。这个名称来自当前配置，不代表该连接已经通过认证或完成读取。
+
 每个 App Server 进程使用启动时读取的连接配置快照。修改连接配置会影响后续启动的进程，正在执行的轮次继续使用原来的目录、凭据和模型覆盖值。`config` 不允许覆盖 `sqlite_home` 或选择其他 `profile`，目录由 `home` 明确指定。
 
 独立连接会清理继承的 API 凭据和 SQLite 目录覆盖，再注入该连接明确指定的凭据。没有凭据覆盖时，Codex 可使用其 `home` 中已有的登录配置。凭据文件无法读取或字段无效会报错，不会改用别的连接。服务不复制认证文件或聊天记录。
+
+## 文档读取的环境边界
+
+- 官方 Lark CLI 由控制台服务直接调用，以 `user` 身份读取正文和内嵌表格，使用服务继承的环境及本机飞书凭据。`backgroundConnection` 中的 Codex 目录和凭据覆盖不会应用到 Lark CLI。
+- Lark CLI 读取后，后台 Codex 连接只检查已保存材料的正文与章节覆盖，不再次访问飞书或读取认证文件。Lark 授权有效和 Codex 连接可用需要分别检查。
+- Chrome 路径需要在现有 Codex 桌面任务中读取后导入正文，并由用户确认覆盖完整；当前后台 Chrome 调用尚未验证。保存材料后，再点击“使用材料，开始讨论”或“使用材料，恢复讨论”。
+
+遇到 `lark_credentials_unavailable`，检查启动服务的用户及钥匙串访问环境；遇到 `codex_auth_missing`，检查实际使用的 Codex 环境。按页面错误处理对应环节后再重试，文档读取重试会保留已保存材料和原讨论会话。
 
 ## 独立桌面入口
 
