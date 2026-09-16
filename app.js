@@ -126,6 +126,7 @@
   const taskWorktreeDetailsEl = document.querySelector("#taskWorktreeDetails");
   const copyTaskWorktreePathEl = document.querySelector("#copyTaskWorktreePath");
   const serviceBadgeEl = document.querySelector("#serviceBadge");
+  const stopServiceButtonEl = document.querySelector("#stopServiceButton");
   const toastEl = document.querySelector("#toast");
   const taskListEl = document.querySelector("#taskList");
   const taskCountEl = document.querySelector("#taskCount");
@@ -148,6 +149,7 @@
   const worktreeManagerListEl = document.querySelector("#worktreeManagerList");
   const worktreeManagerSummaryEl = document.querySelector("#worktreeManagerSummary");
   document.querySelector("#resetButton").addEventListener("click", newTask);
+  stopServiceButtonEl?.addEventListener("click", stopLocalService);
   createTaskButtonEl.addEventListener("click", newTask);
   archiveViewButtonEl.addEventListener("click", () => {
     ui.module = "flow";
@@ -832,6 +834,33 @@
     toastTimer = window.setTimeout(() => { toastEl.hidden = true; }, error ? 5200 : 2600);
   }
 
+  async function stopLocalService() {
+    const jobState = hubMode ? hubScheduler : scheduler;
+    const activeJobs = (Number(jobState.runningJobs) || 0) + (Number(jobState.queuedJobs) || 0);
+    const runningNote = activeJobs
+      ? `\n\n当前有 ${activeJobs} 个后台任务正在执行或排队；停止服务会中止这些任务，已经保存的状态仍会保留。`
+      : "\n\n当前没有后台任务正在执行，已经保存的任务数据会保留。";
+    if (!window.confirm(`停止 ProjectFlowConsole 本地服务？${runningNote}\n\n重新使用时需要再次运行 start.command。`)) return;
+    window.clearTimeout(pollTimer);
+    stopServiceButtonEl.disabled = true;
+    stopServiceButtonEl.textContent = "正在停止…";
+    try {
+      await api(hubMode ? "/api/hub/shutdown" : "/api/shutdown", { method: "POST" });
+      token = "";
+      serviceBadgeEl.textContent = "本地服务已停止";
+      serviceBadgeEl.style.borderColor = "#d8a0a6";
+      serviceBadgeEl.style.background = "#fff0f1";
+      serviceBadgeEl.style.color = "#a2333e";
+      stopServiceButtonEl.textContent = "服务已停止";
+      showToast("本地服务已停止；重新使用时请运行 start.command。");
+    } catch (error) {
+      stopServiceButtonEl.disabled = false;
+      stopServiceButtonEl.textContent = "停止本地服务";
+      schedulePoll();
+      showToast(error.message || "无法停止本地服务。", true);
+    }
+  }
+
   function taskNotificationSetting() {
     try { return localStorage.getItem(TASK_NOTIFICATION_KEY) === "enabled"; }
     catch (_) { return false; }
@@ -1004,6 +1033,8 @@
     serviceBadgeEl.style.borderColor = health.ok ? "#92bea9" : "#d8a0a6";
     serviceBadgeEl.style.background = health.ok ? "#eaf7f1" : "#fff0f1";
     serviceBadgeEl.style.color = health.ok ? "#216e4e" : "#a2333e";
+    stopServiceButtonEl.disabled = !health.ok;
+    stopServiceButtonEl.textContent = "停止本地服务";
   }
 
   async function refreshSessionToken() {
@@ -1284,6 +1315,7 @@
       serviceBadgeEl.style.borderColor = "#d8a0a6";
       serviceBadgeEl.style.background = "#fff0f1";
       serviceBadgeEl.style.color = "#a2333e";
+      stopServiceButtonEl.disabled = true;
     }
   }
 
@@ -1300,6 +1332,8 @@
       serviceBadgeEl.style.borderColor = "#92bea9";
       serviceBadgeEl.style.background = "#eaf7f1";
       serviceBadgeEl.style.color = "#216e4e";
+      stopServiceButtonEl.disabled = false;
+      stopServiceButtonEl.textContent = "停止本地服务";
       render();
       schedulePoll();
       return;

@@ -263,14 +263,14 @@ class SourceReadFlowTests(unittest.TestCase):
         task_id = self.seed_source_task("lark_cli")
         server.configure_source_reading(task_id, {"reader": "lark_cli", "attachmentPolicy": "required"})
         material = {**self.document(task_id), "missingAttachments": ["需求图片"], "rawResults": {}}
-        result = {"status": "ready", "document": self.document(task_id), "errorCode": "", "error": ""}
-        with mock.patch.object(server.lark_source, "fetch_document", return_value=material), mock.patch.object(server, "run_codex_structured", return_value=(result, "reader-thread")) as inspect:
+        with mock.patch.object(server.lark_source, "fetch_document", return_value=material):
             server.source_read_job(task_id)
         task = server.get_task_copy(task_id)
         self.assertEqual(task["sourceRead"]["snapshot"]["coverage"], "complete")
         self.assertEqual(task["sourceRead"]["snapshot"]["missingAttachments"], ["需求图片"])
         self.assertEqual(task["sourceRead"]["errorCode"], "attachments_required")
-        self.assertIn("当前任务要求附件和引用全部读取", inspect.call_args.args[2][-1])
+        self.assertEqual(task["sourceRead"]["status"], "blocked")
+        server.run_codex_structured.assert_not_called()
 
     def test_blocked_read_prevents_discussion_plan_direct_and_approval(self) -> None:
         task_id = self.seed_source_task()
@@ -549,106 +549,82 @@ class SourceReadFlowTests(unittest.TestCase):
         self.assertEqual(launch.call_args.args[:2], (task_id, "sourceRead"))
         self.assertEqual(server.get_task_copy(task_id)["sessions"]["discussion"], "original-discussion-thread")
 
-    def test_lark_reader_session_does_not_overwrite_discussion_binding(self) -> None:
+    def test_lark_read_does_not_overwrite_discussion_binding_or_create_a_codex_session(self) -> None:
         task_id = self.seed_source_task("lark_cli")
-        document = self.document(task_id)
         before = server.get_task_copy(task_id)
-
-        def read(_task_id, operation, command, _cwd, _output, session_slot, **kwargs):
-            self.assertEqual(operation, "sourceRead")
-            self.assertEqual(session_slot, "sourceRead")
-            self.assertNotIn("resume", command)
-            self.assertIn("--sandbox", command)
-            self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
-            self.assertIn("source-read.schema.json", command[command.index("--output-schema") + 1])
-            server.record_codex_event(task_id, operation, {"type": "thread.started", "thread_id": "reader-only-thread"}, session_slot)
-            return {"status": "ready", "document": document, "errorCode": "", "error": ""}, "reader-only-thread"
-
-        with mock.patch.object(server, "run_codex_structured", side_effect=read):
-            server.source_read_job(task_id)
+        server.source_read_job(task_id)
         task = server.get_task_copy(task_id)
         self.assertEqual(task["sourceRead"]["status"], "ready")
         self.assertEqual(task["sourceRead"]["snapshot"]["method"], "automated")
-        self.assertEqual(task["sessions"]["sourceRead"], "reader-only-thread")
+        self.assertNotIn("sourceRead", task["sessions"])
         self.assertEqual(task["sessions"]["discussion"], before["sessions"]["discussion"])
         self.assertEqual(task["discussion"]["threadId"], before["discussion"]["threadId"])
         self.assertEqual(task["discussion"]["messages"], before["discussion"]["messages"])
+        server.run_codex_structured.assert_not_called()
 
-    def test_lark_reader_classifies_failures_without_echoing_credentials(self) -> None:
+    def test_lark_cli_failures_are_classified_without_echoing_credentials(self) -> None:
         task_id = self.seed_source_task("lark_cli")
         for raw, expected in (
-            ("Codex auth token is unavailable", "codex_auth_missing"),
-            ("Trusted RPC dependency must resolve within a configured trusted code path", "plugin_load_failed"),
+            ("keychain Get failed: keychain not initialized", "lark_credentials_unavailable"),
             ("Please sign in", "document_login_required"),
             ("Permission denied", "document_permission_denied"),
             ("Network request timed out", "read_failed"),
         ):
-            with self.subTest(expected=expected), mock.patch.object(server, "run_codex_structured", side_effect=server.WorkflowError(raw + " credential-secret-123")):
+            failure = server.source_reading.SourceReadError(raw + " credential-secret-123")
+            with self.subTest(expected=expected), mock.patch.object(server.lark_source, "fetch_document", side_effect=failure):
                 server.source_read_job(task_id)
             task = server.get_task_copy(task_id)
             self.assertEqual(task["sourceRead"]["status"], "blocked")
             self.assertEqual(task["sourceRead"]["errorCode"], expected)
             self.assertNotIn("credential-secret-123", json.dumps(task["sourceRead"], ensure_ascii=False))
             self.assertEqual(task["sessions"]["discussion"], "original-discussion-thread")
-
-    def test_lark_unavailable_stops_before_codex_and_structured_partial_cannot_proceed(self) -> None:
-        task_id = self.seed_source_task("lark_cli")
-        with mock.patch.object(server, "lark_cli_status", return_value={"ready": False, "message": "测试读取通道未就绪。"}):
-            server.source_read_job(task_id)
         server.run_codex_structured.assert_not_called()
+
+    def test_lark_unavailable_stops_before_fetch_and_partial_material_cannot_proceed(self) -> None:
+        task_id = self.seed_source_task("lark_cli")
+        with mock.patch.object(server, "lark_cli_status", return_value={"ready": False, "message": "测试读取通道未就绪。"}), \
+                mock.patch.object(server.lark_source, "fetch_document") as fetch:
+            server.source_read_job(task_id)
+        fetch.assert_not_called()
         self.assertEqual(server.get_task_copy(task_id)["sourceRead"]["errorCode"], "reader_unavailable")
-        result = {"status": "blocked", "document": self.document(task_id), "errorCode": "read_incomplete", "error": "最后一段未读取"}
-        with mock.patch.object(server, "run_codex_structured", return_value=(result, "reader-thread")):
+        material = {
+            **self.document(task_id), "coverage": "partial", "missingSections": ["最后一段"],
+            "rawResults": {},
+        }
+        with mock.patch.object(server.lark_source, "fetch_document", return_value=material):
             server.source_read_job(task_id)
         task = server.get_task_copy(task_id)
         self.assertEqual(task["sourceRead"]["status"], "blocked")
         self.assertEqual(task["sourceRead"]["snapshot"]["coverage"], "partial")
+        self.assertEqual(task["sourceRead"]["snapshot"]["missingSections"], ["最后一段"])
+        server.run_codex_structured.assert_not_called()
         with self.assertRaises(server.WorkflowError):
             server.continue_from_source(task_id)
 
-    def test_lark_blocked_structured_error_uses_fixed_category_guidance(self) -> None:
+    def test_complete_host_material_is_validated_and_stored_without_codex(self) -> None:
         task_id = self.seed_source_task("lark_cli")
-        result = {"status": "blocked", "document": None, "errorCode": "codex_auth_missing", "error": "credential-secret-123"}
-        with mock.patch.object(server, "run_codex_structured", return_value=(result, "reader-thread")):
+        original = self.document(task_id, title="CLI 原始标题", sections=["总览", "失败处理"])
+        material = {**original, "rawResults": {"document": {"ok": True}, "sheets": []}}
+        with mock.patch.object(server.lark_source, "fetch_document", return_value=material):
             server.source_read_job(task_id)
         task = server.get_task_copy(task_id)
-        self.assertEqual(task["sourceRead"]["errorCode"], "codex_auth_missing")
-        self.assertNotIn("credential-secret-123", task["sourceRead"]["error"])
-        self.assertNotIn("Chrome", task["sourceRead"]["error"])
-
-    def test_lark_mislabeled_keychain_error_uses_lark_guidance(self) -> None:
-        task_id = self.seed_source_task("lark_cli")
-        result = {"status": "blocked", "document": None, "errorCode": "codex_auth_missing", "error": "keychain Get failed: keychain not initialized credential-secret-123"}
-        with mock.patch.object(server, "run_codex_structured", return_value=(result, "reader-thread")):
-            server.source_read_job(task_id)
-        state = server.get_task_copy(task_id)["sourceRead"]
-        self.assertEqual(state["errorCode"], "lark_credentials_unavailable")
-        self.assertNotIn("credential-secret-123", state["error"])
-        self.assertNotIn("Codex", state["error"])
-
-    def test_host_material_reaches_readonly_coverage_check_without_body_in_argv(self) -> None:
-        task_id = self.seed_source_task("lark_cli")
-        original = self.document(task_id)
-
-        def inspect(_task_id, _operation, command, _cwd, _output, _slot, **kwargs):
-            prompt = command[-1]
-            self.assertNotIn(original["body"], prompt)
-            self.assertIn("不要再次调用 Lark CLI", prompt)
-            material_dir = Path(command[command.index("--add-dir") + 1])
-            material_path, = material_dir.glob("lark-read-*.json")
-            material = json.loads(material_path.read_text())
-            self.assertEqual(material["body"], original["body"])
-            self.assertIn("rawResults", material)
-            self.assertEqual(material_path.stat().st_mode & 0o777, 0o600)
-            return {"status": "ready", "document": {**original, "body": "模型试图缩写正文"}, "errorCode": "", "error": ""}, "reader-thread"
-
-        with mock.patch.object(server, "run_codex_structured", side_effect=inspect):
-            server.source_read_job(task_id)
-        snapshot = server.get_task_copy(task_id)["sourceRead"]["snapshot"]
+        snapshot = task["sourceRead"]["snapshot"]
+        self.assertEqual(task["sourceRead"]["status"], "ready")
+        self.assertEqual(snapshot["title"], original["title"])
         self.assertEqual(snapshot["body"], original["body"])
+        self.assertEqual(snapshot["sections"], original["sections"])
+        self.assertEqual(snapshot["missingSections"], [])
+        self.assertEqual(snapshot["reader"], "lark_cli")
+        self.assertEqual(snapshot["method"], "automated")
         self.assertEqual(snapshot["digest"], hashlib.sha256(original["body"].encode()).hexdigest())
+        self.assertEqual(server.source_snapshot_path(task).read_text(encoding="utf-8"), original["body"])
+        material_path, = (server.task_dir(task_id) / "source").glob("lark-read-*.json")
+        persisted_material = json.loads(material_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted_material, material)
+        self.assertEqual(material_path.stat().st_mode & 0o777, 0o600)
+        server.run_codex_structured.assert_not_called()
 
-    def test_host_partial_material_is_saved_and_cannot_be_overruled_by_model(self) -> None:
+    def test_host_partial_material_is_saved_and_blocks_without_codex(self) -> None:
         task_id = self.seed_source_task("lark_cli")
         material = {**self.document(task_id), "coverage": "partial", "missingSections": ["正文末段"], "missingAttachments": ["表格：缺少 sheets:spreadsheet:read"], "rawResults": {}}
         with mock.patch.object(server.lark_source, "fetch_document", return_value=material):
@@ -663,23 +639,22 @@ class SourceReadFlowTests(unittest.TestCase):
         with self.assertRaises(server.WorkflowError):
             server.continue_from_source(task_id)
 
-    def test_host_unread_attachment_is_optional_and_cannot_be_erased_by_model(self) -> None:
+    def test_host_unread_attachment_is_optional_and_preserved_without_codex(self) -> None:
         task_id = self.seed_source_task("lark_cli")
         original = self.document(task_id)
         material = {**original, "missingAttachments": ["Max SDK 接入统计：未读引用文档"], "rawResults": {}}
-        result = {"status": "ready", "document": original, "errorCode": "", "error": ""}
-        with mock.patch.object(server.lark_source, "fetch_document", return_value=material), \
-                mock.patch.object(server, "run_codex_structured", return_value=(result, "reader-thread")) as inspect:
+        with mock.patch.object(server.lark_source, "fetch_document", return_value=material):
             server.source_read_job(task_id)
         task = server.get_task_copy(task_id)
         server.require_source_ready(task)
+        self.assertEqual(task["sourceRead"]["status"], "ready")
         self.assertEqual(task["sourceRead"]["snapshot"]["missingAttachments"], material["missingAttachments"])
         self.assertEqual(task["sourceRead"]["snapshot"]["body"], original["body"])
-        self.assertIn("用户允许不读取附件和引用文档", inspect.call_args.args[2][-1])
         self.assertIn("Max SDK 接入统计", server.source_prompt(task))
         self.assertEqual(task["sessions"]["discussion"], "original-discussion-thread")
+        server.run_codex_structured.assert_not_called()
 
-    def test_host_credentials_failure_stops_before_model(self) -> None:
+    def test_host_credentials_failure_blocks_without_codex(self) -> None:
         task_id = self.seed_source_task("lark_cli")
         with mock.patch.object(server.lark_source, "fetch_document", side_effect=server.source_reading.SourceReadError("keychain Get failed: keychain not initialized")):
             server.source_read_job(task_id)
@@ -705,8 +680,7 @@ class SourceReadFlowTests(unittest.TestCase):
         stop.assert_called_once_with(process)
         timer.return_value.start.assert_called_once()
         self.assertIn(task_id, server.CANCEL_REQUESTED)
-        with mock.patch.object(server, "run_codex_structured", side_effect=server.WorkflowError("用户已停止当前任务。")):
-            server.source_read_job(task_id)
+        server.source_read_job(task_id)
         task = server.get_task_copy(task_id)
         self.assertEqual(task["sourceRead"]["status"], "interrupted")
         self.assertEqual(task["sourceRead"]["errorCode"], "cancelled")
@@ -714,6 +688,7 @@ class SourceReadFlowTests(unittest.TestCase):
         self.assertEqual(task["sourceRead"]["revision"], before["sourceRead"]["revision"])
         self.assertEqual(task["discussion"], before["discussion"])
         self.assertEqual(task["sessions"]["discussion"], before["sessions"]["discussion"])
+        server.run_codex_structured.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -161,6 +161,17 @@
 
     .prototype-badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #c27818; }
 
+    .service-controls {
+      display: flex;
+      flex: 0 0 auto;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+
+    .service-controls .prototype-badge { justify-content: center; }
+    .stop-service-button { width: 100%; }
+
     .app-shell {
       display: grid;
       grid-template-columns: 270px 226px minmax(0, 1fr);
@@ -1627,6 +1638,7 @@
 
     @media (max-width: 760px) {
       .topbar { flex-direction: column; padding-top: 26px; }
+      .service-controls { width: 100%; }
       .app-shell, .app-shell.verification-layout-active { grid-template-columns: 1fr; gap: 18px; padding-top: 20px; }
       .app-shell.hub-enabled,
       .app-shell.hub-enabled.verification-layout-active { grid-template-columns: 1fr; }
@@ -1703,7 +1715,7 @@
       html, body { background: #fff; }
       .topbar, .app-shell, footer { width: 100%; }
       .app-shell { display: block; padding-top: 24px; }
-      .project-rail, .hub-dashboard, .task-sidebar, .workflow-sidebar, .prototype-badge, .actions, .toast, .section-navigator, #resetButton { display: none !important; }
+      .project-rail, .hub-dashboard, .task-sidebar, .workflow-sidebar, .service-controls, .actions, .toast, .section-navigator, #resetButton { display: none !important; }
       .workspace { border: 0; }
       .workspace-header, .workspace-body { padding-inline: 0; }
       details { break-inside: avoid; }
@@ -1721,7 +1733,10 @@
           <p class="lede">控制台负责需求、Plan、验收和 Git 门禁；Codex App 提供独立人工聊天。人工聊天与后台快速执行 Thread 隔离，标准流程仍保留独立 Review。</p>
         </div>
       </div>
-      <span class="prototype-badge" id="serviceBadge">正在连接本地服务</span>
+      <div class="service-controls">
+        <span class="prototype-badge" id="serviceBadge">正在连接本地服务</span>
+        <button class="small danger stop-service-button" id="stopServiceButton" type="button" disabled>停止本地服务</button>
+      </div>
     </div>
   </header>
 

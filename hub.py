@@ -663,6 +663,10 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         try:
+            if path == "/api/hub/shutdown":
+                self.send_json({"ok": True, "stopping": True})
+                threading.Thread(target=self.server.shutdown, name="hub-shutdown", daemon=True).start()
+                return
             payload, body = self.read_json()
             if path == "/api/hub/projects/preview":
                 result = REGISTRY.setup_project(payload, dry_run=True)
